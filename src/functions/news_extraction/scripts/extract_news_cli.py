@@ -164,7 +164,19 @@ def print_results(result: dict, pretty: bool = False) -> None:
     print(f"\nSources processed: {result.get('sources_processed', 0)}")
     print(f"Items extracted:   {result.get('items_extracted', 0)}")
     print(f"Items filtered:    {result.get('items_filtered', 0)}")
-    print(f"Records written:   {result.get('records_written', 0)}")
+    print(f"Records to write:  {result.get('total_records', result.get('records_written', 0))}")
+    
+    # Show deduplication statistics
+    new_records = result.get('new_records', 0)
+    skipped_records = result.get('skipped_records', 0)
+    
+    if new_records > 0 or skipped_records > 0:
+        print(f"\n📊 Database Write Statistics:")
+        print(f"   • New URLs written:    {new_records}")
+        print(f"   • Duplicate URLs (skipped): {skipped_records}")
+        if new_records + skipped_records > 0:
+            skip_rate = (skipped_records / (new_records + skipped_records)) * 100
+            print(f"   • Duplicate rate:      {skip_rate:.1f}%")
 
     if result.get("dry_run"):
         print("\n⚠️  DRY RUN - No data was written to database")

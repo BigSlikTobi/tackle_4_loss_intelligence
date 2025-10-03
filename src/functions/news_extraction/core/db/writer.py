@@ -75,10 +75,12 @@ class NewsUrlWriter:
             return {"success": True, "records_written": 0}
 
         start_time = time.time()
-        logger.info(f"Starting batch upsert of {len(records)} records to {self.table_name}")
+        logger.info(f"Starting batch insert of {len(records)} records to {self.table_name}")
 
         # Process records in batches
         total_written = 0
+        total_new = 0
+        total_skipped = 0
         failed_batches = 0
         batch_count = (len(records) + self.batch_size - 1) // self.batch_size
 
@@ -92,6 +94,8 @@ class NewsUrlWriter:
             
             if batch_result["success"]:
                 total_written += batch_result["records_written"]
+                total_new += batch_result.get("new_records", 0)
+                total_skipped += batch_result.get("skipped_records", 0)
             else:
                 failed_batches += 1
                 logger.error(f"Batch {batch_num} failed: {batch_result.get('error', 'Unknown error')}")
@@ -102,6 +106,8 @@ class NewsUrlWriter:
         result = {
             "success": failed_batches == 0,
             "records_written": total_written,
+            "new_records": total_new,
+            "skipped_records": total_skipped,
             "total_records": len(records),
             "batches_processed": batch_count,
             "failed_batches": failed_batches,
@@ -115,6 +121,7 @@ class NewsUrlWriter:
 
         logger.info(
             f"Write complete: {total_written}/{len(records)} records written "
+            f"({total_new} new, {total_skipped} skipped as duplicates) "
             f"in {write_time:.2f}s ({result['records_per_second']:.1f} rec/s)"
         )
 
@@ -123,26 +130,70 @@ class NewsUrlWriter:
     def _write_batch_with_retry(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Write a single batch with retry logic.
+        
+        Only inserts new URLs - skips duplicates entirely (no updates).
 
         Args:
             batch: List of records to write
 
         Returns:
-            Dictionary with batch write result
+            Dictionary with batch write result including new vs skipped counts
         """
         last_error = None
         
         for attempt in range(self.max_retries + 1):
             try:
+                # First, check which URLs already exist
+                urls = [record.get(self.conflict_column) for record in batch if record.get(self.conflict_column)]
+                existing_urls = set()
+                
+                if urls:
+                    try:
+                        existing_response = (
+                            self.client.table(self.table_name)
+                            .select(self.conflict_column)
+                            .in_(self.conflict_column, urls)
+                            .execute()
+                        )
+                        existing_urls = {row.get(self.conflict_column) for row in (existing_response.data or [])}
+                        logger.debug(f"Found {len(existing_urls)} existing URLs in batch of {len(urls)}")
+                    except Exception as check_error:
+                        logger.warning(f"Could not check existing URLs: {check_error}")
+                        # Continue anyway - database constraint will handle duplicates
+                
+                # Filter out existing URLs - only insert new ones
+                new_batch = [
+                    record for record in batch 
+                    if record.get(self.conflict_column) not in existing_urls
+                ]
+                
+                skipped_count = len(batch) - len(new_batch)
+                
+                if not new_batch:
+                    logger.debug(f"All {len(batch)} URLs in batch already exist - skipping insert")
+                    return {
+                        "success": True,
+                        "records_written": 0,
+                        "new_records": 0,
+                        "skipped_records": skipped_count,
+                        "attempt": attempt + 1,
+                    }
+                
+                # Insert only new records (no upsert - pure insert)
+                logger.debug(f"Inserting {len(new_batch)} new records (skipping {skipped_count} duplicates)")
                 response = (
                     self.client.table(self.table_name)
-                    .upsert(batch, on_conflict=self.conflict_column)
+                    .insert(new_batch)
                     .execute()
                 )
 
+                inserted_count = len(response.data or [])
+
                 return {
                     "success": True,
-                    "records_written": len(batch),
+                    "records_written": inserted_count,
+                    "new_records": inserted_count,
+                    "skipped_records": skipped_count,
                     "attempt": attempt + 1,
                 }
 
@@ -159,6 +210,8 @@ class NewsUrlWriter:
             "success": False,
             "error": str(last_error),
             "records_written": 0,
+            "new_records": 0,
+            "skipped_records": 0,
             "attempts": self.max_retries + 1,
         }
 
