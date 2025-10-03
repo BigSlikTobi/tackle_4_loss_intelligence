@@ -1,0 +1,19 @@
+# Google Gemini API
+google-genai>=1.0.0
+
+# HTTP requests & HTML parsing
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Date handling
+python-dateutil>=2.8.0
+
+# YAML configuration
+PyYAML>=6.0.0
+
+# Shared dependencies (from src/shared)
+supabase>=2.0.0
+python-dotenv>=1.0.0
+
+# Cloud Function deployment
+functions-framework==3.*

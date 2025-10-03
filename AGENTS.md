@@ -143,10 +143,12 @@ See `docs/architecture/function_isolation.md` for complete architecture document
 
 ## Security & Configuration Tips
 
-- Never hard-code secrets; each module stores credentials in its own `.env` file loaded via `python-dotenv`
-- Configuration: `SUPABASE_URL`, `SUPABASE_KEY` in `src/functions/<module>/.env`
+- All modules share a **central `.env` file** at project root (no module-specific `.env` files)
+- Never hard-code secrets; load credentials from the central `.env` using `load_env()` from `src.shared.utils.env`
+- Configuration: Add module-specific variables to the central `.env` file with clear section comments
+- Required for all modules: `SUPABASE_URL`, `SUPABASE_KEY` in central `.env`
 - When sharing scripts or notebooks, redact API responses and confirm logging stays at `INFO` or lower
-- Each module's `.env.example` provides template for required variables
+- See `docs/configuration.md` for detailed configuration architecture
 
 ## Quick Reference
 
