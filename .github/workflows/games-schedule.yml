@@ -1,0 +1,58 @@
+name: Load NFL Games Schedule
+
+on:
+  # Runs hourly from Thursday 10:15 PM ET through Tuesday 10:15 PM ET
+  # Cron runs in UTC, so ET times need conversion:
+  # - ET is UTC-5 (EST, Standard Time) or UTC-4 (EDT, Daylight Saving Time)
+  # - 10:15 PM ET = 3:15 AM UTC (EST) or 2:15 AM UTC (EDT)
+  # GitHub Actions cron is in UTC
+  schedule:
+    # Every hour from Thu 2:15 AM UTC (Thu 10:15 PM ET prev day) through Wed 2:15 AM UTC (Tue 10:15 PM ET)
+    - cron: '15 2-23 * * 4'  # Thursday: 2:15 AM - 11:15 PM UTC
+    - cron: '15 0-23 * * 5'  # Friday: all hours
+    - cron: '15 0-23 * * 6'  # Saturday: all hours
+    - cron: '15 0-23 * * 0'  # Sunday: all hours
+    - cron: '15 0-23 * * 1'  # Monday: all hours
+    - cron: '15 0-23 * * 2'  # Tuesday: all hours
+    - cron: '15 0-2 * * 3'   # Wednesday: 12:15 AM - 2:15 AM UTC (Tue 8:15 PM - 10:15 PM ET)
+  
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  load-games:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/functions/data_loading/requirements.txt
+      
+      - name: Load games schedule
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python src/functions/data_loading/scripts/games_cli.py --verbose
+      
+      - name: Report status
+        if: always()
+        run: |
+          if [ $? -eq 0 ]; then
+            echo "✅ Games schedule loaded successfully"
+          else
+            echo "❌ Games schedule load failed"
+            exit 1
+          fi
