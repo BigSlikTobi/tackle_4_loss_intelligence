@@ -59,6 +59,31 @@ python scripts/extract_news_cli.py --environment prod --metrics-file metrics.jso
 cd functions && ./deploy.sh
 ```
 
+### Content Summarization
+AI-powered content summarization using Google Gemini with intelligent fallback strategies.
+
+- **Location**: [`src/functions/content_summarization/`](src/functions/content_summarization/)
+- **Status**: ✅ Production Ready
+- **Features**: URL context analysis, multi-tier fallback, anti-hallucination prompts, rate limiting, circuit breaker, metrics collection
+
+[**→ Full Documentation**](src/functions/content_summarization/README.md)
+
+**Quick Start:**
+```bash
+cd src/functions/content_summarization
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# Add to .env: GEMINI_API_KEY, GEMINI_MODEL
+
+# Summarize URLs
+python scripts/summarize_cli.py --dry-run --limit 5 --verbose
+python scripts/summarize_cli.py --limit 10
+
+# Deploy
+cd functions && ./deploy.sh
+```
+
 ---
 
 ## 🏗️ Architecture
@@ -80,20 +105,31 @@ T4L_data_loaders/
 │       │   ├── requirements.txt   # Module dependencies
 │       │   └── README.md          # Module documentation
 │       │
-│       └── news_extraction/       # ✅ Production ready
+│       ├── news_extraction/       # ✅ Production ready
+│       │   ├── core/              # Business logic
+│       │   │   ├── config/        # YAML configuration
+│       │   │   ├── extractors/    # RSS/sitemap extractors
+│       │   │   ├── pipelines/     # Orchestration
+│       │   │   ├── processors/    # URL filtering
+│       │   │   ├── data/          # Transformers
+│       │   │   ├── db/            # Database writer
+│       │   │   └── monitoring.py  # Metrics & logging
+│       │   ├── scripts/           # CLI tools
+│       │   ├── functions/         # Cloud Function deployment
+│       │   ├── requirements.txt   # Module dependencies
+│       │   ├── README.md          # Module documentation
+│       │   └── DEPLOYMENT.md      # Testing & deployment guide
+│       │
+│       └── content_summarization/ # ✅ Production ready
 │           ├── core/              # Business logic
-│           │   ├── config/        # YAML configuration
-│           │   ├── extractors/    # RSS/sitemap extractors
-│           │   ├── pipelines/     # Orchestration
-│           │   ├── processors/    # URL filtering
-│           │   ├── data/          # Transformers
-│           │   ├── db/            # Database writer
-│           │   └── monitoring.py  # Metrics & logging
+│           │   ├── contracts/     # Data models
+│           │   ├── db/            # Database operations (pagination, retry)
+│           │   ├── llm/           # Gemini client + fallback fetcher
+│           │   └── pipelines/     # Orchestration
 │           ├── scripts/           # CLI tools
 │           ├── functions/         # Cloud Function deployment
 │           ├── requirements.txt   # Module dependencies
-│           ├── README.md          # Module documentation
-│           └── DEPLOYMENT.md      # Testing & deployment guide
+│           └── README.md          # Module documentation
 │
 ├── docs/                          # Documentation
 ├── requests/                      # Sample package requests
