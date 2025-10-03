@@ -1,0 +1,11 @@
+functions-framework==3.*
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+lxml>=4.9.0
+feedparser>=6.0.0
+PyYAML>=6.0.0
+python-dateutil>=2.8.0
+
+# Shared dependencies
+supabase>=2.0.0
+python-dotenv>=1.0.0

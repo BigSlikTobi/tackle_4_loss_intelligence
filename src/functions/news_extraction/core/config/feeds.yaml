@@ -1,0 +1,56 @@
+# Feed sources for the NFL news pipeline
+# Add your known RSS and sitemap URLs here. Only public feeds; no crawling.
+
+version: 1
+
+defaults:
+  user_agent: T4L-End2End/1.0 (+contact@example.com)
+  timeout_seconds: 30
+  max_parallel_fetches: 10
+
+sources:
+  # --- RSS ---
+  - name: ESPN
+    type: rss
+    url: https://www.espn.com/espn/rss/nfl/news
+    publisher: ESPN
+    nfl_only: true
+    enabled: true
+
+  - name: CBS
+    type: rss
+    url: https://www.cbssports.com/rss/headlines/nfl/
+    publisher: CBS Sports
+    nfl_only: true
+    enabled: true
+
+  - name: Yahoo
+    type: rss
+    url: https://sports.yahoo.com/nfl/rss/
+    publisher: Yahoo Sports
+    nfl_only: true
+    enabled: true
+
+  # --- Sitemaps ---
+  - name: NFL
+    type: sitemap
+    url: https://www.nfl.com/sitemap-fast-changing.xml
+    publisher: NFL.com
+    nfl_only: true
+    enabled: true
+    max_articles: 50
+    days_back: 7
+    notes: Fast-changing news sitemap with recent articles. Uses proper XML sitemap format with news namespace.
+
+  - name: Fox
+    type: html
+    url: https://www.foxsports.com/nfl/news
+    publisher: Fox Sports
+    nfl_only: true
+    enabled: false
+    notes: No RSS/sitemap available. Use as fallback HTML parsing if needed (subject to TOS).
+
+# Notes:
+# - Set nfl_only=true for feeds that are guaranteed NFL-only (skip some filters)
+# - Disable a source by setting enabled: false (kept for later)
+# - The pipeline will dedupe by URL and apply rules/LLM as configured

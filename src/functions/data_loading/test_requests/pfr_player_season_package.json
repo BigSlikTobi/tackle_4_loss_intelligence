@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0.0",
+  "producer": "t4l.sports.packager/cli@test",
+  "subject": {
+    "entity_type": "player",
+    "ids": {
+      "pfr": "JeffJu00"
+    },
+    "display": {
+      "name": "Justin Jefferson",
+      "team_current": "MIN"
+    }
+  },
+  "scope": {
+    "granularity": "season",
+    "competition": "regular",
+    "temporal": {
+      "season": 2025
+    }
+  },
+  "provenance": {
+    "sources": [
+      {
+        "name": "pfr.weekly",
+        "version": "2025.04"
+      }
+    ],
+    "transforms": [
+      {
+        "name": "normalize_pfr_metrics",
+        "version": "1.0.0"
+      }
+    ]
+  },
+  "bundles": [
+    {
+      "name": "pfr_player_season",
+      "schema_ref": "pfr.player_season.v1",
+      "record_grain": "player_week",
+      "provider": "pfr",
+      "filters": {
+        "season": 2025,
+        "pfr_id": "JeffJu00"
+      },
+      "storage_mode": "inlined",
+      "description": "PFR weekly metrics for Justin Jefferson (2025 season)"
+    }
+  ]
+}

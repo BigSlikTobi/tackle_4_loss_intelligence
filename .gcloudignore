@@ -1,0 +1,89 @@
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Development and testing files
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+tests/
+test_*.py
+*_test.py
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment files (use .env.yaml for deployment config)
+.env
+.env.local
+.env.example
+*.env
+!.env.yaml
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Documentation (not needed in deployment)
+docs/
+*.md
+README*
+STRUCTURE.md
+MIGRATION_COMPLETE.md
+API_Readme.md
+AGENTS.md
+
+# Sample requests (not needed in deployment)
+requests/
+
+# CLI scripts (not needed in Cloud Function)
+src/functions/data_loading/scripts/
+src/functions/news_extraction/scripts/
+
+# Other function modules (only deploy what's needed)
+src/functions/news_extraction/
+
+# Development utilities
+fix_imports.py
+ARCHITECTURE.md
+
+# Scripts (data loaders not needed for Cloud Function)
+scripts/data_loaders/
+scripts/__pycache__/
+
+# Data files (only top-level data/ directory, not src/core/data/)
+/data/
+requests/
+*.csv
+
+# Deployment artifacts
+functions/venv/
+functions/__pycache__/
+functions/*.sh
+functions/DEPLOYMENT_GUIDE.md
+functions/QUICKSTART.md
+functions/README.md
+functions/PYTHON_313_NOTICE.md
+functions/FIX_SUMMARY.md
+functions/.env.yaml.example
+functions/.gcloudignore

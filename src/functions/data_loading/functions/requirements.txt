@@ -1,0 +1,12 @@
+functions-framework==3.8.1
+flask>=2.3
+
+# Core dependencies for package assembly
+httpx>=0.24.0
+nflreadpy
+pandas==2.2.1
+python-dotenv==1.0.1
+requests==2.31.0
+supabase>=2.13.0
+pyarrow
+beautifulsoup4>=4.12.3

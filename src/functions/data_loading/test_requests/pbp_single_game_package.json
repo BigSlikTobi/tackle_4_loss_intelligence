@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0.0",
+  "producer": "t4l.sports.packager/cli@test",
+  "subject": {
+    "entity_type": "game",
+    "ids": {
+      "nflverse": "2025_01_KC_LAC",
+      "gsis": "2023090700"
+    },
+    "display": {
+      "home_team": "KC",
+      "away_team": "LAC",
+      "description": "LAC at KC (2025 Week 1)"
+    }
+  },
+  "scope": {
+    "granularity": "game",
+    "competition": "regular",
+    "temporal": {
+      "season": 2025,
+      "week": 1
+    }
+  },
+  "provenance": {
+    "sources": [
+      {
+        "name": "nfl.play_by_play",
+        "version": "2025.01"
+      }
+    ],
+    "transforms": [
+      {
+        "name": "normalize_play_ids"
+      }
+    ]
+  },
+  "bundles": [
+    {
+      "name": "pbp_single_game",
+      "schema_ref": "pbp.events.v1",
+      "record_grain": "event",
+      "provider": "pbp",
+      "filters": {
+        "season": 2025,
+        "week": 1,
+        "game_id": "2025_01_KC_LAC"
+      },
+      "storage_mode": "inlined",
+      "description": "Play-by-play events for LAC at KC (2025 Week 1)"
+    }
+  ]
+}

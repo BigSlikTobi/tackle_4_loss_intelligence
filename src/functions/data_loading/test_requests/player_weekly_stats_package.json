@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0.0",
+  "producer": "t4l.sports.packager/cli@test",
+  "subject": {
+    "entity_type": "player",
+    "ids": {
+      "gsis": "00-0023459"
+    },
+    "display": {
+      "name": "Sample Player",
+      "team_current": "PIT"
+    }
+  },
+  "scope": {
+    "granularity": "week",
+    "competition": "regular",
+    "temporal": {
+      "season": 2025,
+      "week": 4
+    }
+  },
+  "provenance": {
+    "sources": [
+      {
+        "name": "nfl.player_weekly_stats",
+        "version": "2025.04"
+      }
+    ],
+    "transforms": [
+      {
+        "name": "sanitize_numeric_metrics",
+        "version": "1.0.0"
+      }
+    ]
+  },
+  "bundles": [
+    {
+      "name": "player_weekly_stats",
+      "schema_ref": "player.weekly_stats.v1",
+      "record_grain": "player_week",
+      "provider": "player_weekly_stats",
+      "filters": {
+        "season": 2025,
+        "week": 4,
+        "player_id": "00-0023459"
+      },
+      "storage_mode": "inlined",
+      "description": "Weekly stat line for GSIS 00-0023459"
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0.0",
+  "producer": "t4l.sports.packager/cli@test",
+  "subject": {
+    "entity_type": "player",
+    "ids": {
+      "gsis": "00-0036322",
+      "nflverse": "00-0036322"
+    },
+    "display": {
+      "name": "Justin Jefferson",
+      "team_current": "MIN"
+    }
+  },
+  "scope": {
+    "granularity": "week",
+    "competition": "regular",
+    "temporal": {
+      "season": 2025,
+      "week": 4
+    }
+  },
+  "provenance": {
+    "sources": [
+      {
+        "name": "nfl.next_gen_stats",
+        "version": "2025.04"
+      }
+    ],
+    "transforms": [
+      {
+        "name": "normalize_ngs_fields",
+        "version": "1.0.0"
+      }
+    ]
+  },
+  "bundles": [
+    {
+      "name": "ngs_player_week",
+      "schema_ref": "ngs.player_week.v1",
+      "record_grain": "player_week",
+      "provider": "ngs",
+      "provider_options": {
+        "stat_type": "receiving"
+      },
+      "filters": {
+        "season": 2025,
+        "week": 4,
+        "player_id": "00-0036322"
+      },
+      "storage_mode": "inlined",
+      "description": "NGS receiving metrics for Justin Jefferson (2025 Week 4)"
+    }
+  ]
+}

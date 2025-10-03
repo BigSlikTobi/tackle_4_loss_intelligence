@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0.0",
+  "producer": "t4l.sports.packager/cli@test",
+  "subject": {
+    "entity_type": "player",
+    "ids": {
+      "pfr": "JeffJu00"
+    },
+    "display": {
+      "name": "Justin Jefferson",
+      "team_current": "MIN"
+    }
+  },
+  "scope": {
+    "granularity": "game",
+    "competition": "regular",
+    "temporal": {
+      "season": 2025,
+      "games": [
+        "2025_01_MIN_CHI"
+      ]
+    }
+  },
+  "provenance": {
+    "sources": [
+      {
+        "name": "nfl.snap_counts",
+        "version": "2025.01"
+      }
+    ],
+    "transforms": [
+      {
+        "name": "normalize_snap_counts",
+        "version": "1.0.0"
+      }
+    ]
+  },
+  "bundles": [
+    {
+      "name": "snap_counts_player_game",
+      "schema_ref": "snap_counts.player_game.v1",
+      "record_grain": "player_game",
+      "provider": "snap_counts",
+      "filters": {
+        "season": 2025,
+        "pfr_id": "JeffJu00",
+        "game_id": "2025_01_MIN_CHI"
+      },
+      "storage_mode": "inlined",
+      "description": "Snap counts for Justin Jefferson vs. CHI (2025 Week 1)"
+    }
+  ]
+}

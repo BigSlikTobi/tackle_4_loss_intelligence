@@ -1,0 +1,6 @@
+nflreadpy>=0.1.0
+nfl-data-py>=0.3.0
+supabase>=2.0.0
+python-dotenv>=1.0.0
+pandas>=2.0.0
+pytz>=2023.3
