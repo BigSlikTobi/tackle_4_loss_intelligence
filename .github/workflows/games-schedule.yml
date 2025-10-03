@@ -3,8 +3,8 @@ name: Load NFL Games Schedule
 on:
   # Runs hourly from Thursday 10:15 PM ET through Tuesday 10:15 PM ET
   # Cron runs in UTC, so ET times need conversion:
-  # - ET is UTC-5 (EST) or UTC-4 (EDT)
-  # - 10:15 PM ET = 2:15 AM UTC (EST) or 2:15 AM UTC (EDT during DST)
+  # - ET is UTC-5 (EST, Standard Time) or UTC-4 (EDT, Daylight Saving Time)
+  # - 10:15 PM ET = 3:15 AM UTC (EST) or 2:15 AM UTC (EDT)
   # GitHub Actions cron is in UTC
   schedule:
     # Every hour from Thu 2:15 AM UTC (Thu 10:15 PM ET prev day) through Wed 2:15 AM UTC (Tue 10:15 PM ET)
