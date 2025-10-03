@@ -225,12 +225,6 @@ class NewsUrlReader:
         except Exception as e:
             logger.error(f"Failed to fetch URLs by publisher: {e}", exc_info=True)
             raise
-            return records
-
-        except Exception as e:
-            logger.error(f"Failed to fetch URLs by publisher: {e}", exc_info=True)
-            raise
-
     def get_all_urls(self, limit: Optional[int] = None) -> list[NewsUrlRecord]:
         """
         Fetch all URLs from the table.
