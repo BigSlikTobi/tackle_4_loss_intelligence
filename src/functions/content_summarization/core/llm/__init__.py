@@ -588,9 +588,6 @@ Format your response clearly with section headers."""
                     "fallback_method": method,
                 },
             }
-            injury_text = response_text[injury_start:].split("\n\n")[0]
-            if "not mentioned" not in injury_text.lower() and len(injury_text) > 20:
-                parsed["injury_updates"] = injury_text.replace("INJURY UPDATES:", "").replace("Injury Updates:", "").strip()
 
         return parsed
     
