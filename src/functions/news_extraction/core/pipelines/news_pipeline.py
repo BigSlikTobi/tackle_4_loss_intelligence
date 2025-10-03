@@ -177,6 +177,9 @@ class NewsExtractionPipeline:
             "items_extracted": len(all_items),
             "items_filtered": items_filtered,
             "records_written": write_result.get("records_written", 0),
+            "new_records": write_result.get("new_records", 0),
+            "skipped_records": write_result.get("skipped_records", 0),
+            "total_records": len(records),
             "dry_run": dry_run,
             "metrics": final_metrics.to_dict(),
             "performance": {
