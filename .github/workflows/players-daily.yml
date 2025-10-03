@@ -34,7 +34,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          python src/functions/data_loading/scripts/players_cli.py --verbose
+          python src/functions/data_loading/scripts/players_cli.py --log-level INFO --active-only --min-last-season 2025
       
       - name: Report status
         if: always()
