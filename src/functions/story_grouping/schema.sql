@@ -215,7 +215,7 @@ SELECT
     g.member_count,
     AVG(m.similarity_score) AS avg_similarity
 FROM story_groups g
-JOIN story_group_member m ON g.id = m.group_id
+JOIN story_group_members m ON g.id = m.group_id
 WHERE g.status = 'active'
 GROUP BY g.id, g.member_count
 HAVING AVG(m.similarity_score) < 0.75
