@@ -8,11 +8,12 @@ don't have embeddings yet in the story_embeddings table.
 import logging
 from typing import Optional
 
-PAGE_SIZE = 1000  # Configurable constant for pagination
+
 
 from src.shared.db.connection import get_supabase_client
 from ..contracts import SummaryRecord
 
+PAGE_SIZE = 1000  # Configurable constant for pagination
 logger = logging.getLogger(__name__)
 
 
