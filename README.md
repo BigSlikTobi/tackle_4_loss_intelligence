@@ -138,6 +138,35 @@ python scripts/group_stories_cli.py --dry-run --limit 10
 python scripts/group_stories_cli.py
 ```
 
+### Knowledge Extraction
+Extracts key topics and NFL entities from story groups using GPT-5-mini reasoning model with fuzzy entity matching.
+
+- **Location**: [`src/functions/knowledge_extraction/`](src/functions/knowledge_extraction/)
+- **Status**: ✅ Production Ready
+- **Features**: GPT-5-mini with medium reasoning, fuzzy entity matching, retry logic, circuit breakers, batch processing, dry-run mode
+
+[**→ Full Documentation**](src/functions/knowledge_extraction/README.md)
+
+**Quick Start:**
+```bash
+cd src/functions/knowledge_extraction
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# Add to .env: OPENAI_API_KEY
+
+# Run schema.sql in Supabase SQL Editor
+
+# Check progress
+python scripts/extract_knowledge_cli.py --progress
+
+# Test (no changes)
+python scripts/extract_knowledge_cli.py --dry-run --limit 5
+
+# Extract knowledge
+python scripts/extract_knowledge_cli.py
+```
+
 ---
 
 ## 🏗️ Architecture
@@ -196,10 +225,22 @@ T4L_data_loaders/
 │           ├── schema.sql         # Database schema
 │           └── README.md          # Module documentation
 │       │
-│       └── story_grouping/        # ✅ Production ready
+│       ├── story_grouping/        # ✅ Production ready
+│       │   ├── core/              # Business logic
+│       │   │   ├── clustering/    # Similarity algorithms, grouping logic
+│       │   │   ├── db/            # Database operations (with pagination)
+│       │   │   └── pipelines/     # Orchestration pipeline
+│       │   ├── scripts/           # CLI tools
+│       │   ├── functions/         # Cloud Function deployment (future)
+│       │   ├── requirements.txt   # Module dependencies
+│       │   ├── schema.sql         # Database schema
+│       │   └── README.md          # Module documentation
+│       │
+│       └── knowledge_extraction/  # ✅ Production ready
 │           ├── core/              # Business logic
-│           │   ├── clustering/    # Similarity algorithms, grouping logic
-│           │   ├── db/            # Database operations (with pagination)
+│           │   ├── db/            # Story reader, knowledge writer
+│           │   ├── extraction/    # LLM extractors (GPT-5-mini)
+│           │   ├── resolution/    # Fuzzy entity matching
 │           │   └── pipelines/     # Orchestration pipeline
 │           ├── scripts/           # CLI tools
 │           ├── functions/         # Cloud Function deployment (future)
@@ -262,6 +303,7 @@ Each module is independent:
 - **Content Summarization** → [`src/functions/content_summarization/README.md`](src/functions/content_summarization/README.md)
 - **Story Embeddings** → [`src/functions/story_embeddings/README.md`](src/functions/story_embeddings/README.md)
 - **Story Grouping** → [`src/functions/story_grouping/README.md`](src/functions/story_grouping/README.md)
+- **Knowledge Extraction** → [`src/functions/knowledge_extraction/README.md`](src/functions/knowledge_extraction/README.md)
 
 ---
 
@@ -275,6 +317,7 @@ Each module is independent:
 5. **[Content Summarization Module](src/functions/content_summarization/README.md)** - AI-powered summarization
 6. **[Story Embeddings Module](src/functions/story_embeddings/README.md)** - Vector embeddings for similarity search
 7. **[Story Grouping Module](src/functions/story_grouping/README.md)** - Clustering similar stories
+8. **[Knowledge Extraction Module](src/functions/knowledge_extraction/README.md)** - Topic and entity extraction
 
 ### Module Documentation
 - **[Data Loading README](src/functions/data_loading/README.md)** - Complete module documentation
@@ -284,6 +327,7 @@ Each module is independent:
 - **[Content Summarization README](src/functions/content_summarization/README.md)** - Complete module documentation
 - **[Story Embeddings README](src/functions/story_embeddings/README.md)** - Complete module documentation
 - **[Story Grouping README](src/functions/story_grouping/README.md)** - Complete module documentation
+- **[Knowledge Extraction README](src/functions/knowledge_extraction/README.md)** - Complete module documentation
 
 ### Technical References
 - **[Package Contract](docs/package_contract.md)** - On-demand package request/response spec

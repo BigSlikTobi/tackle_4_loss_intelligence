@@ -47,11 +47,20 @@ src/
     │   ├── schema.sql         # Database schema
     │   └── README.md          # Module documentation
     │
-    └── story_grouping/        # Module 5: Clustering similar stories
+    ├── story_grouping/        # Module 5: Clustering similar stories
+    │   ├── core/              # Business logic
+    │   ├── scripts/           # CLI tools (group_stories_cli.py)
+    │   ├── functions/         # Cloud Function deployment (future)
+    │   ├── requirements.txt   # Module dependencies
+    │   ├── schema.sql         # Database schema
+    │   └── README.md          # Module documentation
+    │
+    └── knowledge_extraction/  # Module 6: Entity and topic extraction
         ├── core/              # Business logic
-        ├── scripts/           # CLI tools (group_stories_cli.py)
+        ├── scripts/           # CLI tools (extract_knowledge_cli.py)
         ├── functions/         # Cloud Function deployment (future)
         ├── requirements.txt   # Module dependencies
+        ├── .env.example       # Configuration template
         ├── schema.sql         # Database schema
         └── README.md          # Module documentation
 ```
@@ -71,6 +80,7 @@ src/
 - **content_summarization**: AI-powered summarization of news articles using Google Gemini
 - **story_embeddings**: Generates vector embeddings for story summaries using OpenAI's text-embedding-3-small model for similarity search and clustering
 - **story_grouping**: Clusters similar stories based on embedding vectors using cosine similarity and centroid-based grouping
+- **knowledge_extraction**: Extracts key topics and NFL entities (players, teams, games) from story groups using GPT-5-mini with fuzzy entity resolution to database IDs for cross-referencing
 - On-demand accessors in `src/functions/data_loading/core/providers/`; e.g., `get_provider("pfr").list(season=2023, week=1)` returns weekly stats
 - Package contract defined in `src/functions/data_loading/core/contracts/package.py` with usage in `docs/package_contract.md`
 - Cloud Function in `src/functions/data_loading/functions/main.py` exposes package assembly as HTTP API (see `docs/cloud_function_api.md`)
@@ -201,3 +211,4 @@ See `docs/architecture/function_isolation.md` for complete architecture document
 - Content summarization: `src/functions/content_summarization/`
 - Story embeddings: `src/functions/story_embeddings/`
 - Story grouping: `src/functions/story_grouping/`
+- Knowledge extraction: `src/functions/knowledge_extraction/`

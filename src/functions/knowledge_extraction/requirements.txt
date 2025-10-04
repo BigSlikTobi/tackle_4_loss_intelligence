@@ -1,0 +1,13 @@
+# Knowledge Extraction Dependencies
+
+# Core dependencies
+openai>=1.12.0              # OpenAI API for LLM-based extraction
+python-dotenv>=1.0.0        # Environment variable management
+supabase>=2.3.0             # Supabase Python client
+
+# Entity resolution
+rapidfuzz>=3.6.0            # Fast fuzzy string matching (better than fuzzywuzzy)
+thefuzz>=0.20.0             # Fuzzy string matching for nicknames
+
+# Shared utilities (from project root)
+# Note: Actual imports use src.shared.* from project root
