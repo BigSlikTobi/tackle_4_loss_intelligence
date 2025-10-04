@@ -8,6 +8,8 @@ don't have embeddings yet in the story_embeddings table.
 import logging
 from typing import Optional
 
+PAGE_SIZE = 1000  # Configurable constant for pagination
+
 from src.shared.db.connection import get_supabase_client
 from ..contracts import SummaryRecord
 
@@ -83,7 +85,7 @@ class SummaryReader:
         """
         embedded_ids = set()
         try:
-            page_size = 1000
+            page_size = PAGE_SIZE
             offset = 0
             
             while True:
@@ -128,7 +130,7 @@ class SummaryReader:
             List of SummaryRecord instances
         """
         summaries = []
-        page_size = 1000
+        page_size = PAGE_SIZE
         offset = 0
 
         while True:
@@ -205,7 +207,7 @@ class SummaryReader:
 
             # Count total summaries
             total_summaries = 0
-            page_size = 1000
+            page_size = PAGE_SIZE
             offset = 0
 
             while True:
