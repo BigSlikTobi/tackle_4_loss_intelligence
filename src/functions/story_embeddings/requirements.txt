@@ -1,0 +1,12 @@
+# OpenAI API for embeddings
+openai>=1.0.0
+
+# Date handling
+python-dateutil>=2.8.0
+
+# Shared dependencies (from src/shared)
+supabase>=2.0.0
+python-dotenv>=1.0.0
+
+# Cloud Function deployment
+functions-framework==3.*

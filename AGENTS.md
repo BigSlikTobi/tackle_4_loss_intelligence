@@ -26,11 +26,26 @@ src/
     │   ├── .env.example       # Configuration template
     │   └── README.md          # Module documentation
     │
-    └── news_extraction/       # Module 2: News URL extraction
+    ├── news_extraction/       # Module 2: News URL extraction
+    │   ├── core/              # Business logic
+    │   ├── scripts/           # CLI tools
+    │   ├── functions/         # Cloud Function deployment
+    │   └── requirements.txt
+    │
+    ├── content_summarization/ # Module 3: AI content summarization
+    │   ├── core/              # Business logic
+    │   ├── scripts/           # CLI tools
+    │   ├── functions/         # Cloud Function deployment
+    │   └── requirements.txt
+    │
+    └── story_embeddings/      # Module 4: Vector embeddings for stories
         ├── core/              # Business logic
-        ├── scripts/           # CLI tools
-        ├── functions/         # Cloud Function deployment
-        └── requirements.txt
+        ├── scripts/           # CLI tools (generate_embeddings_cli.py)
+        ├── functions/         # Cloud Function deployment (future)
+        ├── requirements.txt   # Module dependencies
+        ├── .env.example       # Configuration template
+        ├── schema.sql         # Database schema
+        └── README.md          # Module documentation
 ```
 
 ### What Goes Where
@@ -41,11 +56,12 @@ src/
 - ❌ **Never**: Import between function modules (creates coupling)
 
 ## Project Structure & Module Organization
-## Project Structure & Module Organization
 
 **Current Modules**:
 - **data_loading**: Source in `src/functions/data_loading/core/`, split into `data` loaders/transformers, `db` connection helpers, `providers` for on-demand data, and `utils` for CLI/logging code
-- Command-line entry points in `src/functions/data_loading/scripts/`; each script wraps a loader (e.g., `players_cli.py` maps to player data loader)
+- **news_extraction**: Extracts news URLs from various sources for NFL content
+- **content_summarization**: AI-powered summarization of news articles using Google Gemini
+- **story_embeddings**: Generates vector embeddings for story summaries using OpenAI's text-embedding-3-small model for similarity search and clustering
 - On-demand accessors in `src/functions/data_loading/core/providers/`; e.g., `get_provider("pfr").list(season=2023, week=1)` returns weekly stats
 - Package contract defined in `src/functions/data_loading/core/contracts/package.py` with usage in `docs/package_contract.md`
 - Cloud Function in `src/functions/data_loading/functions/main.py` exposes package assembly as HTTP API (see `docs/cloud_function_api.md`)
@@ -161,3 +177,5 @@ See `docs/architecture/function_isolation.md` for complete architecture document
 - Shared utilities: `src/shared/`
 - Data loading: `src/functions/data_loading/`
 - News extraction: `src/functions/news_extraction/`
+- Content summarization: `src/functions/content_summarization/`
+- Story embeddings: `src/functions/story_embeddings/`
