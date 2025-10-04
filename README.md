@@ -84,6 +84,33 @@ python scripts/summarize_cli.py --limit 10
 cd functions && ./deploy.sh
 ```
 
+### Story Embeddings
+Vector embeddings for NFL news story summaries using OpenAI's text-embedding-3-small model.
+
+- **Location**: [`src/functions/story_embeddings/`](src/functions/story_embeddings/)
+- **Status**: ✅ Production Ready
+- **Features**: Smart processing (LEFT JOIN for new summaries), timeout handling, rate limiting, error recovery, batch operations, cost tracking
+
+[**→ Full Documentation**](src/functions/story_embeddings/README.md)
+
+**Quick Start:**
+```bash
+cd src/functions/story_embeddings
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# Add to .env: OPENAI_API_KEY
+
+# Check progress
+python scripts/generate_embeddings_cli.py --progress
+
+# Test (no changes)
+python scripts/generate_embeddings_cli.py --dry-run --limit 5
+
+# Generate embeddings
+python scripts/generate_embeddings_cli.py --limit 50 --verbose
+```
+
 ---
 
 ## 🏗️ Architecture
@@ -120,15 +147,26 @@ T4L_data_loaders/
 │       │   ├── README.md          # Module documentation
 │       │   └── DEPLOYMENT.md      # Testing & deployment guide
 │       │
-│       └── content_summarization/ # ✅ Production ready
+│       ├── content_summarization/ # ✅ Production ready
+│       │   ├── core/              # Business logic
+│       │   │   ├── contracts/     # Data models
+│       │   │   ├── db/            # Database operations (pagination, retry)
+│       │   │   ├── llm/           # Gemini client + fallback fetcher
+│       │   │   └── pipelines/     # Orchestration
+│       │   ├── scripts/           # CLI tools
+│       │   ├── functions/         # Cloud Function deployment
+│       │   ├── requirements.txt   # Module dependencies
+│       │   └── README.md          # Module documentation
+│       │
+│       └── story_embeddings/      # ✅ Production ready
 │           ├── core/              # Business logic
-│           │   ├── contracts/     # Data models
-│           │   ├── db/            # Database operations (pagination, retry)
-│           │   ├── llm/           # Gemini client + fallback fetcher
-│           │   └── pipelines/     # Orchestration
+│           │   ├── contracts/     # Data models (SummaryRecord, StoryEmbedding)
+│           │   ├── db/            # Database operations (reader, writer)
+│           │   ├── llm/           # OpenAI client with production features
+│           │   └── pipelines/     # Orchestration pipeline
 │           ├── scripts/           # CLI tools
-│           ├── functions/         # Cloud Function deployment
 │           ├── requirements.txt   # Module dependencies
+│           ├── schema.sql         # Database schema
 │           └── README.md          # Module documentation
 │
 ├── docs/                          # Documentation
@@ -183,6 +221,8 @@ Each module is independent:
 
 - **Data Loading** → [`src/functions/data_loading/README.md`](src/functions/data_loading/README.md)
 - **News Extraction** → [`src/functions/news_extraction/README.md`](src/functions/news_extraction/README.md)
+- **Content Summarization** → [`src/functions/content_summarization/README.md`](src/functions/content_summarization/README.md)
+- **Story Embeddings** → [`src/functions/story_embeddings/README.md`](src/functions/story_embeddings/README.md)
 
 ---
 
@@ -193,12 +233,16 @@ Each module is independent:
 2. **[Architecture & Design](docs/architecture/function_isolation.md)** - Understand the structure
 3. **[Data Loading Module](src/functions/data_loading/README.md)** - NFL data ingestion & packages
 4. **[News Extraction Module](src/functions/news_extraction/README.md)** - News URL extraction
+5. **[Content Summarization Module](src/functions/content_summarization/README.md)** - AI-powered summarization
+6. **[Story Embeddings Module](src/functions/story_embeddings/README.md)** - Vector embeddings for similarity search
 
 ### Module Documentation
 - **[Data Loading README](src/functions/data_loading/README.md)** - Complete module documentation
 - **[Data Loading Testing & Deployment](src/functions/data_loading/TESTING_DEPLOYMENT.md)** - Local testing & Cloud deployment
 - **[News Extraction README](src/functions/news_extraction/README.md)** - Complete module documentation
 - **[News Extraction Deployment](src/functions/news_extraction/DEPLOYMENT.md)** - Testing & deployment guide
+- **[Content Summarization README](src/functions/content_summarization/README.md)** - Complete module documentation
+- **[Story Embeddings README](src/functions/story_embeddings/README.md)** - Complete module documentation
 
 ### Technical References
 - **[Package Contract](docs/package_contract.md)** - On-demand package request/response spec
@@ -286,6 +330,8 @@ python scripts/players_cli.py --dry-run  # ✅ Still works!
 - **Architecture**: [docs/architecture/function_isolation.md](docs/architecture/function_isolation.md)
 - **Data Loading**: [src/functions/data_loading/README.md](src/functions/data_loading/README.md)
 - **News Extraction**: [src/functions/news_extraction/README.md](src/functions/news_extraction/README.md)
+- **Content Summarization**: [src/functions/content_summarization/README.md](src/functions/content_summarization/README.md)
+- **Story Embeddings**: [src/functions/story_embeddings/README.md](src/functions/story_embeddings/README.md)
 - **Testing & Deployment**: Module-specific DEPLOYMENT.md files
 
 ---
