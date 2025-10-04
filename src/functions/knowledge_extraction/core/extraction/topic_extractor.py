@@ -22,6 +22,7 @@ class ExtractedTopic:
     
     topic: str  # Normalized topic text (lowercase)
     confidence: Optional[float] = None  # LLM confidence score
+    rank: Optional[int] = None  # Importance ranking (1=most important, 2=secondary, etc.)
 
 
 class TopicExtractor:
@@ -219,19 +220,32 @@ class TopicExtractor:
 - Be specific but not too narrow (e.g., "passing touchdowns" not "3 passing touchdowns")
 - Focus on searchable, cross-reference topics
 - Avoid player/team names (those are entities, not topics)
-- Return {max_topics} or fewer topics
+- **RANK topics by importance** (1=main topic, 2=secondary, 3+=minor themes)
+- Return {max_topics} or fewer topics, **ORDERED BY RANK**
 
-Return in JSON format:
+**RANKING SYSTEM:**
+- Rank 1: Primary topic(s) - the main theme/focus of the story
+- Rank 2: Secondary topics - important supporting themes
+- Rank 3+: Minor topics - mentioned but not central
+
+Return in JSON format, **ORDERED BY RANK** (rank 1 first, then 2, then 3, etc.):
 
 {{
   "topics": [
     {{
       "topic": "qb performance",
-      "confidence": 0.95
+      "confidence": 0.95,
+      "rank": 1
     }},
     {{
       "topic": "passing touchdowns",
-      "confidence": 0.90
+      "confidence": 0.90,
+      "rank": 1
+    }},
+    {{
+      "topic": "injury update",
+      "confidence": 0.85,
+      "rank": 2
     }}
   ]
 }}
@@ -244,6 +258,8 @@ Remember:
 - Be conservative with confidence scores
 - Topics should be reusable across many stories
 - Think about what users would search for
+- **RANK by importance** (1=main, 2=secondary, 3+=minor)
+- **ORDER response by rank** (all rank 1 first, then rank 2, etc.)
 """
     
     def _parse_response(self, response_text: str) -> List[ExtractedTopic]:
@@ -264,8 +280,13 @@ Remember:
                 topic = ExtractedTopic(
                     topic=topic_text,
                     confidence=topic_dict.get("confidence"),
+                    rank=topic_dict.get("rank"),
                 )
                 topics.append(topic)
+            
+            # Sort topics by rank (ascending: 1, 2, 3...)
+            # Topics without rank go to the end
+            topics.sort(key=lambda t: t.rank if t.rank is not None else 999)
             
             return topics
             
