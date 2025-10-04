@@ -38,12 +38,20 @@ src/
     │   ├── functions/         # Cloud Function deployment
     │   └── requirements.txt
     │
-    └── story_embeddings/      # Module 4: Vector embeddings for stories
+    ├── story_embeddings/      # Module 4: Vector embeddings for stories
+    │   ├── core/              # Business logic
+    │   ├── scripts/           # CLI tools (generate_embeddings_cli.py)
+    │   ├── functions/         # Cloud Function deployment (future)
+    │   ├── requirements.txt   # Module dependencies
+    │   ├── .env.example       # Configuration template
+    │   ├── schema.sql         # Database schema
+    │   └── README.md          # Module documentation
+    │
+    └── story_grouping/        # Module 5: Clustering similar stories
         ├── core/              # Business logic
-        ├── scripts/           # CLI tools (generate_embeddings_cli.py)
+        ├── scripts/           # CLI tools (group_stories_cli.py)
         ├── functions/         # Cloud Function deployment (future)
         ├── requirements.txt   # Module dependencies
-        ├── .env.example       # Configuration template
         ├── schema.sql         # Database schema
         └── README.md          # Module documentation
 ```
@@ -62,6 +70,7 @@ src/
 - **news_extraction**: Extracts news URLs from various sources for NFL content
 - **content_summarization**: AI-powered summarization of news articles using Google Gemini
 - **story_embeddings**: Generates vector embeddings for story summaries using OpenAI's text-embedding-3-small model for similarity search and clustering
+- **story_grouping**: Clusters similar stories based on embedding vectors using cosine similarity and centroid-based grouping
 - On-demand accessors in `src/functions/data_loading/core/providers/`; e.g., `get_provider("pfr").list(season=2023, week=1)` returns weekly stats
 - Package contract defined in `src/functions/data_loading/core/contracts/package.py` with usage in `docs/package_contract.md`
 - Cloud Function in `src/functions/data_loading/functions/main.py` exposes package assembly as HTTP API (see `docs/cloud_function_api.md`)
@@ -119,6 +128,11 @@ cp .env.example .env  # Edit with module-specific config
 - Keep loader classes and transformers small; place shared logic in module's `core/utils/` or `core/data/transformers/`
 - Module docstrings should explain intent; prefer f-strings for formatting and structured dict results for outputs
 - Each module follows the same structure: `core/`, `scripts/`, `functions/`, `requirements.txt`, `.env.example`, `README.md`
+- **Database Queries**: Always implement pagination for queries that may return large datasets
+  - Supabase has a default limit of 1000 rows per request
+  - Use `.range(offset, offset + page_size - 1)` to paginate through results
+  - Example: Fetch in chunks of 1000, continue until no more data or partial page returned
+  - Log total counts fetched to help with debugging and monitoring
 
 **Adding New Functionality**:
 - **Module-specific**: Add to `src/functions/<module>/core/`
@@ -145,11 +159,18 @@ cp .env.example .env  # Edit with module-specific config
 - ❌ Import between function modules (creates coupling)
 - ❌ Put module-specific logic in `src/shared/`
 - ❌ Share dependencies between modules (each has own `requirements.txt`)
+- ❌ Assume database queries return all results without pagination
+
+**Always**:
+- ✅ Implement pagination for database queries that may return >1000 rows
+- ✅ Use `.range(offset, offset + page_size - 1)` with Supabase queries
+- ✅ Log counts of fetched records for debugging
 
 **Verification**:
 - Can you delete one module without breaking others? ✅
 - Does each module have its own dependencies? ✅
 - Can modules be deployed independently? ✅
+- Do database queries handle pagination properly? ✅
 
 See `docs/architecture/function_isolation.md` for complete architecture documentation.
 
@@ -179,3 +200,4 @@ See `docs/architecture/function_isolation.md` for complete architecture document
 - News extraction: `src/functions/news_extraction/`
 - Content summarization: `src/functions/content_summarization/`
 - Story embeddings: `src/functions/story_embeddings/`
+- Story grouping: `src/functions/story_grouping/`

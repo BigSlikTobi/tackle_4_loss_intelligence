@@ -111,6 +111,33 @@ python scripts/generate_embeddings_cli.py --dry-run --limit 5
 python scripts/generate_embeddings_cli.py --limit 50 --verbose
 ```
 
+### Story Grouping
+Clusters similar NFL news stories based on embedding vectors using cosine similarity and centroid-based clustering.
+
+- **Location**: [`src/functions/story_grouping/`](src/functions/story_grouping/)
+- **Status**: ✅ Production Ready
+- **Features**: Cosine similarity clustering, dynamic centroids, batch processing with pagination, dry-run mode, progress tracking
+
+[**→ Full Documentation**](src/functions/story_grouping/README.md)
+
+**Quick Start:**
+```bash
+cd src/functions/story_grouping
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# Add to .env: SUPABASE_URL, SUPABASE_KEY, SIMILARITY_THRESHOLD
+
+# Check progress
+python scripts/group_stories_cli.py --progress
+
+# Test (no changes)
+python scripts/group_stories_cli.py --dry-run --limit 10
+
+# Group stories
+python scripts/group_stories_cli.py
+```
+
 ---
 
 ## 🏗️ Architecture
@@ -158,13 +185,24 @@ T4L_data_loaders/
 │       │   ├── requirements.txt   # Module dependencies
 │       │   └── README.md          # Module documentation
 │       │
-│       └── story_embeddings/      # ✅ Production ready
+│       ├── story_embeddings/      # ✅ Production ready
 │           ├── core/              # Business logic
 │           │   ├── contracts/     # Data models (SummaryRecord, StoryEmbedding)
 │           │   ├── db/            # Database operations (reader, writer)
 │           │   ├── llm/           # OpenAI client with production features
 │           │   └── pipelines/     # Orchestration pipeline
 │           ├── scripts/           # CLI tools
+│           ├── requirements.txt   # Module dependencies
+│           ├── schema.sql         # Database schema
+│           └── README.md          # Module documentation
+│       │
+│       └── story_grouping/        # ✅ Production ready
+│           ├── core/              # Business logic
+│           │   ├── clustering/    # Similarity algorithms, grouping logic
+│           │   ├── db/            # Database operations (with pagination)
+│           │   └── pipelines/     # Orchestration pipeline
+│           ├── scripts/           # CLI tools
+│           ├── functions/         # Cloud Function deployment (future)
 │           ├── requirements.txt   # Module dependencies
 │           ├── schema.sql         # Database schema
 │           └── README.md          # Module documentation
@@ -223,6 +261,7 @@ Each module is independent:
 - **News Extraction** → [`src/functions/news_extraction/README.md`](src/functions/news_extraction/README.md)
 - **Content Summarization** → [`src/functions/content_summarization/README.md`](src/functions/content_summarization/README.md)
 - **Story Embeddings** → [`src/functions/story_embeddings/README.md`](src/functions/story_embeddings/README.md)
+- **Story Grouping** → [`src/functions/story_grouping/README.md`](src/functions/story_grouping/README.md)
 
 ---
 
@@ -235,6 +274,7 @@ Each module is independent:
 4. **[News Extraction Module](src/functions/news_extraction/README.md)** - News URL extraction
 5. **[Content Summarization Module](src/functions/content_summarization/README.md)** - AI-powered summarization
 6. **[Story Embeddings Module](src/functions/story_embeddings/README.md)** - Vector embeddings for similarity search
+7. **[Story Grouping Module](src/functions/story_grouping/README.md)** - Clustering similar stories
 
 ### Module Documentation
 - **[Data Loading README](src/functions/data_loading/README.md)** - Complete module documentation
@@ -243,6 +283,7 @@ Each module is independent:
 - **[News Extraction Deployment](src/functions/news_extraction/DEPLOYMENT.md)** - Testing & deployment guide
 - **[Content Summarization README](src/functions/content_summarization/README.md)** - Complete module documentation
 - **[Story Embeddings README](src/functions/story_embeddings/README.md)** - Complete module documentation
+- **[Story Grouping README](src/functions/story_grouping/README.md)** - Complete module documentation
 
 ### Technical References
 - **[Package Contract](docs/package_contract.md)** - On-demand package request/response spec
@@ -332,6 +373,7 @@ python scripts/players_cli.py --dry-run  # ✅ Still works!
 - **News Extraction**: [src/functions/news_extraction/README.md](src/functions/news_extraction/README.md)
 - **Content Summarization**: [src/functions/content_summarization/README.md](src/functions/content_summarization/README.md)
 - **Story Embeddings**: [src/functions/story_embeddings/README.md](src/functions/story_embeddings/README.md)
+- **Story Grouping**: [src/functions/story_grouping/README.md](src/functions/story_grouping/README.md)
 - **Testing & Deployment**: Module-specific DEPLOYMENT.md files
 
 ---
