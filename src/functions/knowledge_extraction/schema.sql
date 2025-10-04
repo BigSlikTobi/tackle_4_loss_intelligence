@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS story_topics (
     -- Higher scores indicate stronger relevance
     confidence REAL,
     
+    -- Importance ranking (1=most important, 2=secondary, 3+=minor)
+    -- Lower numbers indicate higher priority/relevance
+    rank INTEGER,
+    
     -- Timestamp when topic was extracted
     extracted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
@@ -48,6 +52,10 @@ ON story_topics USING gin(to_tsvector('english', topic));
 -- Index on confidence for filtering high-quality topics
 CREATE INDEX IF NOT EXISTS idx_story_topics_confidence 
 ON story_topics(confidence DESC) WHERE confidence IS NOT NULL;
+
+-- Index on rank for sorting by importance
+CREATE INDEX IF NOT EXISTS idx_story_topics_rank 
+ON story_topics(story_group_id, rank) WHERE rank IS NOT NULL;
 
 COMMENT ON TABLE story_topics IS 
 'Key topics extracted from story groups for cross-referencing';
@@ -93,6 +101,18 @@ CREATE TABLE IF NOT EXISTS story_entities (
     -- Whether this is a primary entity (main subject) or secondary mention
     is_primary BOOLEAN DEFAULT FALSE,
     
+    -- Player disambiguation fields (only populated for entity_type='player')
+    -- Extracted from story context to help disambiguate players with same names
+    -- Example: "Josh Allen" could be QB (Bills) or LB (Jaguars)
+    -- At least ONE of these fields must be present for player entities
+    position TEXT,        -- Player position: QB, RB, WR, TE, etc.
+    team_abbr TEXT,       -- Team abbreviation: BUF, KC, SF, etc.
+    team_name TEXT,       -- Team full name: Bills, Chiefs, 49ers, etc.
+    
+    -- Importance ranking (1=most important, 2=secondary, 3+=minor)
+    -- Lower numbers indicate higher priority/relevance
+    rank INTEGER,
+    
     -- Timestamp when entity was extracted
     extracted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
@@ -125,6 +145,15 @@ ON story_entities(confidence DESC) WHERE confidence IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_story_entities_extracted_at 
 ON story_entities(extracted_at DESC);
 
+-- Index on player disambiguation fields for faster lookups
+CREATE INDEX IF NOT EXISTS idx_story_entities_player_hints 
+ON story_entities(mention_text, position, team_abbr) 
+WHERE entity_type = 'player';
+
+-- Index on rank for sorting by importance
+CREATE INDEX IF NOT EXISTS idx_story_entities_rank 
+ON story_entities(story_group_id, rank) WHERE rank IS NOT NULL;
+
 COMMENT ON TABLE story_entities IS 
 'Links story groups to NFL entities (players, teams, games)';
 
@@ -142,6 +171,15 @@ COMMENT ON COLUMN story_entities.confidence IS
 
 COMMENT ON COLUMN story_entities.is_primary IS 
 'TRUE if entity is the main subject of the story';
+
+COMMENT ON COLUMN story_entities.position IS 
+'Player position (QB, RB, etc.) for disambiguation - required for player entities';
+
+COMMENT ON COLUMN story_entities.team_abbr IS 
+'Player team abbreviation for disambiguation - helps identify which player';
+
+COMMENT ON COLUMN story_entities.team_name IS 
+'Player team name for disambiguation - at least one hint (position/team) required';
 
 
 -- =============================================================================

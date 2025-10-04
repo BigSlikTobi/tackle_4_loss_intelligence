@@ -14,6 +14,8 @@
 - 🧠 **GPT-5-mini with medium reasoning** - Optimized cost/performance balance ($3-10 per 1K groups)
 - 🔄 **Production resilience** - Retry logic, circuit breakers, rate limiting, timeout handling
 - 🎯 **Fuzzy entity matching** - Handles nicknames, abbreviations, and variations
+- 🔒 **Player disambiguation** - Requires 2+ identifying hints (name + position/team) to prevent ambiguity
+- 🏆 **Importance ranking** - Entities and topics ranked by relevance (rank 1=main, 2=secondary, 3+=minor)
 - 📊 **Batch processing** - Efficient pagination and progress tracking
 - 🧪 **Dry-run mode** - Test extraction without database writes
 - 📈 **Comprehensive monitoring** - Error tracking and performance metrics
@@ -140,6 +142,93 @@ python scripts/extract_knowledge_cli.py --limit 100 --verbose
 
 ---
 
+## Advanced Features
+
+### 🔒 Player Disambiguation
+
+**Requires 2+ identifying hints per player to prevent ambiguity.**
+
+**Problem:** Players with common names (e.g., "Josh Allen") cannot be uniquely identified without context.
+
+**Solution:** The extractor requires at least 2 hints for every player:
+1. Player name (required)
+2. Position (QB, RB, etc.) OR Team (BUF, Bills, etc.)
+
+**Examples:**
+
+| Extraction | Status | Reason |
+|------------|--------|--------|
+| "Josh Allen QB threw 3 TDs" | ✅ Extracted | Name + Position |
+| "Bills QB Josh Allen" | ✅ Extracted | Name + Position + Team |
+| "Josh Allen" (no context) | ❌ Skipped | Insufficient hints |
+| "Smith caught a pass" | ❌ Skipped | Common name, no hints |
+
+**Database Fields:**
+```python
+position: str      # QB, RB, WR, TE, etc.
+team_abbr: str     # BUF, KC, SF, etc.
+team_name: str     # Bills, Chiefs, 49ers, etc.
+```
+
+**Benefits:**
+- Distinguishes Josh Allen QB (Bills) from Josh Allen LB (Jaguars)
+- Higher extraction accuracy
+- Better downstream entity resolution
+- Clear validation logs
+
+### 🏆 Importance Ranking
+
+**Entities and topics are ranked by relevance for better organization.**
+
+**Ranking System:**
+- **Rank 1**: Main subject(s) - primary focus of the story
+- **Rank 2**: Secondary - important supporting entities/topics
+- **Rank 3+**: Tertiary - minor mentions
+
+**Example Story:**
+```
+"Josh Allen threw for 3 touchdowns as the Bills defeated the Dolphins 35-23. 
+Stefon Diggs caught 2 TDs. James Cook added a rushing touchdown."
+```
+
+**Extracted with Rankings:**
+
+| Entity/Topic | Type | Rank | Reason |
+|--------------|------|------|--------|
+| Josh Allen | player | 1 | Main subject, primary action |
+| Buffalo Bills | team | 1 | Winning team |
+| qb performance | topic | 1 | Primary theme |
+| Stefon Diggs | player | 2 | Secondary subject |
+| Miami Dolphins | team | 2 | Opponent |
+| James Cook | player | 3 | Minor mention |
+
+**Query Examples:**
+```sql
+-- Get only main subjects
+SELECT * FROM story_entities 
+WHERE story_group_id = 'abc-123' AND rank = 1
+ORDER BY confidence DESC;
+
+-- Get top 3 most important entities
+SELECT * FROM story_entities 
+WHERE story_group_id = 'abc-123'
+ORDER BY rank ASC, confidence DESC
+LIMIT 3;
+
+-- Get primary and secondary only
+SELECT * FROM story_entities 
+WHERE story_group_id = 'abc-123' AND rank <= 2
+ORDER BY rank, confidence DESC;
+```
+
+**Frontend Benefits:**
+- Display "Main Players" vs "Also Mentioned"
+- Show top N entities efficiently
+- Better UX with organized information
+- Focus analytics on primary entities
+
+---
+
 ## Database Schema
 
 ### `story_topics`
@@ -152,6 +241,7 @@ Stores key topics extracted from story groups as searchable text.
 | story_group_id  | UUID        | Foreign key to story_groups                 |
 | topic           | TEXT        | Normalized topic (lowercase)                |
 | confidence      | REAL        | LLM confidence score (0.0-1.0)              |
+| rank            | INTEGER     | Importance ranking (1=main, 2=secondary, 3+=minor) |
 | extracted_at    | TIMESTAMPTZ | Extraction timestamp                        |
 
 **Indexes:**
@@ -175,6 +265,10 @@ Links story groups to specific NFL entities (polymorphic design).
 | mention_text    | TEXT        | Original text from story                    |
 | confidence      | REAL        | Resolution confidence (0.0-1.0)             |
 | is_primary      | BOOLEAN     | Main subject vs. mention                    |
+| position        | TEXT        | Player position (QB, RB, etc.) - for disambiguation |
+| team_abbr       | TEXT        | Player team abbreviation - for disambiguation |
+| team_name       | TEXT        | Player team name - for disambiguation       |
+| rank            | INTEGER     | Importance ranking (1=main, 2=secondary, 3+=minor) |
 | extracted_at    | TIMESTAMPTZ | Extraction timestamp                        |
 
 **Indexes:**
@@ -183,9 +277,13 @@ Links story groups to specific NFL entities (polymorphic design).
 - `idx_story_entities_primary` - Filter primary entities
 
 **Example Entities:**
-- `{type: 'player', entity_id: '00-0033873', mention_text: 'Patrick Mahomes'}`
+- `{type: 'player', entity_id: '00-0033873', mention_text: 'Patrick Mahomes', position: 'QB', team_name: 'Chiefs'}`
 - `{type: 'team', entity_id: 'KC', mention_text: 'Chiefs'}`
 - `{type: 'game', entity_id: '2024_01_KC_LAC', mention_text: 'Chiefs vs Chargers'}`
+
+**Player Disambiguation Fields:**
+For player entities, at least one of `position`, `team_abbr`, or `team_name` must be present.
+This ensures accurate identification of players with common names (e.g., Josh Allen QB vs Josh Allen LB).
 
 ### Utility Views
 
@@ -309,6 +407,84 @@ ORDER BY is_primary DESC, confidence DESC;
 - Upserts entities (deduplicates by group + type + id)
 - Supports dry-run mode
 - Returns write statistics
+
+---
+
+## Status Tracking & Retry System
+
+The extraction system uses a dedicated status table to track progress, handle retries, and detect failures.
+
+### Status Values
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Not yet processed (or reset for reprocessing) |
+| `processing` | Currently being extracted |
+| `completed` | Successfully extracted topics and entities |
+| `failed` | Extraction failed (with error message stored) |
+| `partial` | Some data extracted but not complete |
+
+### Key Features
+
+**Automatic Status Tracking:**
+- Status updates automatically during extraction
+- Tracks timestamps: `started_at`, `completed_at`, `last_attempt_at`
+- Records counts: `topics_extracted`, `entities_extracted`
+
+**Error Tracking:**
+- Stores error messages (truncated to 1000 chars)
+- Increments `error_count` on each failure
+- Prevents infinite retry loops with `max_errors` threshold
+
+**Retry Failed Extractions:**
+```bash
+# Retry failed extractions (max 3 errors per group)
+python scripts/extract_knowledge_cli.py --retry-failed
+
+# Retry with custom error threshold
+python scripts/extract_knowledge_cli.py --retry-failed --max-errors 5
+
+# Check progress with status breakdown
+python scripts/extract_knowledge_cli.py --progress
+```
+
+### Monitoring Queries
+
+**Check failed groups:**
+```sql
+SELECT 
+    sg.id,
+    sg.created_at,
+    ses.error_count,
+    ses.error_message,
+    ses.last_attempt_at
+FROM story_groups sg
+JOIN story_group_extraction_status ses ON sg.id = ses.story_group_id
+WHERE ses.status = 'failed'
+ORDER BY ses.last_attempt_at DESC;
+```
+
+**Get success rate:**
+```sql
+SELECT 
+    status,
+    COUNT(*) as count,
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) as percentage
+FROM story_group_extraction_status
+GROUP BY status;
+```
+
+**Check groups stuck in processing (>30 mins):**
+```sql
+SELECT 
+    sg.id,
+    ses.started_at,
+    EXTRACT(EPOCH FROM (NOW() - ses.started_at)) / 60 AS minutes_processing
+FROM story_groups sg
+JOIN story_group_extraction_status ses ON sg.id = ses.story_group_id
+WHERE ses.status = 'processing'
+    AND ses.started_at < NOW() - INTERVAL '30 minutes';
+```
 
 ---
 
