@@ -327,6 +327,15 @@ Format your response as structured data that can be easily parsed."""
 
         except Exception as e:
             processing_time = time.time() - start_time
+            
+            # Check if it's a 500 server error - trigger fallback immediately
+            error_str = str(e)
+            if "500" in error_str and "INTERNAL" in error_str:
+                logger.warning(
+                    f"Gemini 500 error for {url}. Triggering fallback content fetching..."
+                )
+                return self._summarize_with_fallback(url, title, start_time)
+            
             logger.error(f"Failed to summarize URL {url}: {e}", exc_info=True)
             raise Exception(f"Gemini API error: {e}") from e
 
