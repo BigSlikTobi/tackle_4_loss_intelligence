@@ -66,10 +66,51 @@ This creates:
 
 ### 4. Extract Knowledge
 
+#### Option A: Batch Processing (Recommended for Large Volumes)
+
+**💰 50% cost savings | ⏱ 24-hour completion | 📦 Process up to 50,000 groups**
+
 ```bash
 # Check what needs processing
 python scripts/extract_knowledge_cli.py --progress
 
+# Create batch job for all unextracted groups
+python scripts/extract_knowledge_cli.py --batch
+
+# Create batch job with automatic completion monitoring
+python scripts/extract_knowledge_cli.py --batch --wait
+
+# Create batch for specific number of groups
+python scripts/extract_knowledge_cli.py --batch --limit 1000
+
+# Check status of a batch job
+python scripts/extract_knowledge_cli.py --batch-status batch_abc123
+
+# Process completed batch results
+python scripts/extract_knowledge_cli.py --batch-process batch_abc123
+
+# List recent batch jobs
+python scripts/extract_knowledge_cli.py --batch-list
+
+# Cancel a running batch
+python scripts/extract_knowledge_cli.py --batch-cancel batch_abc123
+```
+
+**When to use batch processing:**
+- ✅ Processing 100+ story groups (significant cost savings)
+- ✅ Non-urgent workloads (24h completion time acceptable)
+- ✅ Large-scale backfills or historical data processing
+- ✅ Budget-constrained projects (50% cheaper than synchronous)
+
+**Cost Example (3,500 groups):**
+- Synchronous: ~$35-70 (2 API calls per group × $0.01-0.02 per call)
+- **Batch: ~$17-35** (50% discount) 💰
+
+#### Option B: Synchronous Processing (Real-time)
+
+**⚡ Immediate results | 🔄 Real-time progress | 📊 Detailed logging**
+
+```bash
 # Test first (no database writes)
 python scripts/extract_knowledge_cli.py --dry-run --limit 5
 
@@ -78,7 +119,16 @@ python scripts/extract_knowledge_cli.py
 
 # Process specific number with verbose logging
 python scripts/extract_knowledge_cli.py --limit 100 --verbose
+
+# Retry failed extractions
+python scripts/extract_knowledge_cli.py --retry-failed
 ```
+
+**When to use synchronous processing:**
+- ✅ Small volumes (<100 groups) where cost difference is minimal
+- ✅ Urgent/time-sensitive extraction needs
+- ✅ Development and testing (immediate feedback)
+- ✅ When you need detailed real-time progress logging
 
 ---
 
@@ -130,15 +180,70 @@ python scripts/extract_knowledge_cli.py --limit 100 --verbose
 - ✅ Comprehensive error logging
 
 **Scalability:**
-- ✅ Batch processing with pagination (1000 rows per page)
+- ✅ **Batch processing via OpenAI Batch API** (up to 50,000 groups per batch)
+- ✅ Database pagination (1000 rows per page)
 - ✅ Connection pooling and reuse
 - ✅ Memory-efficient streaming
 - ✅ Progress tracking and checkpointing
 
 **Cost Optimization:**
-- ✅ GPT-5-mini with medium reasoning (~$3-10 per 1,000 groups)
-- ✅ Batch operations to minimize API calls
+- ✅ **50% cost savings with batch processing** (OpenAI Batch API discount)
+- ✅ GPT-5-mini with medium reasoning (~$3-10 per 1,000 groups synchronous, $1.50-5 batch)
+- ✅ Batch operations to minimize API overhead
 - ✅ Smart caching of entity lookups
+
+### Batch Processing Architecture
+
+**Batch processing workflow:**
+
+```
+┌─────────────────────┐
+│ 1. Generate Requests│  ← Create .jsonl file with all extraction requests
+│    (request_generator)│     Format: {custom_id, method, url, body}
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ 2. Upload to OpenAI │  ← Upload .jsonl via Files API
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ 3. Create Batch Job │  ← Create batch via Batches API
+│    (batch_abc123)   │     Status: validating → in_progress → completed
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ 4. Poll Status      │  ← Check status periodically (60s intervals)
+│    (optional wait)  │     Track: total, completed, failed counts
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ 5. Download Results │  ← Fetch output file when completed
+│    (output.jsonl)   │     Contains responses for all requests
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ 6. Process Results  │  ← Parse responses, resolve entities
+│    (result_processor)│     Write to database
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│ story_topics        │  ← Knowledge extracted and saved
+│ story_entities      │
+└─────────────────────┘
+```
+
+**Batch Processing Benefits:**
+- 💰 **50% cost reduction** vs synchronous API calls
+- 📦 **Higher throughput**: Process up to 50,000 groups per batch
+- ⏱ **Predictable completion**: 24-hour guarantee
+- 🔄 **Automatic retries**: Built-in by OpenAI
+- 📊 **Progress tracking**: Monitor status via CLI
 
 ---
 
@@ -376,6 +481,191 @@ ORDER BY is_primary DESC, confidence DESC;
 
 ---
 
+## Batch Processing Workflow
+
+### Complete Example: Processing 3,500 Story Groups
+
+**Step 1: Check Progress**
+```bash
+python scripts/extract_knowledge_cli.py --progress
+```
+
+Output:
+```
+============================================================
+KNOWLEDGE EXTRACTION PROGRESS
+============================================================
+Total story groups:        3,500
+Groups with extraction:    0
+Groups remaining:          3,500
+Failed groups:             0
+...
+💡 Use --batch flag for 50% cost savings on large volumes!
+```
+
+**Step 2: Create Batch Job**
+```bash
+python scripts/extract_knowledge_cli.py --batch
+```
+
+Output:
+```
+================================================================================
+Generating Batch Request File
+================================================================================
+Loading groups (limit: all, retry_failed: False)...
+Generating requests for 3500 story groups...
+Writing 7000 requests to ./batch_files/knowledge_extraction_batch_20251005_143022.jsonl
+
+Batch file generated: ./batch_files/knowledge_extraction_batch_20251005_143022.jsonl
+Total groups: 3500
+Total requests: 7000 (2 per group: topics + entities)
+
+Step 2: Uploading file to OpenAI: ./batch_files/...
+File uploaded with ID: file-abc123
+
+Step 3: Creating batch job...
+Batch created with ID: batch_xyz789
+Status: validating
+
+================================================================================
+Batch Job Created Successfully
+================================================================================
+Batch ID: batch_xyz789
+Status: validating
+Total groups: 3500
+Total requests: 7000
+
+To check status later, run:
+  python extract_knowledge_cli.py --batch-status batch_xyz789
+```
+
+**Step 3: Monitor Progress** (periodic checks)
+```bash
+python scripts/extract_knowledge_cli.py --batch-status batch_xyz789
+```
+
+Output:
+```
+============================================================
+BATCH STATUS
+============================================================
+Batch ID:       batch_xyz789
+Status:         in_progress
+
+Progress:
+  Total:        7000
+  Completed:    3200
+  Failed:       5
+  Complete:     45.7%
+
+Created at:     2025-10-05 14:30:22
+
+⏳ Batch is in_progress. Check again later with:
+   python extract_knowledge_cli.py --batch-status batch_xyz789
+```
+
+**Step 4: Process Results** (when completed)
+```bash
+python scripts/extract_knowledge_cli.py --batch-process batch_xyz789
+```
+
+Output:
+```
+================================================================================
+Processing Batch Results: batch_xyz789
+================================================================================
+Downloading output file: file-output123
+Output saved to: ./batch_files/batch_xyz789_output_20251006_102030.jsonl
+
+Processing results and writing to database...
+
+[1/3500] Processing group abc-123-def
+Resolved 12 entities
+Wrote 5 topics and 12 entities
+
+[2/3500] Processing group abc-124-def
+...
+
+============================================================
+BATCH PROCESSING RESULTS
+============================================================
+Batch ID:           batch_xyz789
+Groups processed:   3495
+Topics extracted:   17,450
+Entities extracted: 41,200
+Groups with errors: 5
+============================================================
+
+✅ Results saved to database!
+```
+
+**Step 5: Verify Results**
+```bash
+python scripts/extract_knowledge_cli.py --progress
+```
+
+Output:
+```
+============================================================
+KNOWLEDGE EXTRACTION PROGRESS
+============================================================
+Total story groups:        3,500
+Groups with extraction:    3,495
+Groups remaining:          5
+Failed groups:             5
+
+Total topics extracted:    17,450
+Total entities extracted:  41,200
+
+Avg topics per group:      5.0
+Avg entities per group:    11.8
+============================================================
+
+⚠️  5 groups failed - use --retry-failed to retry
+```
+
+### Batch Processing Tips
+
+**For Large Volumes (1000+):**
+```bash
+# Create batch and wait for completion (auto-process when done)
+python scripts/extract_knowledge_cli.py --batch --wait
+
+# Or break into smaller batches
+python scripts/extract_knowledge_cli.py --batch --limit 1000
+# Wait for completion, then process next batch
+```
+
+**Monitoring Active Batches:**
+```bash
+# List all recent batches
+python scripts/extract_knowledge_cli.py --batch-list
+
+# Check specific batch
+python scripts/extract_knowledge_cli.py --batch-status batch_xyz789
+```
+
+**Handling Failures:**
+```bash
+# Retry failed groups (after processing main batch)
+python scripts/extract_knowledge_cli.py --retry-failed --limit 10
+
+# Or create new batch for failed groups
+python scripts/extract_knowledge_cli.py --batch --retry-failed
+```
+
+**Cost Comparison:**
+- **Synchronous (3,500 groups)**: ~$35-70 (7,000 API calls @ $0.005-0.01 each)
+- **Batch (3,500 groups)**: ~$17-35 (50% discount) 💰
+- **Savings**: $18-35 per run
+
+**Time Comparison:**
+- **Synchronous**: 2-4 hours (with rate limits)
+- **Batch**: 12-24 hours (but hands-off, no monitoring needed)
+
+---
+
 ## Pipeline Stages
 
 ### 1. Story Reading
@@ -385,14 +675,14 @@ ORDER BY is_primary DESC, confidence DESC;
 - Fetches group summaries for extraction
 
 ### 2. Topic Extraction
-**Module:** `core/extraction/topic_extractor.py`
+**Module:** `core/extraction/topic_extractor.py` (synchronous) or `core/batch/request_generator.py` (batch)
 - Uses GPT-5-mini with medium reasoning
 - Extracts 2-4 word topic phrases
 - Normalizes to lowercase for consistency
 - Returns confidence scores
 
 ### 3. Entity Extraction
-**Module:** `core/extraction/entity_extractor.py`
+**Module:** `core/extraction/entity_extractor.py` (synchronous) or `core/batch/request_generator.py` (batch)
 - Uses GPT-5-mini with medium reasoning
 - Identifies players, teams, games
 - Captures mention text and context

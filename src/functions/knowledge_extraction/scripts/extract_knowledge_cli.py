@@ -17,6 +17,9 @@ from src.shared.utils.env import load_env
 from src.functions.knowledge_extraction.core.pipelines.extraction_pipeline import (
     ExtractionPipeline,
 )
+from src.functions.knowledge_extraction.core.pipelines.batch_pipeline import (
+    BatchPipeline,
+)
 from src.functions.knowledge_extraction.core.db.story_reader import StoryGroupReader
 
 logger = logging.getLogger(__name__)
@@ -35,11 +38,27 @@ Examples:
   # Test with dry run (first 5 groups)
   python extract_knowledge_cli.py --dry-run --limit 5
 
-  # Process all unextracted groups
+  # Process all unextracted groups (synchronous)
   python extract_knowledge_cli.py
 
   # Process specific number with verbose logging
   python extract_knowledge_cli.py --limit 10 --verbose
+
+  # BATCH PROCESSING (recommended for large volumes):
+  # Create batch job for all unextracted groups (50% cost savings!)
+  python extract_knowledge_cli.py --batch
+
+  # Create batch job for specific number with automatic processing
+  python extract_knowledge_cli.py --batch --limit 100 --wait
+
+  # Check status of a batch job
+  python extract_knowledge_cli.py --batch-status batch_abc123
+
+  # Process completed batch results
+  python extract_knowledge_cli.py --batch-process batch_abc123
+
+  # List recent batch jobs
+  python extract_knowledge_cli.py --batch-list
 
 Configuration:
   Set OPENAI_API_KEY in environment or .env file
@@ -76,6 +95,53 @@ Configuration:
         type=int,
         default=3,
         help="Maximum error count for retry (default: 3)",
+    )
+    
+    # Batch processing options
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Use batch processing (50%% cost savings, 24h completion)",
+    )
+    
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait for batch to complete and auto-process results (use with --batch)",
+    )
+    
+    parser.add_argument(
+        "--poll-interval",
+        type=int,
+        default=60,
+        help="Seconds between status checks when waiting (default: 60)",
+    )
+    
+    parser.add_argument(
+        "--batch-status",
+        type=str,
+        metavar="BATCH_ID",
+        help="Check status of a batch job",
+    )
+    
+    parser.add_argument(
+        "--batch-process",
+        type=str,
+        metavar="BATCH_ID",
+        help="Process completed batch results",
+    )
+    
+    parser.add_argument(
+        "--batch-list",
+        action="store_true",
+        help="List recent batch jobs",
+    )
+    
+    parser.add_argument(
+        "--batch-cancel",
+        type=str,
+        metavar="BATCH_ID",
+        help="Cancel a running batch job",
     )
     
     parser.add_argument(
@@ -127,10 +193,196 @@ def show_progress():
     if stats.get('remaining_groups', 0) > 0:
         print(f"💡 Run without --progress flag to extract knowledge for "
               f"{stats['remaining_groups']} remaining groups")
+        print(f"💰 Use --batch flag for 50% cost savings on large volumes!")
     else:
         print("✅ All story groups have knowledge extracted!")
     
     return True
+
+
+def handle_batch_create(args) -> bool:
+    """Create a new batch job."""
+    try:
+        logger.info("Creating batch job...")
+        
+        pipeline = BatchPipeline()
+        
+        result = pipeline.create_batch(
+            limit=args.limit,
+            retry_failed=args.retry_failed,
+            max_error_count=args.max_errors,
+            wait_for_completion=args.wait,
+            poll_interval=args.poll_interval,
+        )
+        
+        if result["status"] == "no_requests":
+            logger.warning("No requests to process")
+            return False
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to create batch: {e}", exc_info=True)
+        return False
+
+
+def handle_batch_status(batch_id: str) -> bool:
+    """Check status of a batch job."""
+    try:
+        logger.info(f"Checking status for batch: {batch_id}")
+        
+        pipeline = BatchPipeline()
+        status = pipeline.check_status(batch_id)
+        
+        print("\n" + "=" * 60)
+        print("BATCH STATUS")
+        print("=" * 60)
+        print(f"Batch ID:       {status['batch_id']}")
+        print(f"Status:         {status['status']}")
+        
+        if status.get('request_counts'):
+            counts = status['request_counts']
+            print(f"\nProgress:")
+            print(f"  Total:        {counts.get('total', 0)}")
+            print(f"  Completed:    {counts.get('completed', 0)}")
+            print(f"  Failed:       {counts.get('failed', 0)}")
+            
+            total = counts.get('total', 0)
+            if total > 0:
+                pct = (counts.get('completed', 0) / total) * 100
+                print(f"  Complete:     {pct:.1f}%")
+        
+        if status.get('created_at'):
+            from datetime import datetime
+            created = datetime.fromtimestamp(status['created_at'])
+            print(f"\nCreated at:     {created}")
+        
+        if status.get('completed_at'):
+            completed = datetime.fromtimestamp(status['completed_at'])
+            print(f"Completed at:   {completed}")
+        
+        if status.get('local_info'):
+            local = status['local_info']
+            print(f"\nLocal info:")
+            print(f"  Groups:       {local.get('total_groups', 'N/A')}")
+            print(f"  Requests:     {local.get('total_requests', 'N/A')}")
+        
+        print("=" * 60)
+        
+        # Show next steps based on status
+        if status['status'] == 'completed':
+            print(f"\n✅ Batch completed! Process results with:")
+            print(f"   python extract_knowledge_cli.py --batch-process {batch_id}")
+        elif status['status'] in ['failed', 'expired', 'cancelled']:
+            print(f"\n❌ Batch ended with status: {status['status']}")
+        else:
+            print(f"\n⏳ Batch is {status['status']}. Check again later with:")
+            print(f"   python extract_knowledge_cli.py --batch-status {batch_id}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to check batch status: {e}", exc_info=True)
+        return False
+
+
+def handle_batch_process(batch_id: str, dry_run: bool) -> bool:
+    """Process completed batch results."""
+    try:
+        logger.info(f"Processing batch results: {batch_id}")
+        
+        pipeline = BatchPipeline()
+        result = pipeline.process_batch(batch_id, dry_run=dry_run)
+        
+        print("\n" + "=" * 60)
+        print("BATCH PROCESSING RESULTS")
+        print("=" * 60)
+        print(f"Batch ID:           {result['batch_id']}")
+        print(f"Groups processed:   {result['groups_processed']}")
+        print(f"Topics extracted:   {result['topics_extracted']}")
+        print(f"Entities extracted: {result['entities_extracted']}")
+        print(f"Groups with errors: {result['groups_with_errors']}")
+        print("=" * 60)
+        
+        if result['errors']:
+            print("\nErrors encountered:")
+            for error in result['errors'][:10]:
+                print(f"  • {error}")
+            if len(result['errors']) > 10:
+                print(f"  ... and {len(result['errors']) - 10} more")
+        
+        if dry_run:
+            print("\n💡 Remove --dry-run flag to save results to database")
+        else:
+            print("\n✅ Results saved to database!")
+        
+        return result['groups_with_errors'] == 0
+        
+    except Exception as e:
+        logger.error(f"Failed to process batch: {e}", exc_info=True)
+        return False
+
+
+def handle_batch_cancel(batch_id: str) -> bool:
+    """Cancel a batch job."""
+    try:
+        logger.info(f"Cancelling batch: {batch_id}")
+        
+        pipeline = BatchPipeline()
+        result = pipeline.cancel_batch(batch_id)
+        
+        print(f"\n✅ Batch {batch_id} is now {result['status']}")
+        print("   (May take up to 10 minutes to fully cancel)")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to cancel batch: {e}", exc_info=True)
+        return False
+
+
+def handle_batch_list() -> bool:
+    """List recent batch jobs."""
+    try:
+        logger.info("Listing recent batches...")
+        
+        pipeline = BatchPipeline()
+        batches = pipeline.list_batches(limit=10)
+        
+        print("\n" + "=" * 60)
+        print("RECENT BATCH JOBS")
+        print("=" * 60)
+        
+        if not batches:
+            print("No batch jobs found")
+        else:
+            for batch in batches:
+                from datetime import datetime
+                created = datetime.fromtimestamp(batch['created_at'])
+                
+                status_emoji = {
+                    'completed': '✅',
+                    'failed': '❌',
+                    'cancelled': '🚫',
+                    'in_progress': '⏳',
+                    'validating': '🔍',
+                }.get(batch['status'], '•')
+                
+                print(f"\n{status_emoji} {batch['batch_id']}")
+                print(f"   Status: {batch['status']}")
+                print(f"   Created: {created}")
+                
+                if batch.get('progress'):
+                    print(f"   Progress: {batch['progress']}")
+        
+        print("=" * 60)
+        print("\n💡 Check specific batch with: --batch-status BATCH_ID")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to list batches: {e}", exc_info=True)
+        return False
 
 
 def main():
@@ -167,6 +419,28 @@ def main():
         logger.error("Set it in .env file or export OPENAI_API_KEY=your-key")
         sys.exit(1)
     
+    # Handle batch operations
+    if args.batch_list:
+        handle_batch_list()
+        sys.exit(0)
+    
+    if args.batch_status:
+        success = handle_batch_status(args.batch_status)
+        sys.exit(0 if success else 1)
+    
+    if args.batch_process:
+        success = handle_batch_process(args.batch_process, args.dry_run)
+        sys.exit(0 if success else 1)
+    
+    if args.batch_cancel:
+        success = handle_batch_cancel(args.batch_cancel)
+        sys.exit(0 if success else 1)
+    
+    if args.batch:
+        success = handle_batch_create(args)
+        sys.exit(0 if success else 1)
+    
+    # Standard synchronous processing
     # Show configuration
     logger.info(f"Configuration:")
     logger.info(f"  Limit: {args.limit or 'all unextracted groups'}")
