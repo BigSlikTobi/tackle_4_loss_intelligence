@@ -243,7 +243,10 @@ class ExtractionPipeline:
                 if entity.entity_type == "player":
                     resolved_entity = self.entity_resolver.resolve_player(
                         entity.mention_text,
-                        context=entity.context
+                        context=entity.context,
+                        position=entity.position,
+                        team_abbr=entity.team_abbr,
+                        team_name=entity.team_name
                     )
                 elif entity.entity_type == "team":
                     resolved_entity = self.entity_resolver.resolve_team(
@@ -257,8 +260,16 @@ class ExtractionPipeline:
                     )
                 
                 if resolved_entity:
-                    # Preserve is_primary from extraction
+                    # Preserve fields from extraction
                     resolved_entity.is_primary = entity.is_primary
+                    resolved_entity.rank = entity.rank
+                    
+                    # Preserve player disambiguation fields
+                    if entity.entity_type == "player":
+                        resolved_entity.position = entity.position
+                        resolved_entity.team_abbr = entity.team_abbr
+                        resolved_entity.team_name = entity.team_name
+                    
                     resolved.append(resolved_entity)
                 else:
                     logger.debug(f"Could not resolve {entity.entity_type}: {entity.mention_text}")

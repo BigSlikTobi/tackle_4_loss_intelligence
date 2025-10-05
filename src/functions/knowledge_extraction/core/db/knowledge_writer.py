@@ -72,6 +72,7 @@ class KnowledgeWriter:
                     "story_group_id": story_group_id,
                     "topic": normalized_topic,
                     "confidence": topic.confidence,
+                    "rank": topic.rank,
                 }
                 records.append(record)
             
@@ -154,6 +155,10 @@ class KnowledgeWriter:
                     "mention_text": entity.mention_text,
                     "confidence": entity.confidence,
                     "is_primary": entity.is_primary,
+                    "rank": entity.rank,
+                    "position": entity.position,
+                    "team_abbr": entity.team_abbr,
+                    "team_name": entity.team_name,
                 }
                 records.append(record)
             

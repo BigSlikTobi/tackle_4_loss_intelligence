@@ -228,10 +228,12 @@ For EVERY player mention, you MUST provide AT LEAST 2 identifying hints:
 ✅ "Josh Allen" + "Bills" → mention_text: "Josh Allen", team_name: "Bills"
 ✅ "Mahomes" + "Chiefs QB" → mention_text: "Mahomes", position: "QB", team_abbr: "KC"
 ✅ "Travis Kelce" + "tight end" → mention_text: "Travis Kelce", position: "TE"
+✅ "Allen" + "Bills QB" → mention_text: "Allen", position: "QB", team_name: "Bills"
 
 **Example INVALID Extractions (DO NOT EXTRACT):**
 ❌ "Josh Allen" with no position or team mentioned → SKIP this player
-❌ "Smith" with no first name, position, or team → SKIP this player
+❌ "Allen" alone without position or team → SKIP - needs disambiguation
+❌ "Smith" with no position or team → SKIP this player
 ❌ "the quarterback" with no name → SKIP this reference
 
 **Entity Types to Extract:**
@@ -364,10 +366,12 @@ Return up to {max_entities} entities in JSON format, **ORDERED BY RANK** (rank 1
                 
                 # CRITICAL: Validate player disambiguation
                 if entity_type == "player":
+                    # Check for disambiguation fields
                     has_position = position is not None and len(str(position).strip()) > 0
                     has_team_abbr = team_abbr is not None and len(str(team_abbr).strip()) > 0
                     has_team_name = team_name is not None and len(str(team_name).strip()) > 0
                     
+                    # Require at least one disambiguation field
                     if not (has_position or has_team_abbr or has_team_name):
                         logger.warning(
                             f"Player '{mention_text}' missing disambiguation info "
