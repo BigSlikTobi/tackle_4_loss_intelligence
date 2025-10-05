@@ -81,7 +81,8 @@ class PlayerDataTransformer(BaseDataTransformer):
             jersey_number = str(jersey_int) if jersey_int is not None else str(jersey_raw).strip()
 
         latest_team = (
-            record.get("recent_team")
+            record.get("latest_team")  # nflreadpy uses this field name
+            or record.get("recent_team")
             or record.get("team")
             or record.get("last_team")
         )

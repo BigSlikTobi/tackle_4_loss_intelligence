@@ -150,18 +150,27 @@ python scripts/extract_knowledge_cli.py --limit 100 --verbose
 
 **Problem:** Players with common names (e.g., "Josh Allen") cannot be uniquely identified without context.
 
-**Solution:** The extractor requires at least 2 hints for every player:
-1. Player name (required)
-2. Position (QB, RB, etc.) OR Team (BUF, Bills, etc.)
+**Solution:** The system uses a two-layer approach:
+1. **Extraction Layer**: Requires name + (position OR team) for every player
+2. **Resolution Layer**: Uses disambiguation info to filter database matches
+
+**How It Works:**
+
+When the LLM extracts "Allen" with position="QB" and team="Bills":
+1. Extraction validates: Has position OR team? ✅ Pass
+2. Resolution finds all "Allen" players in database
+3. Resolution filters: Keep only players where position=QB AND team=BUF
+4. Result: Only Josh Allen (Bills QB) matches, not Josh Allen (Jaguars LB)
 
 **Examples:**
 
-| Extraction | Status | Reason |
-|------------|--------|--------|
-| "Josh Allen QB threw 3 TDs" | ✅ Extracted | Name + Position |
-| "Bills QB Josh Allen" | ✅ Extracted | Name + Position + Team |
-| "Josh Allen" (no context) | ❌ Skipped | Insufficient hints |
-| "Smith caught a pass" | ❌ Skipped | Common name, no hints |
+| Extraction | Resolution Behavior | Result |
+|------------|---------------------|--------|
+| "Josh Allen" + position="QB" | Filters to only QB players named Josh Allen | ✅ Josh Allen (Bills QB) |
+| "Allen" + position="QB" + team="Bills" | Filters to only Bills QBs named Allen | ✅ Josh Allen (Bills QB) |
+| "Allen" + position="LB" | Filters to only LB players named Allen | ✅ Josh Allen (Jaguars LB) |
+| "Mahomes" + team="Chiefs" | Filters to only Chiefs players named Mahomes | ✅ Patrick Mahomes |
+| "Josh Allen" (no context) | ❌ Rejected at extraction (missing disambiguation) | ❌ Not extracted |
 
 **Database Fields:**
 ```python

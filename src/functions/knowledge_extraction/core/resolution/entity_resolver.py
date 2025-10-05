@@ -25,6 +25,12 @@ class ResolvedEntity:
     matched_name: str  # Canonical name from database
     confidence: float  # Resolution confidence score
     is_primary: bool = False  # From extraction
+    rank: Optional[int] = None  # Importance ranking (1=main, 2=secondary, 3+=minor)
+    
+    # Player-specific disambiguation fields (passed through from extraction)
+    position: Optional[str] = None  # QB, RB, WR, etc.
+    team_abbr: Optional[str] = None  # BUF, KC, SF, etc.
+    team_name: Optional[str] = None  # Bills, Chiefs, 49ers, etc.
 
 
 class EntityResolver:
@@ -76,7 +82,10 @@ class EntityResolver:
     def resolve_player(
         self,
         mention_text: str,
-        context: Optional[str] = None
+        context: Optional[str] = None,
+        position: Optional[str] = None,
+        team_abbr: Optional[str] = None,
+        team_name: Optional[str] = None
     ) -> Optional[ResolvedEntity]:
         """
         Resolve a player mention to a player_id.
@@ -84,6 +93,9 @@ class EntityResolver:
         Args:
             mention_text: Player name/nickname from extraction
             context: Context around the mention (helps with disambiguation)
+            position: Player position if known (QB, RB, etc.) - used for disambiguation
+            team_abbr: Team abbreviation if known (BUF, KC, etc.) - used for disambiguation
+            team_name: Team name if known (Bills, Chiefs, etc.) - used for disambiguation
             
         Returns:
             ResolvedEntity if match found, None otherwise
@@ -91,25 +103,127 @@ class EntityResolver:
         if not self._players_cache:
             self._load_players_cache()
         
+        # Log what we're trying to resolve
+        logger.debug(
+            f"Resolving player: '{mention_text}' with disambiguation: "
+            f"position={position}, team_abbr={team_abbr}, team_name={team_name}"
+        )
+        
         # Clean the mention text
         clean_mention = self._normalize_text(mention_text)
+        
+        # Build list of candidate matches
+        candidates = []
         
         # Try exact match first (case-insensitive)
         for player_id, player in self._players_cache.items():
             if self._exact_match(clean_mention, player):
-                return ResolvedEntity(
-                    entity_type="player",
-                    entity_id=player_id,
-                    mention_text=mention_text,
-                    matched_name=player["display_name"],
-                    confidence=1.0,
+                candidates.append((player_id, player, 1.0))
+        
+        # If no exact matches, try fuzzy matching
+        if not candidates:
+            fuzzy_match = self._fuzzy_match_player(clean_mention)
+            if fuzzy_match and fuzzy_match.confidence >= self.confidence_threshold:
+                # Get player data from cache
+                player = self._players_cache.get(fuzzy_match.entity_id)
+                if player:
+                    candidates.append((fuzzy_match.entity_id, player, fuzzy_match.confidence))
+        
+        logger.debug(f"Found {len(candidates)} initial candidates for '{mention_text}'")
+        
+        # If we have disambiguation info (position or team), filter candidates
+        # BUT: Only filter if BOTH extracted AND database have the field populated
+        if candidates and (position or team_abbr or team_name):
+            filtered_candidates = []
+            
+            for player_id, player, confidence in candidates:
+                should_keep = True
+                mismatch_reasons = []
+                
+                # Check position match - ONLY if BOTH provided AND player has position in DB
+                if position:
+                    player_position = player.get("position", "").upper().strip()
+                    provided_position = position.upper().strip()
+                    
+                    # Only filter if player has position data in DB
+                    if player_position:
+                        if player_position != provided_position:
+                            should_keep = False
+                            mismatch_reasons.append(f"position mismatch: player={player_position} vs provided={provided_position}")
+                    else:
+                        # Player has no position in database - can't validate, so allow it
+                        logger.debug(f"Player {player.get('display_name')} has no position in DB, skipping position check")
+                
+                # Check team match - ONLY if BOTH provided AND player has team in DB
+                if should_keep and (team_abbr or team_name):
+                    # Try both 'team_abbr' and 'latest_team' fields
+                    player_team = (player.get("team_abbr") or player.get("latest_team", "")).upper().strip()
+                    
+                    # Only filter if player has team data in DB
+                    if player_team:
+                        if team_abbr:
+                            provided_team = team_abbr.upper().strip()
+                            if player_team != provided_team:
+                                should_keep = False
+                                mismatch_reasons.append(f"team mismatch: player={player_team} vs provided={provided_team}")
+                        
+                        elif team_name:
+                            # Try to resolve team name to abbreviation
+                            provided_team_lower = team_name.lower().strip()
+                            if not self._teams_cache:
+                                self._load_teams_cache()
+                            
+                            # Find matching team abbreviation
+                            matched_team_abbr = None
+                            for abbr, team_data in self._teams_cache.items():
+                                team_full_name = team_data.get("team_name", "").lower().strip()
+                                if provided_team_lower in team_full_name or team_full_name in provided_team_lower:
+                                    matched_team_abbr = abbr.upper()
+                                    break
+                            
+                            if matched_team_abbr:
+                                if player_team != matched_team_abbr:
+                                    should_keep = False
+                                    mismatch_reasons.append(f"team mismatch: player={player_team} vs provided={matched_team_abbr}")
+                            else:
+                                logger.debug(f"Could not resolve team name '{team_name}' to abbreviation")
+                    else:
+                        # Player has no team in database - can't validate, so allow it
+                        logger.debug(f"Player {player.get('display_name')} has no team in DB, skipping team check")
+                
+                # Keep or filter this candidate
+                if should_keep:
+                    filtered_candidates.append((player_id, player, confidence))
+                else:
+                    logger.debug(
+                        f"Filtered out player {player.get('display_name', player_id)} "
+                        f"({', '.join(mismatch_reasons)})"
+                    )
+            
+            # Update candidates with filtered list
+            if filtered_candidates:
+                candidates = filtered_candidates
+                logger.debug(f"Kept {len(filtered_candidates)} candidates after disambiguation filtering")
+            else:
+                logger.warning(
+                    f"No players matched after disambiguation filtering for '{mention_text}' "
+                    f"with position={position}, team_abbr={team_abbr}, team_name={team_name}"
                 )
+                return None
         
-        # Try fuzzy matching
-        best_match = self._fuzzy_match_player(clean_mention)
-        
-        if best_match and best_match.confidence >= self.confidence_threshold:
-            return best_match
+        # Return the best candidate
+        if candidates:
+            # Sort by confidence (highest first)
+            candidates.sort(key=lambda x: x[2], reverse=True)
+            player_id, player, confidence = candidates[0]
+            
+            return ResolvedEntity(
+                entity_type="player",
+                entity_id=player_id,
+                mention_text=mention_text,
+                matched_name=player["display_name"],
+                confidence=confidence,
+            )
         
         logger.debug(f"No player match for: {mention_text}")
         return None
