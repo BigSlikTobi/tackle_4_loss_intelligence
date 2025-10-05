@@ -47,3 +47,6 @@ htmlcov/
 
 # Project specific
 .kiro/
+
+# Batch files
+src/functions/knowledge_extraction/batch_files

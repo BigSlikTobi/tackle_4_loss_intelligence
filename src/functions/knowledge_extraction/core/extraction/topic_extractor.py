@@ -116,7 +116,7 @@ class TopicExtractor:
     def extract(
         self,
         summary_text: str,
-        max_topics: int = 10,
+        max_topics: int = 6,
     ) -> List[ExtractedTopic]:
         """
         Extract topics from story summary text with retry logic.
