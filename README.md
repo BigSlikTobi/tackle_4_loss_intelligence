@@ -4,6 +4,17 @@
 
 ---
 
+## 🧪 Testing
+
+Install the lightweight dev dependencies and run the shared pytest suite from the project root:
+
+```bash
+python -m pip install -r requirements-dev.txt
+pytest
+```
+
+Each module-specific test lives under `tests/<module_name>/` to respect function isolation. You can target a single module (for example, `pytest tests/story_embeddings`) when working locally.
+
 ## 📦 Functional Modules
 
 ### Data Loading
