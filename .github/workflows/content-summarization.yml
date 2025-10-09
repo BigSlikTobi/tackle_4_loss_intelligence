@@ -30,6 +30,7 @@ jobs:
           pip install -r src/functions/content_summarization/requirements.txt
       
       - name: Generate content summaries
+        id: summarize
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -42,7 +43,7 @@ jobs:
       - name: Report status
         if: always()
         run: |
-          if [ $? -eq 0 ]; then
+          if [ "${{ steps.summarize.outcome }}" == "success" ]; then
             echo "✅ Content summarization completed successfully"
           else
             echo "❌ Content summarization failed"
