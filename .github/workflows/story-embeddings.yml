@@ -1,0 +1,49 @@
+name: Generate Story Embeddings
+
+on:
+  schedule:
+    # Every 15 minutes
+    - cron: '*/15 * * * *'
+  
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  generate-embeddings:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/functions/story_embeddings/requirements.txt
+      
+      - name: Generate embeddings
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python src/functions/story_embeddings/scripts/generate_embeddings_cli.py \
+            --verbose
+      
+      - name: Report status
+        if: always()
+        run: |
+          if [ $? -eq 0 ]; then
+            echo "✅ Embedding generation completed successfully"
+          else
+            echo "❌ Embedding generation failed"
+            exit 1
+          fi
