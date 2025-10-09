@@ -41,7 +41,7 @@ jobs:
       - name: Report status
         if: always()
         run: |
-          if [ $? -eq 0 ]; then
+          if [ "${{ job.status }}" == "success" ]; then
             echo "✅ Knowledge extraction completed successfully"
           else
             echo "❌ Knowledge extraction failed"
