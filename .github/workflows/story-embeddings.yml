@@ -30,6 +30,7 @@ jobs:
           pip install -r src/functions/story_embeddings/requirements.txt
       
       - name: Generate embeddings
+        id: generate-embeddings
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -41,7 +42,7 @@ jobs:
       - name: Report status
         if: always()
         run: |
-          if [ $? -eq 0 ]; then
+          if [ "${{ steps.generate-embeddings.outcome }}" == "success" ]; then
             echo "✅ Embedding generation completed successfully"
           else
             echo "❌ Embedding generation failed"
