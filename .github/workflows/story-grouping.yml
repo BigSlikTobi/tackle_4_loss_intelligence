@@ -34,8 +34,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          python src/functions/story_grouping/scripts/group_stories_cli.py \
-            --verbose
+          python src/functions/story_grouping/scripts/group_stories_cli.py
       
       - name: Report status
         if: always()
