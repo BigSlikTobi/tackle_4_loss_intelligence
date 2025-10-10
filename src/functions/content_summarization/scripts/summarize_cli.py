@@ -127,7 +127,7 @@ def main():
         logger.error("GEMINI_API_KEY not found in environment")
         sys.exit(1)
 
-    model = args.model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    model = args.model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-09-2025")
 
     # Display configuration
     logger.info(f"Configuration:")

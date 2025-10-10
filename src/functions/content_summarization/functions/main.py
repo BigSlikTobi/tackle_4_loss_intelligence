@@ -59,7 +59,10 @@ def summarize_content(request: Request) -> tuple[Any, int]:
         limit = request_json.get("limit")
         publisher = request_json.get("publisher")
         url_ids = request_json.get("url_ids")
-        model = request_json.get("model", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
+        model = request_json.get(
+            "model",
+            os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-09-2025"),
+        )
         enable_grounding = request_json.get("enable_grounding", False)
 
         logger.info(

@@ -41,7 +41,7 @@ class ContentSummary:
     content_quality: Optional[str] = None  # high, medium, low (based on content depth)
 
     # LLM Processing Info
-    model_used: Optional[str] = None  # e.g., "gemini-2.5-flash"
+    model_used: Optional[str] = None  # e.g., "gemini-2.5-flash-preview-09-2025"
     tokens_used: Optional[int] = None  # Total tokens consumed
     processing_time_seconds: Optional[float] = None  # Time to generate summary
     url_retrieval_status: Optional[str] = None  # URL_RETRIEVAL_STATUS_SUCCESS, etc.

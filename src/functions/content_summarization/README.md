@@ -82,7 +82,7 @@ Add to **central `.env` file** at project root:
 ```bash
 # Google Gemini API (Required)
 GEMINI_API_KEY=your-api-key  # Get from https://aistudio.google.com/apikey
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-2.5-flash-preview-09-2025
 
 # Supabase (Should already exist)
 SUPABASE_URL=https://your-project.supabase.co
@@ -185,7 +185,7 @@ All configuration in **central `.env`** file at project root:
 
 # Google Gemini API
 GEMINI_API_KEY=AI...              # Get from https://aistudio.google.com/apikey
-GEMINI_MODEL=gemini-2.5-flash     # or gemini-2.5-pro
+GEMINI_MODEL=gemini-2.5-flash-preview-09-2025  # or gemini-2.5-pro
 
 # Supabase Database
 SUPABASE_URL=https://xxx.supabase.co
@@ -210,7 +210,7 @@ LOG_LEVEL=INFO                    # DEBUG, INFO, WARNING, ERROR, CRITICAL
 
 | Model | Speed | Cost (per 1M tokens) | Use Case |
 |-------|-------|---------------------|----------|
-| **gemini-2.5-flash** | ⚡ Fast | $0.075 input / $0.30 output | **Recommended** - Production use |
+| **gemini-2.5-flash-preview-09-2025** | ⚡ Fast | Refer to current Gemini pricing | **Recommended** - Production use |
 | **gemini-2.5-pro** | 🐌 Slow | $1.25 input / $5.00 output | High-value content requiring extra accuracy |
 
 **Cost Example** (typical article: 5k input, 1k output tokens):
@@ -276,7 +276,7 @@ from src.functions.content_summarization.core.pipelines import SummarizationPipe
 # Initialize with production settings
 with GeminiClient(
     api_key="your-api-key",
-    model="gemini-2.5-flash",
+  model="gemini-2.5-flash-preview-09-2025",
     enable_grounding=False,
     max_retries=3,
     max_requests_per_minute=60,
@@ -545,7 +545,7 @@ python scripts/summarize_cli.py --publisher "NBC Sports"
 #### Slow Processing
 
 **Solutions:**
-- Use `gemini-2.5-flash` instead of Pro
+- Use `gemini-2.5-flash-preview-09-2025` instead of Pro
 - Increase `MAX_REQUESTS_PER_MINUTE`
 - Reduce `MAX_RETRIES`
 - Skip problematic publishers

@@ -128,7 +128,7 @@ Format your response as structured data that can be easily parsed."""
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.5-flash",
+    model: str = "gemini-2.5-flash-preview-09-2025",
         enable_grounding: bool = False,
         max_retries: int = 3,
         max_requests_per_minute: int = 60,
@@ -138,7 +138,7 @@ Format your response as structured data that can be easily parsed."""
 
         Args:
             api_key: Google Gemini API key
-            model: Model to use (gemini-2.5-flash or gemini-2.5-pro)
+            model: Model to use (gemini-2.5-flash-preview-09-2025 or gemini-2.5-pro)
             enable_grounding: Whether to enable Google Search grounding
             max_retries: Maximum retry attempts for failed requests
             max_requests_per_minute: Rate limit for API calls
