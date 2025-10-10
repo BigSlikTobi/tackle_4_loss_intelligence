@@ -1,0 +1,51 @@
+name: Extract Knowledge from Story Groups
+
+on:
+  schedule:
+    # Every 15 minutes
+    - cron: '*/15 * * * *'
+  
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  extract-knowledge:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/functions/knowledge_extraction/requirements.txt
+      
+      - name: Extract knowledge
+        id: extract-knowledge
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python src/functions/knowledge_extraction/scripts/extract_knowledge_cli.py \
+            --limit 20 --verbose
+            
+      
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ steps.extract-knowledge.outcome }}" == "success" ]; then
+            echo "✅ Knowledge extraction completed successfully"
+          else
+            echo "❌ Knowledge extraction failed"
+            exit 1
+          fi
