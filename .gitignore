@@ -50,3 +50,13 @@ htmlcov/
 
 # Batch files
 src/functions/knowledge_extraction/batch_files
+
+#node_modules
+node_modules/
+functions/node_modules/
+
+#package-lock.json and package.json 
+functions/package-lock.json
+functions/package.json
+package-lock.json
+package.json
