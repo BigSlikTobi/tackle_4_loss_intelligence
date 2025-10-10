@@ -36,7 +36,6 @@ jobs:
         run: |
           python src/functions/news_extraction/scripts/extract_news_cli.py \
             --days-back 1 \
-            --verbose
       
       - name: Report status
         if: always()

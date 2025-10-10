@@ -3,7 +3,7 @@
 import logging
 import json
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from src.shared.db import get_supabase_client
 
@@ -48,9 +48,26 @@ def parse_vector(vector_data) -> Optional[List[float]]:
 class EmbeddingReader:
     """Reads story embeddings from the story_embeddings table."""
 
-    def __init__(self):
-        """Initialize the embedding reader."""
+    def __init__(self, days_lookback: int = 14):
+        """
+        Initialize the embedding reader.
+        
+        Args:
+            days_lookback: Number of days to look back for stories (default: 14)
+        """
         self.client = get_supabase_client()
+        self.days_lookback = days_lookback
+    
+    def _get_cutoff_date(self) -> str:
+        """
+        Get the cutoff date for filtering stories.
+        
+        Returns:
+            ISO format datetime string for the cutoff date
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.days_lookback)
+        return cutoff.isoformat()
+
 
     def fetch_ungrouped_embeddings(
         self, 
@@ -58,6 +75,9 @@ class EmbeddingReader:
     ) -> List[Dict]:
         """
         Fetch embeddings for stories not yet assigned to a group.
+        
+        Uses an efficient LEFT JOIN approach at the database level to avoid
+        fetching all embeddings and filtering in Python.
         
         Args:
             limit: Optional maximum number of embeddings to fetch
@@ -68,11 +88,98 @@ class EmbeddingReader:
         logger.info("Fetching ungrouped story embeddings...")
         
         try:
-            # Use RPC function or a more efficient query pattern
-            # Fetch all embeddings first, then filter in Python
-            # This avoids the URL length issue with large NOT IN clauses
+            # Use a more efficient approach with LEFT JOIN
+            # Instead of NOT IN which is slow for large datasets
+            embeddings = []
+            page_size = 1000
+            offset = 0
             
-            # First, get all grouped news_url_ids (with pagination)
+            while True:
+                try:
+                    # Use LEFT JOIN to exclude grouped stories at database level
+                    # This avoids fetching all embeddings and filtering in Python
+                    query = f"""
+                    SELECT DISTINCT
+                        se.id,
+                        se.news_url_id,
+                        se.embedding_vector,
+                        se.created_at
+                    FROM story_embeddings se
+                    LEFT JOIN story_group_members sgm ON se.news_url_id = sgm.news_url_id
+                    WHERE se.embedding_vector IS NOT NULL
+                      AND sgm.news_url_id IS NULL
+                    ORDER BY se.created_at ASC
+                    LIMIT {page_size}
+                    OFFSET {offset}
+                    """
+                    
+                    logger.info(f"Fetching ungrouped embeddings at offset {offset}...")
+                    response = self.client.rpc('exec_sql', {'sql': query}).execute()
+                    
+                    if not response.data:
+                        break
+                    
+                    # Parse the response
+                    batch = response.data
+                    embeddings.extend(batch)
+                    logger.info(f"Fetched {len(batch)} ungrouped embeddings (total: {len(embeddings)})")
+                    
+                    if len(batch) < page_size:
+                        break
+                    
+                    # Apply limit if specified
+                    if limit and len(embeddings) >= limit:
+                        embeddings = embeddings[:limit]
+                        break
+                        
+                    offset += page_size
+                    
+                except Exception as batch_error:
+                    logger.error(f"Error fetching batch at offset {offset}: {batch_error}")
+                    # If RPC method doesn't work, fall back to fetching all method
+                    if "rpc" in str(batch_error).lower() or "exec_sql" in str(batch_error).lower():
+                        logger.warning("RPC method not available, falling back to fetch-all-and-filter approach")
+                        return self._fetch_ungrouped_fallback(limit)
+                    raise
+            
+            # Parse vector format for each embedding
+            for emb in embeddings:
+                emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
+            
+            # Filter out embeddings with invalid vectors
+            embeddings = [
+                emb for emb in embeddings
+                if emb["embedding_vector"] is not None
+            ]
+            
+            logger.info(f"Fetched {len(embeddings)} ungrouped embeddings")
+            
+            return embeddings
+            
+        except Exception as e:
+            logger.error(f"Error fetching ungrouped embeddings: {e}")
+            raise
+    
+    def _fetch_ungrouped_fallback(self, limit: Optional[int] = None) -> List[Dict]:
+        """
+        Fallback method that fetches grouped IDs first, then filters embeddings.
+        Used when database-level filtering isn't available.
+        
+        Optimized to stop early once we have enough ungrouped embeddings.
+        
+        Args:
+            limit: Optional maximum number of embeddings to fetch
+            
+        Returns:
+            List of dicts with keys: id, news_url_id, embedding_vector, created_at
+        """
+        logger.info("Using fallback method to fetch ungrouped embeddings...")
+        
+        try:
+            cutoff_date = self._get_cutoff_date()
+            logger.info(f"Filtering stories created after {cutoff_date} ({self.days_lookback} days)")
+            
+            # First, get all grouped news_url_ids (no date filter here - just IDs)
             grouped_ids = set()
             page_size = 1000
             offset = 0
@@ -94,54 +201,86 @@ class EmbeddingReader:
             
             logger.info(f"Found {len(grouped_ids)} already grouped stories")
             
-            # Then fetch embeddings with pagination and filter
-            all_embeddings = []
+            # Then fetch embeddings in batches, filtering as we go
+            # Stop early once we have enough ungrouped embeddings
+            ungrouped_embeddings = []
             offset = 0
+            batch_size = 1000
+            
+            # Calculate reasonable max batches based on limit
+            # If limit is small, don't check too many batches
+            if limit and limit <= 100:
+                max_batches_to_check = 10  # For small limits, check fewer batches
+            else:
+                max_batches_to_check = 20  # For larger requests, check more batches
+            
+            batches_checked = 0
             
             while True:
-                query = self.client.table("story_embeddings").select(
-                    "id, news_url_id, embedding_vector, created_at"
-                ).not_.is_("embedding_vector", "null").order(
-                    "created_at", desc=False
-                ).range(offset, offset + page_size - 1)
-                
-                response = query.execute()
-                
-                if not response.data:
-                    break
-                
-                all_embeddings.extend(response.data)
-                
-                if len(response.data) < page_size:
-                    break
+                try:
+                    # Fetch recent embeddings only, without ordering to avoid timeout
+                    query = self.client.table("story_embeddings").select(
+                        "id, news_url_id, embedding_vector, created_at"
+                    ).not_.is_("embedding_vector", "null").gte(
+                        "created_at", cutoff_date
+                    ).range(offset, offset + batch_size - 1)
                     
-                offset += page_size
+                    logger.info(f"Fetching embeddings batch at offset {offset}...")
+                    response = query.execute()
+                    
+                    if not response.data:
+                        break
+                    
+                    # Filter this batch for ungrouped stories
+                    batch_ungrouped = [
+                        emb for emb in response.data
+                        if emb["news_url_id"] not in grouped_ids
+                    ]
+                    ungrouped_embeddings.extend(batch_ungrouped)
+                    
+                    logger.info(f"Found {len(batch_ungrouped)} ungrouped in this batch (total: {len(ungrouped_embeddings)})")
+                    
+                    # Stop if we have enough ungrouped embeddings
+                    if limit and len(ungrouped_embeddings) >= limit:
+                        logger.info(f"Reached limit of {limit} ungrouped embeddings")
+                        ungrouped_embeddings = ungrouped_embeddings[:limit]
+                        break
+                    
+                    # Stop if we got less than a full page
+                    if len(response.data) < batch_size:
+                        break
+                    
+                    batches_checked += 1
+                    if batches_checked >= max_batches_to_check:
+                        logger.warning(f"Checked {max_batches_to_check} batches, stopping to avoid timeout")
+                        break
+                        
+                    offset += batch_size
+                    
+                except Exception as batch_error:
+                    logger.error(f"Error fetching batch at offset {offset}: {batch_error}")
+                    # If we hit a timeout, return what we have so far
+                    if "timeout" in str(batch_error).lower():
+                        logger.warning(f"Timeout at offset {offset}, using {len(ungrouped_embeddings)} ungrouped embeddings found so far")
+                        break
+                    raise
             
-            logger.info(f"Fetched {len(all_embeddings)} total embeddings from database")
-            
-            # Filter out already grouped embeddings
-            embeddings = [
-                emb for emb in all_embeddings
-                if emb["news_url_id"] not in grouped_ids
-            ]
+            logger.info(f"Found {len(ungrouped_embeddings)} ungrouped embeddings total")
+            logger.info(f"Found {len(ungrouped_embeddings)} ungrouped embeddings total")
             
             # Parse vector format for each embedding
-            for emb in embeddings:
+            for emb in ungrouped_embeddings:
                 emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
             
             # Filter out embeddings with invalid vectors
-            embeddings = [
-                emb for emb in embeddings
+            ungrouped_embeddings = [
+                emb for emb in ungrouped_embeddings
                 if emb["embedding_vector"] is not None
             ]
             
-            # Apply limit after filtering
-            if limit and len(embeddings) > limit:
-                embeddings = embeddings[:limit]
+            logger.info(f"Fetched {len(ungrouped_embeddings)} ungrouped embeddings with valid vectors")
             
-            logger.info(f"Fetched {len(embeddings)} ungrouped embeddings")
-            
-            return embeddings
+            return ungrouped_embeddings
             
         except Exception as e:
             logger.error(f"Error fetching ungrouped embeddings: {e}")
@@ -153,6 +292,7 @@ class EmbeddingReader:
     ) -> List[Dict]:
         """
         Fetch all story embeddings regardless of grouping status.
+        Only fetches embeddings from the last N days (configured via days_lookback).
         
         Args:
             limit: Optional maximum number of embeddings to fetch
@@ -163,15 +303,20 @@ class EmbeddingReader:
         logger.info("Fetching all story embeddings...")
         
         try:
+            cutoff_date = self._get_cutoff_date()
+            logger.info(f"Filtering stories created after {cutoff_date} ({self.days_lookback} days)")
+            
             embeddings = []
             page_size = 1000
             offset = 0
             
-            # Fetch all embeddings with pagination
+            # Fetch recent embeddings with pagination
             while True:
                 query = self.client.table("story_embeddings").select(
                     "id, news_url_id, embedding_vector, created_at"
-                ).not_.is_("embedding_vector", "null").order(
+                ).not_.is_("embedding_vector", "null").gte(
+                    "created_at", cutoff_date
+                ).order(
                     "created_at", desc=False
                 ).range(offset, offset + page_size - 1)
                 

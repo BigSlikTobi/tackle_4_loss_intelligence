@@ -37,7 +37,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python src/functions/story_embeddings/scripts/generate_embeddings_cli.py \
-            --verbose
+            --limit 25
       
       - name: Report status
         if: always()
