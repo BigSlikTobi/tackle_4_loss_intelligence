@@ -26,7 +26,7 @@ class StoryGroupReader:
     
     def get_unextracted_groups(
         self,
-        limit: Optional[int] = None,
+        limit: Optional[int] = 100,  # Default limit to prevent timeout
         retry_failed: bool = False,
         max_error_count: int = 3
     ) -> List[Dict]:
@@ -34,21 +34,22 @@ class StoryGroupReader:
         Get story groups that need knowledge extraction.
         
         Args:
-            limit: Maximum number of groups to return
+            limit: Maximum number of groups to return (default: 100)
             retry_failed: If True, include failed extractions for retry
             max_error_count: Don't retry if error_count exceeds this
             
         Returns:
-            List of story group records
+            List of story group records (with only 'id' field)
         """
         try:
-            logger.info("Fetching story groups that need extraction...")
+            logger.info(f"Fetching story groups that need extraction (limit: {limit})...")
             
-            # Get all group IDs that are already completed
-            completed_group_ids = set()
+            # Get all group IDs that are already completed or should be skipped
+            excluded_group_ids = set()
             page_size = 1000
             offset = 0
             
+            # Fetch completed groups to exclude
             while True:
                 response = (
                     self.client.table("story_group_extraction_status")
@@ -59,75 +60,79 @@ class StoryGroupReader:
                 )
                 
                 for row in response.data:
-                    completed_group_ids.add(row["story_group_id"])
+                    excluded_group_ids.add(row["story_group_id"])
                 
                 if len(response.data) < page_size:
                     break
                 
                 offset += page_size
             
-            logger.info(f"Found {len(completed_group_ids)} completed groups")
+            logger.info(f"Found {len(excluded_group_ids)} completed groups to exclude")
             
-            # Get groups with failed status (for optional retry)
-            failed_group_ids = set()
-            if retry_failed:
+            # Get groups with failed status (conditionally exclude)
+            if not retry_failed:
                 offset = 0
                 while True:
                     query = (
                         self.client.table("story_group_extraction_status")
-                        .select("story_group_id, error_count")
+                        .select("story_group_id")
                         .eq("status", "failed")
                     )
                     
-                    # Only retry if error count is below threshold
+                    # Only exclude if error count exceeds threshold
                     if max_error_count:
-                        query = query.lte("error_count", max_error_count)
+                        query = query.gt("error_count", max_error_count)
                     
                     response = query.range(offset, offset + page_size - 1).execute()
                     
                     for row in response.data:
-                        failed_group_ids.add(row["story_group_id"])
+                        excluded_group_ids.add(row["story_group_id"])
                     
                     if len(response.data) < page_size:
                         break
                     
                     offset += page_size
                 
-                logger.info(f"Found {len(failed_group_ids)} retryable failed groups")
+                logger.info(f"Total {len(excluded_group_ids)} groups excluded (completed + over-failed)")
             
-            # Now get groups that aren't completed (and optionally include failed)
+            # Now fetch unextracted groups efficiently
+            # Only select 'id' column since that's all we need
             unextracted_groups = []
+            fetch_limit = limit * 3 if limit else 1000  # Fetch extra to account for filtering
             offset = 0
             
-            while True:
+            while len(unextracted_groups) < (limit or float('inf')):
+                batch_size = min(page_size, fetch_limit - offset)
+                if batch_size <= 0:
+                    break
+                
                 response = (
                     self.client.table("story_groups")
-                    .select("*")
+                    .select("id")  # Only fetch id column
                     .eq("status", "active")
                     .order("created_at", desc=True)
-                    .range(offset, offset + page_size - 1)
+                    .range(offset, offset + batch_size - 1)
                     .execute()
                 )
                 
                 for group in response.data:
                     group_id = group["id"]
                     
-                    # Include if: not completed, or is failed and retry_failed=True
-                    if group_id not in completed_group_ids:
-                        if retry_failed or group_id not in failed_group_ids:
-                            unextracted_groups.append(group)
-                            
-                            # Stop if we hit the limit
-                            if limit and len(unextracted_groups) >= limit:
-                                break
+                    # Include if not in excluded set
+                    if group_id not in excluded_group_ids:
+                        unextracted_groups.append(group)
+                        
+                        # Stop if we hit the limit
+                        if limit and len(unextracted_groups) >= limit:
+                            break
                 
                 if limit and len(unextracted_groups) >= limit:
                     break
                 
-                if len(response.data) < page_size:
+                if len(response.data) < batch_size:
                     break
                 
-                offset += page_size
+                offset += batch_size
             
             logger.info(f"Found {len(unextracted_groups)} groups needing extraction")
             return unextracted_groups[:limit] if limit else unextracted_groups
