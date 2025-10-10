@@ -1,0 +1,51 @@
+name: Summarize NFL News Content
+
+on:
+  schedule:
+    # Every 15 minutes
+    - cron: '*/15 * * * *'
+  
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  summarize-content:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/functions/content_summarization/requirements.txt
+      
+      - name: Generate content summaries
+        id: summarize
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python src/functions/content_summarization/scripts/summarize_cli.py \
+            --limit 10 \
+            --verbose
+      
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ steps.summarize.outcome }}" == "success" ]; then
+            echo "✅ Content summarization completed successfully"
+          else
+            echo "❌ Content summarization failed"
+            exit 1
+          fi
