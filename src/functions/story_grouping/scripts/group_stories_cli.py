@@ -74,6 +74,13 @@ def main():
         action="store_true",
         help="Clear existing groups and regroup all stories",
     )
+    
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=14,
+        help="Number of days to look back for stories and groups (default: 14)",
+    )
 
     args = parser.parse_args()
 
@@ -95,9 +102,9 @@ def main():
             sys.exit(1)
 
     try:
-        # Initialize components
-        embedding_reader = EmbeddingReader()
-        group_writer = GroupWriter(dry_run=args.dry_run)
+        # Initialize components with date filtering
+        embedding_reader = EmbeddingReader(days_lookback=args.days)
+        group_writer = GroupWriter(dry_run=args.dry_run, days_lookback=args.days)
         member_writer = GroupMemberWriter(dry_run=args.dry_run)
         
         pipeline = GroupingPipeline(

@@ -2,7 +2,7 @@
 
 import logging
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import uuid
 
 from src.shared.db import get_supabase_client
@@ -14,15 +14,27 @@ logger = logging.getLogger(__name__)
 class GroupWriter:
     """Writes and updates story groups in the story_groups table."""
 
-    def __init__(self, dry_run: bool = False):
+    def __init__(self, dry_run: bool = False, days_lookback: int = 14):
         """
         Initialize the group writer.
         
         Args:
             dry_run: If True, log operations without writing to database
+            days_lookback: Number of days to look back for groups (default: 14)
         """
         self.client = get_supabase_client()
         self.dry_run = dry_run
+        self.days_lookback = days_lookback
+    
+    def _get_cutoff_date(self) -> str:
+        """
+        Get the cutoff date for filtering groups.
+        
+        Returns:
+            ISO format datetime string for the cutoff date
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.days_lookback)
+        return cutoff.isoformat()
 
     def create_group(
         self,
@@ -185,7 +197,7 @@ class GroupWriter:
 
     def get_active_groups(self) -> List[Dict]:
         """
-        Fetch active story groups.
+        Fetch active story groups from the last N days (configured via days_lookback).
         
         Returns:
             List of active group dicts
@@ -193,16 +205,20 @@ class GroupWriter:
         logger.info("Fetching active story groups...")
         
         try:
+            cutoff_date = self._get_cutoff_date()
+            logger.info(f"Filtering groups created after {cutoff_date} ({self.days_lookback} days)")
+            
             groups = []
             page_size = 1000
             offset = 0
             
-            # Fetch active groups with pagination
+            # Fetch recent active groups with pagination
             while True:
                 response = (
                     self.client.table("story_groups")
                     .select("*")
                     .eq("status", "active")
+                    .gte("created_at", cutoff_date)
                     .order("created_at", desc=False)
                     .range(offset, offset + page_size - 1)
                     .execute()

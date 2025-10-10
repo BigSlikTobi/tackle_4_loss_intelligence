@@ -21,6 +21,7 @@ class StoryGroup:
         group_id: Optional[str] = None,
         centroid: Optional[List[float]] = None,
         member_embeddings: Optional[List[Dict]] = None,
+        existing_member_count: int = 0,
     ):
         """
         Initialize a story group.
@@ -30,10 +31,13 @@ class StoryGroup:
             centroid: Centroid embedding vector (None to calculate from members)
             member_embeddings: List of member dicts with keys: news_url_id, 
                               embedding_vector
+            existing_member_count: Number of members already in database for 
+                                  existing groups (used when loading groups without members)
         """
         self.group_id = group_id
         self.members: List[Dict] = member_embeddings or []
         self._centroid = centroid
+        self._existing_member_count = existing_member_count
 
     @property
     def centroid(self) -> Optional[List[float]]:
@@ -80,8 +84,16 @@ class StoryGroup:
 
     @property
     def member_count(self) -> int:
-        """Get the number of members in the group."""
-        return len(self.members)
+        """
+        Get the total number of members in the group.
+        
+        For existing groups loaded from database, this returns the sum of:
+        - existing_member_count: members already in the database
+        - len(self.members): new members added in this session
+        
+        For new groups, this just returns len(self.members).
+        """
+        return self._existing_member_count + len(self.members)
 
     def get_member_news_url_ids(self) -> List[str]:
         """Get list of news URL IDs for all members."""
@@ -114,7 +126,8 @@ class StoryGrouper:
         Load existing groups from database.
         
         Args:
-            groups_data: List of group dicts with keys: id, centroid_embedding
+            groups_data: List of group dicts with keys: id, centroid_embedding,
+                        member_count
         """
         logger.info(f"Loading {len(groups_data)} existing groups...")
         
@@ -123,11 +136,13 @@ class StoryGrouper:
             group = StoryGroup(
                 group_id=group_data["id"],
                 centroid=group_data["centroid_embedding"],
-                member_embeddings=[],  # We don't need to load members
+                member_embeddings=[],  # Don't load existing members (only new ones)
+                existing_member_count=group_data.get("member_count", 0),
             )
             self.groups.append(group)
         
         logger.info(f"Loaded {len(self.groups)} groups")
+
 
     def assign_story(
         self,

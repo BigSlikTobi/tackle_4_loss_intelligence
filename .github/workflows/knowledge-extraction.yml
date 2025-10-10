@@ -37,7 +37,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python src/functions/knowledge_extraction/scripts/extract_knowledge_cli.py \
-            --limit 20 --verbose
+            --limit 25
             
       
       - name: Report status
