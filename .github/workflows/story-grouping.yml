@@ -36,7 +36,7 @@ jobs:
         run: |
           python src/functions/story_grouping/scripts/group_stories_cli.py \
           --limit 25 --days 14
-      
+          
       - name: Report status
         if: always()
         run: |
