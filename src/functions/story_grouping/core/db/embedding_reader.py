@@ -279,7 +279,6 @@ class EmbeddingReader:
         except Exception as e:
             logger.error(f"Error fetching ungrouped embeddings: {e}")
             raise
-            raise
 
     def fetch_all_embeddings(
         self, 
