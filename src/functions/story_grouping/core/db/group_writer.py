@@ -199,6 +199,9 @@ class GroupWriter:
         """
         Fetch active story groups from the last N days (configured via days_lookback).
         
+        Optimized to first check count, then fetch in smaller batches without 
+        ORDER BY to avoid query timeouts on large datasets.
+        
         Returns:
             List of active group dicts
         """
@@ -208,31 +211,83 @@ class GroupWriter:
             cutoff_date = self._get_cutoff_date()
             logger.info(f"Filtering groups created after {cutoff_date} ({self.days_lookback} days)")
             
-            groups = []
-            page_size = 1000
-            offset = 0
-            
-            # Fetch recent active groups with pagination
-            while True:
-                response = (
+            # First, get count to decide strategy
+            try:
+                count_response = (
                     self.client.table("story_groups")
-                    .select("*")
+                    .select("id", count="exact")
                     .eq("status", "active")
                     .gte("created_at", cutoff_date)
-                    .order("created_at", desc=False)
-                    .range(offset, offset + page_size - 1)
+                    .limit(1)
                     .execute()
                 )
+                total_count = count_response.count or 0
+                logger.info(f"Found {total_count} active groups in date range")
                 
-                if not response.data:
-                    break
-                
-                groups.extend(response.data)
-                
-                if len(response.data) < page_size:
-                    break
+                if total_count == 0:
+                    return []
                     
-                offset += page_size
+                # If very large number, warn and use smaller batch size
+                if total_count > 5000:
+                    logger.warning(
+                        f"Large number of groups ({total_count}), "
+                        "this may take a while or timeout"
+                    )
+                    
+            except Exception as count_error:
+                logger.warning(f"Could not get count: {count_error}, proceeding anyway")
+                total_count = None
+            
+            groups = []
+            page_size = 500  # Smaller batches to avoid timeout
+            offset = 0
+            max_batches = 20  # Safety limit
+            batches_fetched = 0
+            
+            # Fetch recent active groups with pagination
+            # Remove ORDER BY to speed up query
+            while batches_fetched < max_batches:
+                try:
+                    response = (
+                        self.client.table("story_groups")
+                        .select("*")
+                        .eq("status", "active")
+                        .gte("created_at", cutoff_date)
+                        .range(offset, offset + page_size - 1)
+                        .execute()
+                    )
+                    
+                    if not response.data:
+                        break
+                    
+                    groups.extend(response.data)
+                    batches_fetched += 1
+                    
+                    logger.info(
+                        f"Fetched batch {batches_fetched}: "
+                        f"{len(response.data)} groups (total: {len(groups)})"
+                    )
+                    
+                    if len(response.data) < page_size:
+                        break
+                        
+                    offset += page_size
+                    
+                except Exception as batch_error:
+                    # If we hit a timeout, return what we have
+                    if "timeout" in str(batch_error).lower():
+                        logger.warning(
+                            f"Timeout at offset {offset}, "
+                            f"returning {len(groups)} groups fetched so far"
+                        )
+                        break
+                    raise
+            
+            if batches_fetched >= max_batches:
+                logger.warning(
+                    f"Reached max batches limit ({max_batches}), "
+                    f"returning {len(groups)} groups"
+                )
             
             # Parse centroid embeddings
             for group in groups:
@@ -244,6 +299,107 @@ class GroupWriter:
             
         except Exception as e:
             logger.error(f"Error fetching active groups: {e}")
+            raise
+
+    def get_active_group_ids(self) -> List[str]:
+        """
+        Fetch only the IDs of active story groups without centroid vectors.
+        This is much faster than fetching full group data with vectors.
+        
+        Returns:
+            List of group IDs
+        """
+        logger.info("Fetching active group IDs (lightweight query)...")
+        
+        try:
+            cutoff_date = self._get_cutoff_date()
+            
+            group_ids = []
+            page_size = 1000
+            offset = 0
+            max_batches = 20
+            batches_fetched = 0
+            
+            while batches_fetched < max_batches:
+                try:
+                    response = (
+                        self.client.table("story_groups")
+                        .select("id")
+                        .eq("status", "active")
+                        .gte("created_at", cutoff_date)
+                        .range(offset, offset + page_size - 1)
+                        .execute()
+                    )
+                    
+                    if not response.data:
+                        break
+                    
+                    group_ids.extend([g["id"] for g in response.data])
+                    batches_fetched += 1
+                    
+                    if len(response.data) < page_size:
+                        break
+                        
+                    offset += page_size
+                    
+                except Exception as batch_error:
+                    if "timeout" in str(batch_error).lower():
+                        logger.warning(
+                            f"Timeout at offset {offset}, "
+                            f"returning {len(group_ids)} group IDs fetched so far"
+                        )
+                        break
+                    raise
+            
+            logger.info(f"Fetched {len(group_ids)} active group IDs")
+            return group_ids
+            
+        except Exception as e:
+            logger.error(f"Error fetching active group IDs: {e}")
+            raise
+
+    def get_groups_by_ids(self, group_ids: List[str]) -> List[Dict]:
+        """
+        Fetch full group data for specific group IDs.
+        Useful for fetching details after getting IDs with get_active_group_ids().
+        
+        Args:
+            group_ids: List of group IDs to fetch
+            
+        Returns:
+            List of group dicts with full data including centroids
+        """
+        if not group_ids:
+            return []
+            
+        logger.info(f"Fetching {len(group_ids)} groups by ID...")
+        
+        try:
+            groups = []
+            batch_size = 100  # Fetch in smaller batches
+            
+            for i in range(0, len(group_ids), batch_size):
+                batch_ids = group_ids[i:i + batch_size]
+                
+                response = (
+                    self.client.table("story_groups")
+                    .select("*")
+                    .in_("id", batch_ids)
+                    .execute()
+                )
+                
+                if response.data:
+                    groups.extend(response.data)
+            
+            # Parse centroid embeddings
+            for group in groups:
+                group["centroid_embedding"] = parse_vector(group["centroid_embedding"])
+            
+            logger.info(f"Fetched {len(groups)} groups")
+            return groups
+            
+        except Exception as e:
+            logger.error(f"Error fetching groups by IDs: {e}")
             raise
 
     def get_group_stats(self) -> Dict:

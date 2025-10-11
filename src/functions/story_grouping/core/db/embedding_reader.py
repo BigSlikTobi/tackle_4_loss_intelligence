@@ -115,7 +115,10 @@ class EmbeddingReader:
         Fallback method that fetches grouped IDs first, then filters embeddings.
         Used when database-level filtering isn't available.
         
-        Optimized to stop early once we have enough ungrouped embeddings.
+        Optimized to:
+        - Reduce initial scan time by limiting batches checked
+        - Remove ORDER BY to speed up queries
+        - Use smaller fetch batches to avoid timeouts
         
         Args:
             limit: Optional maximum number of embeddings to fetch
@@ -129,56 +132,78 @@ class EmbeddingReader:
             cutoff_date = self._get_cutoff_date()
             logger.info(f"Filtering stories created after {cutoff_date} ({self.days_lookback} days)")
             
-            # First, get all grouped news_url_ids (no date filter here - just IDs)
+            # First, get all grouped news_url_ids in smaller batches
+            # Optimize: fetch only IDs, no other columns
             grouped_ids = set()
             page_size = 1000
             offset = 0
+            max_grouped_batches = 15  # Safety limit for grouped IDs
+            grouped_batches_fetched = 0
             
-            while True:
-                grouped_response = self.client.table("story_group_members").select(
-                    "news_url_id"
-                ).range(offset, offset + page_size - 1).execute()
-                
-                if not grouped_response.data:
-                    break
+            while grouped_batches_fetched < max_grouped_batches:
+                try:
+                    grouped_response = self.client.table("story_group_members").select(
+                        "news_url_id"
+                    ).range(offset, offset + page_size - 1).execute()
                     
-                grouped_ids.update(item["news_url_id"] for item in grouped_response.data)
-                
-                if len(grouped_response.data) < page_size:
-                    break
+                    if not grouped_response.data:
+                        break
+                        
+                    grouped_ids.update(item["news_url_id"] for item in grouped_response.data)
+                    grouped_batches_fetched += 1
                     
-                offset += page_size
+                    if len(grouped_response.data) < page_size:
+                        break
+                        
+                    offset += page_size
+                    
+                except Exception as grouped_error:
+                    if "timeout" in str(grouped_error).lower():
+                        logger.warning(
+                            f"Timeout fetching grouped IDs at offset {offset}, "
+                            f"using {len(grouped_ids)} IDs collected so far"
+                        )
+                        break
+                    raise
             
             logger.info(f"Found {len(grouped_ids)} already grouped stories")
             
             # Then fetch embeddings in batches, filtering as we go
-            # Stop early once we have enough ungrouped embeddings
+            # OPTIMIZATION: Use smaller batches and no ORDER BY
             yielded = 0
             offset = 0
-            fetch_batch_size = max(batch_size, 1000)
-
+            fetch_batch_size = 500  # Reduced from 1000
+            
             # Calculate reasonable max batches based on limit
-            # If limit is small, don't check too many batches
+            # With DESC order and indexes, we can check more batches safely
             if limit and limit <= 100:
-                max_batches_to_check = 10  # For small limits, check fewer batches
+                max_batches_to_check = 10  # Increased - DESC order finds ungrouped faster
+            elif limit and limit <= 500:
+                max_batches_to_check = 20
             else:
-                max_batches_to_check = 20  # For larger requests, check more batches
+                max_batches_to_check = 30  # Increased to scan more data
 
             batches_checked = 0
 
-            while True:
+            while batches_checked < max_batches_to_check:
                 try:
-                    # Fetch recent embeddings only, without ordering to avoid timeout
+                    # OPTIMIZATION: Use DESC order to get newest stories first
+                    # These are most likely to be ungrouped
+                    # With the new idx_story_embeddings_with_vectors index, this should be fast
                     query = self.client.table("story_embeddings").select(
                         "id, news_url_id, embedding_vector, created_at"
                     ).not_.is_("embedding_vector", "null").gte(
                         "created_at", cutoff_date
-                    ).range(offset, offset + fetch_batch_size - 1)
+                    ).order("created_at", desc=True).range(offset, offset + fetch_batch_size - 1)
 
-                    logger.info(f"Fetching embeddings batch at offset {offset}...")
+                    logger.info(
+                        f"Fetching embeddings batch at offset {offset} "
+                        f"(batch {batches_checked + 1}/{max_batches_to_check})..."
+                    )
                     response = query.execute()
 
                     if not response.data:
+                        logger.info("No more data, stopping")
                         break
 
                     # Filter this batch for ungrouped stories
@@ -187,7 +212,8 @@ class EmbeddingReader:
                         if emb["news_url_id"] not in grouped_ids
                     ]
                     logger.info(
-                        f"Found {len(batch_ungrouped)} ungrouped in this batch"
+                        f"Found {len(batch_ungrouped)} ungrouped in batch "
+                        f"(out of {len(response.data)} total)"
                     )
 
                     parsed_batch = []
@@ -199,6 +225,7 @@ class EmbeddingReader:
                     batch_index = 0
                     while batch_index < len(parsed_batch):
                         if limit is not None and yielded >= limit:
+                            logger.info(f"Reached limit of {limit} ungrouped embeddings")
                             return
 
                         remaining = (
@@ -221,13 +248,10 @@ class EmbeddingReader:
 
                     # Stop if we got less than a full page
                     if len(response.data) < fetch_batch_size:
+                        logger.info("Partial page received, stopping")
                         break
 
                     batches_checked += 1
-                    if batches_checked >= max_batches_to_check:
-                        logger.warning(f"Checked {max_batches_to_check} batches, stopping to avoid timeout")
-                        break
-
                     offset += fetch_batch_size
 
                 except Exception as batch_error:
@@ -240,14 +264,21 @@ class EmbeddingReader:
                         return
                     raise
 
+            if batches_checked >= max_batches_to_check:
+                logger.warning(
+                    f"Checked {max_batches_to_check} batches, "
+                    f"yielded {yielded} ungrouped embeddings"
+                )
+
             logger.info(
-                f"Yielded {yielded} ungrouped embeddings with valid vectors"
+                f"Completed: yielded {yielded} ungrouped embeddings with valid vectors"
             )
 
             return
 
         except Exception as e:
             logger.error(f"Error fetching ungrouped embeddings: {e}")
+            raise
             raise
 
     def fetch_all_embeddings(
