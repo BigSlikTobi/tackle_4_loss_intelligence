@@ -20,6 +20,7 @@ class GroupingPipeline:
         member_writer: GroupMemberWriter,
         similarity_threshold: Optional[float] = None,
         continue_on_error: bool = True,
+        batch_size: Optional[int] = None,
     ):
         """
         Initialize the grouping pipeline.
@@ -43,10 +44,16 @@ class GroupingPipeline:
             )
         
         self.similarity_threshold = similarity_threshold
+        if batch_size is None:
+            batch_size = int(os.getenv("GROUPING_BATCH_SIZE", "200"))
+        if batch_size <= 0:
+            raise ValueError("Batch size must be a positive integer")
+        self.batch_size = batch_size
         self.grouper = StoryGrouper(similarity_threshold=similarity_threshold)
-        
+
         logger.info(
-            f"Initialized GroupingPipeline with threshold={similarity_threshold}"
+            f"Initialized GroupingPipeline with threshold={similarity_threshold} "
+            f"and batch_size={self.batch_size}"
         )
 
     def run(
@@ -94,95 +101,124 @@ class GroupingPipeline:
             
             # Step 3: Fetch embeddings to process
             logger.info("Fetching story embeddings...")
-            if regroup:
-                embeddings = self.embedding_reader.fetch_all_embeddings(limit=limit)
-            else:
-                embeddings = self.embedding_reader.fetch_ungrouped_embeddings(
-                    limit=limit
+            logger.info(
+                "Fetching story embeddings in batches of %s...",
+                self.batch_size,
+            )
+
+            batches = self.embedding_reader.iter_grouping_embeddings(
+                regroup=regroup,
+                limit=limit,
+                batch_size=self.batch_size,
+            )
+
+            total_batches = 0
+            new_group_ids = set()
+            updated_group_ids = set()
+
+            for batch in batches:
+                if not batch:
+                    continue
+
+                total_batches += 1
+                logger.info(
+                    "Processing batch %s with %s stories",
+                    total_batches,
+                    len(batch),
                 )
-            
-            if not embeddings:
+
+                self.grouper.group_stories(batch)
+                results["stories_processed"] += len(batch)
+
+                memberships = []
+                pending_groups = []
+
+                for group in self.grouper.groups:
+                    pending_members = group.drain_pending_members()
+
+                    if not pending_members:
+                        continue
+
+                    created_this_batch = False
+
+                    if group.group_id is None:
+                        try:
+                            group_id = self.group_writer.create_group(
+                                centroid_embedding=group.centroid,
+                                member_count=group.member_count,
+                                status="active",
+                            )
+
+                            if not group_id:
+                                raise ValueError("Group creation returned no ID")
+
+                            group.group_id = group_id
+                            new_group_ids.add(group_id)
+                            created_this_batch = True
+
+                        except Exception as e:
+                            logger.error(f"Error creating group: {e}")
+                            results["errors"] += 1
+                            group.restore_pending_members(pending_members)
+                            if not self.continue_on_error:
+                                raise
+                            continue
+
+                    if group.group_id and not created_this_batch:
+                        try:
+                            self.group_writer.update_group(
+                                group_id=group.group_id,
+                                centroid_embedding=group.centroid,
+                                member_count=group.member_count,
+                            )
+
+                            updated_group_ids.add(group.group_id)
+
+                        except Exception as e:
+                            logger.error(
+                                f"Error updating group {group.group_id}: {e}"
+                            )
+                            results["errors"] += 1
+                            group.restore_pending_members(pending_members)
+                            if not self.continue_on_error:
+                                raise
+                            continue
+
+                    memberships.extend(
+                        {
+                            "group_id": group.group_id,
+                            "news_url_id": member["news_url_id"],
+                            "similarity_score": member.get("similarity", 1.0),
+                        }
+                        for member in pending_members
+                        if group.group_id
+                    )
+
+                    pending_groups.append((group, pending_members))
+
+                if memberships:
+                    try:
+                        count = self.member_writer.add_members_batch(memberships)
+                        results["memberships_added"] += count
+
+                    except Exception as e:
+                        logger.error(f"Error adding memberships: {e}")
+                        results["errors"] += 1
+                        for group, members in pending_groups:
+                            group.restore_pending_members(members)
+                        if not self.continue_on_error:
+                            raise
+                    else:
+                        # Clear pending members that were written successfully
+                        pending_groups.clear()
+
+            if results["stories_processed"] == 0:
                 logger.info("No stories to process")
                 return results
-            
-            logger.info(f"Processing {len(embeddings)} stories")
-            
-            # Step 4: Group stories
-            logger.info("Grouping stories...")
-            initial_group_count = len(self.grouper.groups)
-            
-            groups = self.grouper.group_stories(embeddings)
-            
-            new_groups = [g for g in groups if g.group_id is None]
-            updated_groups = [g for g in groups if g.group_id is not None]
-            
-            results["stories_processed"] = len(embeddings)
-            results["groups_created"] = len(new_groups)
-            results["groups_updated"] = len(updated_groups)
-            
-            # Step 5: Write results to database
-            logger.info("Writing results to database...")
-            
-            # Create new groups
-            for group in new_groups:
-                try:
-                    group_id = self.group_writer.create_group(
-                        centroid_embedding=group.centroid,
-                        member_count=group.member_count,
-                        status="active",
-                    )
-                    
-                    # Set the group ID for membership writes
-                    group.group_id = group_id
-                    
-                except Exception as e:
-                    logger.error(f"Error creating group: {e}")
-                    results["errors"] += 1
-                    if not self.continue_on_error:
-                        raise
-            
-            # Update existing groups
-            for group in updated_groups:
-                try:
-                    self.group_writer.update_group(
-                        group_id=group.group_id,
-                        centroid_embedding=group.centroid,
-                        member_count=group.member_count,
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"Error updating group {group.group_id}: {e}")
-                    results["errors"] += 1
-                    if not self.continue_on_error:
-                        raise
-            
-            # Add memberships in batches
-            logger.info("Writing group memberships...")
-            memberships = []
-            
-            for group in groups:
-                if not group.group_id:
-                    logger.warning(f"Skipping group without ID")
-                    continue
-                
-                for member in group.members:
-                    memberships.append({
-                        "group_id": group.group_id,
-                        "news_url_id": member["news_url_id"],
-                        "similarity_score": 1.0,  # Will be calculated by add_member
-                    })
-            
-            if memberships:
-                try:
-                    count = self.member_writer.add_members_batch(memberships)
-                    results["memberships_added"] = count
-                    
-                except Exception as e:
-                    logger.error(f"Error adding memberships: {e}")
-                    results["errors"] += 1
-                    if not self.continue_on_error:
-                        raise
-            
+
+            results["groups_created"] = len(new_group_ids)
+            results["groups_updated"] = len(updated_group_ids)
+
             # Step 6: Log summary
             logger.info("=" * 80)
             logger.info("Grouping Pipeline Complete")
