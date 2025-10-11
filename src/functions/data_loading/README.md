@@ -108,6 +108,11 @@ python scripts/rosters_cli.py --season 2024 [--clear] [--dry-run]
 python scripts/depth_charts_cli.py --season 2024 --week 1 [--clear] [--dry-run]
 ```
 
+### Injuries Loader
+```bash
+python scripts/injuries_cli.py --season 2025 --week 6 [--season-type reg] [--dry-run]
+```
+
 ## 🌐 API
 
 ### POST /package-handler
