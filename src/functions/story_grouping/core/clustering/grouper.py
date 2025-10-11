@@ -38,6 +38,7 @@ class StoryGroup:
         self.members: List[Dict] = member_embeddings or []
         self._centroid = centroid
         self._existing_member_count = existing_member_count
+        self._pending_members: List[Dict] = member_embeddings.copy() if member_embeddings else []
 
     @property
     def centroid(self) -> Optional[List[float]]:
@@ -72,10 +73,13 @@ class StoryGroup:
             similarity = calculate_cosine_similarity(embedding_vector, self.centroid)
         
         # Add member
-        self.members.append({
+        member = {
             "news_url_id": news_url_id,
             "embedding_vector": embedding_vector,
-        })
+            "similarity": similarity,
+        }
+        self.members.append(member)
+        self._pending_members.append(member)
         
         # Recalculate centroid
         self._centroid = self._calculate_centroid()
@@ -98,6 +102,18 @@ class StoryGroup:
     def get_member_news_url_ids(self) -> List[str]:
         """Get list of news URL IDs for all members."""
         return [m["news_url_id"] for m in self.members]
+
+    def drain_pending_members(self) -> List[Dict]:
+        """Return and clear members added since the last drain."""
+        pending = self._pending_members
+        self._pending_members = []
+        return pending
+
+    def restore_pending_members(self, members: List[Dict]) -> None:
+        """Restore pending members when a write fails."""
+        if not members:
+            return
+        self._pending_members = members + self._pending_members
 
 
 class StoryGrouper:
@@ -189,8 +205,15 @@ class StoryGrouper:
         # If similarity meets threshold, add to existing group
         if best_idx >= 0:
             group = self.groups[best_idx]
+
+            if news_url_id in group.get_member_news_url_ids():
+                logger.debug(
+                    f"Story {news_url_id} already pending in group {group.group_id}, skipping duplicate"
+                )
+                return (group, 1.0)
+
             similarity = group.add_member(news_url_id, embedding_vector)
-            
+
             logger.debug(
                 f"Added story {news_url_id} to existing group "
                 f"(similarity: {similarity:.4f})"

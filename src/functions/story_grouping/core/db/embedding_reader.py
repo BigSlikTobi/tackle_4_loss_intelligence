@@ -70,7 +70,7 @@ class EmbeddingReader:
 
 
     def fetch_ungrouped_embeddings(
-        self, 
+        self,
         limit: Optional[int] = None
     ) -> List[Dict]:
         """
@@ -90,77 +90,27 @@ class EmbeddingReader:
         try:
             # Use a more efficient approach with LEFT JOIN
             # Instead of NOT IN which is slow for large datasets
-            embeddings = []
-            page_size = 1000
-            offset = 0
-            
-            while True:
-                try:
-                    # Use LEFT JOIN to exclude grouped stories at database level
-                    # This avoids fetching all embeddings and filtering in Python
-                    query = f"""
-                    SELECT DISTINCT
-                        se.id,
-                        se.news_url_id,
-                        se.embedding_vector,
-                        se.created_at
-                    FROM story_embeddings se
-                    LEFT JOIN story_group_members sgm ON se.news_url_id = sgm.news_url_id
-                    WHERE se.embedding_vector IS NOT NULL
-                      AND sgm.news_url_id IS NULL
-                    ORDER BY se.created_at ASC
-                    LIMIT {page_size}
-                    OFFSET {offset}
-                    """
-                    
-                    logger.info(f"Fetching ungrouped embeddings at offset {offset}...")
-                    response = self.client.rpc('exec_sql', {'sql': query}).execute()
-                    
-                    if not response.data:
-                        break
-                    
-                    # Parse the response
-                    batch = response.data
-                    embeddings.extend(batch)
-                    logger.info(f"Fetched {len(batch)} ungrouped embeddings (total: {len(embeddings)})")
-                    
-                    if len(batch) < page_size:
-                        break
-                    
-                    # Apply limit if specified
-                    if limit and len(embeddings) >= limit:
-                        embeddings = embeddings[:limit]
-                        break
-                        
-                    offset += page_size
-                    
-                except Exception as batch_error:
-                    logger.error(f"Error fetching batch at offset {offset}: {batch_error}")
-                    # If RPC method doesn't work, fall back to fetching all method
-                    if "rpc" in str(batch_error).lower() or "exec_sql" in str(batch_error).lower():
-                        logger.warning("RPC method not available, falling back to fetch-all-and-filter approach")
-                        return self._fetch_ungrouped_fallback(limit)
-                    raise
-            
-            # Parse vector format for each embedding
-            for emb in embeddings:
-                emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
-            
-            # Filter out embeddings with invalid vectors
-            embeddings = [
-                emb for emb in embeddings
-                if emb["embedding_vector"] is not None
-            ]
-            
+            embeddings: List[Dict] = []
+
+            for batch in self._iter_ungrouped_embedding_batches(
+                limit=limit,
+                batch_size=1000,
+            ):
+                embeddings.extend(batch)
+
             logger.info(f"Fetched {len(embeddings)} ungrouped embeddings")
-            
+
             return embeddings
             
         except Exception as e:
             logger.error(f"Error fetching ungrouped embeddings: {e}")
             raise
     
-    def _fetch_ungrouped_fallback(self, limit: Optional[int] = None) -> List[Dict]:
+    def _iter_ungrouped_fallback_batches(
+        self,
+        limit: Optional[int],
+        batch_size: int,
+    ):
         """
         Fallback method that fetches grouped IDs first, then filters embeddings.
         Used when database-level filtering isn't available.
@@ -170,8 +120,8 @@ class EmbeddingReader:
         Args:
             limit: Optional maximum number of embeddings to fetch
             
-        Returns:
-            List of dicts with keys: id, news_url_id, embedding_vector, created_at
+        Yields:
+            Lists of dicts with keys: id, news_url_id, embedding_vector, created_at
         """
         logger.info("Using fallback method to fetch ungrouped embeddings...")
         
@@ -203,19 +153,19 @@ class EmbeddingReader:
             
             # Then fetch embeddings in batches, filtering as we go
             # Stop early once we have enough ungrouped embeddings
-            ungrouped_embeddings = []
+            yielded = 0
             offset = 0
-            batch_size = 1000
-            
+            fetch_batch_size = max(batch_size, 1000)
+
             # Calculate reasonable max batches based on limit
             # If limit is small, don't check too many batches
             if limit and limit <= 100:
                 max_batches_to_check = 10  # For small limits, check fewer batches
             else:
                 max_batches_to_check = 20  # For larger requests, check more batches
-            
+
             batches_checked = 0
-            
+
             while True:
                 try:
                     # Fetch recent embeddings only, without ordering to avoid timeout
@@ -223,65 +173,79 @@ class EmbeddingReader:
                         "id, news_url_id, embedding_vector, created_at"
                     ).not_.is_("embedding_vector", "null").gte(
                         "created_at", cutoff_date
-                    ).range(offset, offset + batch_size - 1)
-                    
+                    ).range(offset, offset + fetch_batch_size - 1)
+
                     logger.info(f"Fetching embeddings batch at offset {offset}...")
                     response = query.execute()
-                    
+
                     if not response.data:
                         break
-                    
+
                     # Filter this batch for ungrouped stories
                     batch_ungrouped = [
                         emb for emb in response.data
                         if emb["news_url_id"] not in grouped_ids
                     ]
-                    ungrouped_embeddings.extend(batch_ungrouped)
-                    
-                    logger.info(f"Found {len(batch_ungrouped)} ungrouped in this batch (total: {len(ungrouped_embeddings)})")
-                    
+                    logger.info(
+                        f"Found {len(batch_ungrouped)} ungrouped in this batch"
+                    )
+
+                    parsed_batch = []
+                    for emb in batch_ungrouped:
+                        emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
+                        if emb["embedding_vector"] is not None:
+                            parsed_batch.append(emb)
+
+                    batch_index = 0
+                    while batch_index < len(parsed_batch):
+                        if limit is not None and yielded >= limit:
+                            return
+
+                        remaining = (
+                            limit - yielded if limit is not None else batch_size
+                        )
+                        current_size = min(batch_size, remaining)
+                        chunk = parsed_batch[batch_index: batch_index + current_size]
+
+                        if not chunk:
+                            break
+
+                        yield chunk
+                        yielded += len(chunk)
+                        batch_index += current_size
+
                     # Stop if we have enough ungrouped embeddings
-                    if limit and len(ungrouped_embeddings) >= limit:
+                    if limit is not None and yielded >= limit:
                         logger.info(f"Reached limit of {limit} ungrouped embeddings")
-                        ungrouped_embeddings = ungrouped_embeddings[:limit]
-                        break
-                    
+                        return
+
                     # Stop if we got less than a full page
-                    if len(response.data) < batch_size:
+                    if len(response.data) < fetch_batch_size:
                         break
-                    
+
                     batches_checked += 1
                     if batches_checked >= max_batches_to_check:
                         logger.warning(f"Checked {max_batches_to_check} batches, stopping to avoid timeout")
                         break
-                        
-                    offset += batch_size
-                    
+
+                    offset += fetch_batch_size
+
                 except Exception as batch_error:
                     logger.error(f"Error fetching batch at offset {offset}: {batch_error}")
                     # If we hit a timeout, return what we have so far
                     if "timeout" in str(batch_error).lower():
-                        logger.warning(f"Timeout at offset {offset}, using {len(ungrouped_embeddings)} ungrouped embeddings found so far")
-                        break
+                        logger.warning(
+                            f"Timeout at offset {offset}, returning {yielded} ungrouped embeddings"
+                        )
+                        return
                     raise
-            
-            logger.info(f"Found {len(ungrouped_embeddings)} ungrouped embeddings total")
-            logger.info(f"Found {len(ungrouped_embeddings)} ungrouped embeddings total")
-            
-            # Parse vector format for each embedding
-            for emb in ungrouped_embeddings:
-                emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
-            
-            # Filter out embeddings with invalid vectors
-            ungrouped_embeddings = [
-                emb for emb in ungrouped_embeddings
-                if emb["embedding_vector"] is not None
-            ]
-            
-            logger.info(f"Fetched {len(ungrouped_embeddings)} ungrouped embeddings with valid vectors")
-            
-            return ungrouped_embeddings
-            
+
+            logger.info(
+                f"Yielded {yielded} ungrouped embeddings with valid vectors"
+            )
+
+            return
+
         except Exception as e:
             logger.error(f"Error fetching ungrouped embeddings: {e}")
             raise
@@ -306,52 +270,16 @@ class EmbeddingReader:
             cutoff_date = self._get_cutoff_date()
             logger.info(f"Filtering stories created after {cutoff_date} ({self.days_lookback} days)")
             
-            embeddings = []
-            page_size = 1000
-            offset = 0
-            
-            # Fetch recent embeddings with pagination
-            while True:
-                query = self.client.table("story_embeddings").select(
-                    "id, news_url_id, embedding_vector, created_at"
-                ).not_.is_("embedding_vector", "null").gte(
-                    "created_at", cutoff_date
-                ).order(
-                    "created_at", desc=False
-                ).range(offset, offset + page_size - 1)
-                
-                response = query.execute()
-                
-                if not response.data:
-                    break
-                
-                embeddings.extend(response.data)
-                
-                # Stop if we've hit the limit
-                if limit and len(embeddings) >= limit:
-                    embeddings = embeddings[:limit]
-                    break
-                
-                # Stop if we got less than a full page
-                if len(response.data) < page_size:
-                    break
-                    
-                offset += page_size
-            
-            logger.info(f"Fetched {len(embeddings)} total embeddings from database")
-            
-            # Parse vector format for each embedding
-            for emb in embeddings:
-                emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
-            
-            # Filter out embeddings with invalid vectors
-            embeddings = [
-                emb for emb in embeddings
-                if emb["embedding_vector"] is not None
-            ]
-            
+            embeddings: List[Dict] = []
+
+            for batch in self._iter_all_embedding_batches(
+                limit=limit,
+                batch_size=1000,
+            ):
+                embeddings.extend(batch)
+
             logger.info(f"Fetched {len(embeddings)} total embeddings")
-            
+
             return embeddings
             
         except Exception as e:
@@ -359,7 +287,7 @@ class EmbeddingReader:
             raise
 
     def get_embeddings_by_news_url_ids(
-        self, 
+        self,
         news_url_ids: List[str]
     ) -> List[Dict]:
         """
@@ -437,3 +365,166 @@ class EmbeddingReader:
         except Exception as e:
             logger.error(f"Error fetching embedding statistics: {e}")
             raise
+
+    def iter_grouping_embeddings(
+        self,
+        regroup: bool,
+        limit: Optional[int] = None,
+        batch_size: int = 200,
+    ):
+        """Yield story embeddings in batches for grouping workflows."""
+
+        if batch_size <= 0:
+            raise ValueError("Batch size must be a positive integer")
+
+        if regroup:
+            yield from self._iter_all_embedding_batches(
+                limit=limit,
+                batch_size=batch_size,
+            )
+        else:
+            yield from self._iter_ungrouped_embedding_batches(
+                limit=limit,
+                batch_size=batch_size,
+            )
+
+    def _iter_ungrouped_embedding_batches(
+        self,
+        limit: Optional[int],
+        batch_size: int,
+    ):
+        logger.info("Streaming ungrouped story embeddings from database...")
+
+        page_size = max(batch_size, 1000)
+        offset = 0
+        yielded = 0
+
+        while True:
+            try:
+                query = f"""
+                SELECT DISTINCT
+                    se.id,
+                    se.news_url_id,
+                    se.embedding_vector,
+                    se.created_at
+                FROM story_embeddings se
+                LEFT JOIN story_group_members sgm ON se.news_url_id = sgm.news_url_id
+                WHERE se.embedding_vector IS NOT NULL
+                  AND sgm.news_url_id IS NULL
+                ORDER BY se.created_at ASC
+                LIMIT {page_size}
+                OFFSET {offset}
+                """
+
+                logger.info(
+                    f"Fetching ungrouped embeddings at offset {offset} (page size {page_size})..."
+                )
+                response = self.client.rpc('exec_sql', {'sql': query}).execute()
+
+                if not response.data:
+                    break
+
+                parsed_batch = []
+                for emb in response.data:
+                    emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
+                    if emb["embedding_vector"] is not None:
+                        parsed_batch.append(emb)
+
+                batch_index = 0
+                while batch_index < len(parsed_batch):
+                    if limit is not None and yielded >= limit:
+                        return
+
+                    remaining = limit - yielded if limit is not None else batch_size
+                    current_size = min(batch_size, remaining)
+                    chunk = parsed_batch[batch_index: batch_index + current_size]
+
+                    if not chunk:
+                        break
+
+                    yield chunk
+                    yielded += len(chunk)
+                    batch_index += current_size
+
+                if limit is not None and yielded >= limit:
+                    return
+
+                if len(response.data) < page_size:
+                    break
+
+                offset += page_size
+
+            except Exception as batch_error:
+                logger.error(
+                    f"Error fetching batch at offset {offset}: {batch_error}"
+                )
+                if "rpc" in str(batch_error).lower() or "exec_sql" in str(batch_error).lower():
+                    logger.warning(
+                        "RPC method not available, falling back to fetch-all-and-filter approach"
+                    )
+                    yield from self._iter_ungrouped_fallback_batches(
+                        limit=limit,
+                        batch_size=batch_size,
+                    )
+                    return
+                raise
+
+        logger.info(f"Yielded {yielded} ungrouped embeddings")
+
+    def _iter_all_embedding_batches(
+        self,
+        limit: Optional[int],
+        batch_size: int,
+    ):
+        logger.info("Streaming all story embeddings from database...")
+
+        cutoff_date = self._get_cutoff_date()
+        page_size = max(batch_size, 1000)
+        offset = 0
+        yielded = 0
+
+        while True:
+            query = self.client.table("story_embeddings").select(
+                "id, news_url_id, embedding_vector, created_at"
+            ).not_.is_("embedding_vector", "null").gte(
+                "created_at", cutoff_date
+            ).order(
+                "created_at", desc=False
+            ).range(offset, offset + page_size - 1)
+
+            response = query.execute()
+
+            if not response.data:
+                break
+
+            parsed_batch = []
+            for emb in response.data:
+                emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
+                if emb["embedding_vector"] is not None:
+                    parsed_batch.append(emb)
+
+            batch_index = 0
+            while batch_index < len(parsed_batch):
+                if limit is not None and yielded >= limit:
+                    return
+
+                remaining = limit - yielded if limit is not None else batch_size
+                current_size = min(batch_size, remaining)
+                chunk = parsed_batch[batch_index: batch_index + current_size]
+
+                if not chunk:
+                    break
+
+                yield chunk
+                yielded += len(chunk)
+                batch_index += current_size
+
+            if limit is not None and yielded >= limit:
+                return
+
+            if len(response.data) < page_size:
+                break
+
+            offset += page_size
+
+        logger.info(f"Yielded {yielded} total embeddings")
