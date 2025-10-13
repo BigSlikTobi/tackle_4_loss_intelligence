@@ -46,11 +46,29 @@ the package is installed in your environment.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
-from datetime import datetime
-from typing import Any, Callable, Iterable, Optional
+import re
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import pandas as pd  # type: ignore
+
+try:
+    import requests
+except ImportError as exc:
+    raise ImportError(
+        "The `requests` package is required for injury scraping. "
+        "Install it via pip: pip install requests"
+    ) from exc
+
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+except ImportError as exc:
+    raise ImportError(
+        "The `beautifulsoup4` package is required for injury scraping. "
+        "Install it via pip: pip install beautifulsoup4"
+    ) from exc
 
 try:
     import nflreadpy as nfl
@@ -488,3 +506,496 @@ def fetch_pfr_data(season: int, week: Optional[int] = None) -> pd.DataFrame:
         df = df[df["week"] == week]
     logger.debug("Fetched %d PFR records", len(df))
     return df
+
+
+_INJURY_API_URL = "https://www.nfl.com/api/injuries/v1/teams"
+_INJURY_PAGE_TEMPLATE = "https://www.nfl.com/injuries/league/{season}/{segment}"
+_DEFAULT_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+_PLAYER_LIST_KEYS: Tuple[str, ...] = (
+    "players",
+    "injuries",
+    "injuryList",
+    "playerList",
+    "injuredPlayers",
+    "injuredplayers",
+)
+_TEAM_ABBR_KEYS: Tuple[str, ...] = (
+    "teamAbbr",
+    "team",
+    "abbr",
+    "teamCode",
+    "clubcode",
+)
+_TEAM_NAME_KEYS: Tuple[str, ...] = (
+    "teamName",
+    "name",
+    "fullName",
+    "teamFullName",
+    "clubName",
+)
+_PLAYER_NAME_KEYS: Tuple[str, ...] = (
+    "playerFullName",
+    "displayName",
+    "playerName",
+    "name",
+    "fullName",
+)
+_PLAYER_ID_KEYS: Tuple[str, ...] = (
+    "playerId",
+    "gsisId",
+    "nflId",
+    "nflComId",
+    "id",
+)
+_INJURY_KEYS: Tuple[str, ...] = (
+    "injury",
+    "injuryDesc",
+    "injuryDescription",
+    "injuryDetail",
+)
+_PRACTICE_STATUS_KEYS: Tuple[str, ...] = (
+    "practiceStatus",
+    "practice",
+    "practiceParticipation",
+    "participation",
+)
+_GAME_STATUS_KEYS: Tuple[str, ...] = (
+    "gameStatus",
+    "status",
+    "game",
+)
+_LAST_UPDATE_KEYS: Tuple[str, ...] = (
+    "lastUpdated",
+    "lastUpdate",
+    "lastUpdatedDate",
+    "updated",
+    "update",
+    "updateTimestamp",
+)
+
+
+def fetch_injury_data(
+    season: int,
+    week: int,
+    *,
+    season_type: str = "reg",
+) -> pd.DataFrame:
+    """Scrape NFL injury reports for the given season and week."""
+
+    if season is None:
+        raise ValueError("`season` is required when fetching injuries")
+    if week is None:
+        raise ValueError("`week` is required when fetching injuries")
+
+    season_type_normalised = season_type.lower()
+    if season_type_normalised not in {"reg", "pre", "post"}:
+        raise ValueError(
+            "season_type must be one of 'reg', 'pre', or 'post'"
+        )
+
+    context: Dict[str, Any] = {
+        "season": season,
+        "week": week,
+        "season_type": season_type_normalised.upper(),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    records: List[Dict[str, Any]] = []
+    api_error: Optional[str] = None
+
+    try:
+        records = _fetch_injuries_via_api(season, week, season_type_normalised, context)
+        if records:
+            logger.debug(
+                "Fetched %d injury records via NFL API", len(records)
+            )
+    except Exception as exc:  # pragma: no cover - network safeguards
+        api_error = str(exc)
+        logger.debug("NFL injury API fetch failed: %s", exc, exc_info=True)
+
+    if not records:
+        segment = _build_week_segment(season_type_normalised, week)
+        page_url = _INJURY_PAGE_TEMPLATE.format(season=season, segment=segment)
+        logger.info(
+            "Scraping NFL injury page for season %s %s week %s",  # type: ignore[str-format]
+            season,
+            season_type_normalised.upper(),
+            week,
+        )
+        try:
+            records = _fetch_injuries_via_html(page_url, context)
+        except Exception as exc:  # pragma: no cover - network safeguards
+            logger.error("Failed to scrape NFL injuries from %s", page_url)
+            if api_error:
+                logger.error("API attempt also failed: %s", api_error)
+            raise
+
+    if not records:
+        logger.warning(
+            "No injury data discovered for season %s %s week %s",
+            season,
+            season_type_normalised.upper(),
+            week,
+        )
+        columns = [
+            "team_abbr",
+            "team_name",
+            "player_name",
+            "injury",
+            "practice_status",
+            "game_status",
+            "player_id",
+            "source_player_id",
+            "last_update",
+            "season",
+            "week",
+            "season_type",
+        ]
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(records)
+    df["season"] = season
+    df["week"] = week
+    df["season_type"] = season_type_normalised.upper()
+    return df
+
+
+def _build_week_segment(season_type: str, week: int) -> str:
+    return f"{season_type}{week}"
+
+
+def _fetch_injuries_via_api(
+    season: int,
+    week: int,
+    season_type: str,
+    context: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    params = {
+        "season": str(season),
+        "seasonType": season_type.upper(),
+        "week": str(week),
+    }
+    response = requests.get(
+        _INJURY_API_URL,
+        params=params,
+        headers=_DEFAULT_HTTP_HEADERS,
+        timeout=30,
+    )
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("NFL injury API returned invalid JSON") from exc
+    return _extract_injury_records_from_payload(payload, context)
+
+
+def _fetch_injuries_via_html(url: str, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    response = requests.get(url, headers=_DEFAULT_HTTP_HEADERS, timeout=30)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    records = _extract_injuries_from_next_data(soup, context)
+    if records:
+        return records
+    return _extract_injuries_from_tables(soup, context)
+
+
+def _extract_injuries_from_next_data(
+    soup: BeautifulSoup,
+    context: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    script = soup.find("script", id="__NEXT_DATA__")
+    if not script or not script.string:
+        return []
+    try:
+        payload = json.loads(script.string)
+    except json.JSONDecodeError:
+        logger.debug("Unable to parse __NEXT_DATA__ payload for injuries", exc_info=True)
+        return []
+    return _extract_injury_records_from_payload(payload, context)
+
+
+def _extract_injury_records_from_payload(
+    payload: Any,
+    context: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for team_abbr, team_name, players, node_context in _iter_team_nodes(payload):
+        combined_context = dict(context)
+        if node_context.get("last_update"):
+            combined_context["last_update"] = node_context["last_update"]
+        clean_abbr = _clean_team_code(team_abbr)
+        for player in players:
+            record = _normalise_injury_player(player, clean_abbr, team_name, combined_context)
+            if record:
+                records.append(record)
+    return records
+
+
+def _iter_team_nodes(payload: Any) -> Iterator[Tuple[Optional[str], Optional[str], List[Any], Dict[str, Any]]]:
+    stack: List[Any] = [payload]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            lowered = {str(key).lower(): value for key, value in current.items()}
+            for list_key in _PLAYER_LIST_KEYS:
+                values = lowered.get(list_key.lower())
+                if isinstance(values, list) and values:
+                    team_abbr = _extract_string_from_mapping(current, _TEAM_ABBR_KEYS)
+                    team_name = _extract_string_from_mapping(current, _TEAM_NAME_KEYS)
+                    last_update = _extract_string_from_mapping(current, _LAST_UPDATE_KEYS)
+                    yield team_abbr, team_name, values, {"last_update": last_update}
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+
+
+def _normalise_injury_player(
+    player: Any,
+    team_abbr: Optional[str],
+    team_name: Optional[str],
+    context: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(player, dict):
+        return None
+
+    player_name = _extract_string_from_mapping(player, _PLAYER_NAME_KEYS)
+    if not player_name:
+        return None
+
+    player_id = _extract_string_from_mapping(player, _PLAYER_ID_KEYS)
+    injury_text = _extract_string_from_mapping(player, _INJURY_KEYS)
+    practice_status = _extract_status_value(player, _PRACTICE_STATUS_KEYS)
+    game_status = _extract_status_value(player, _GAME_STATUS_KEYS)
+    last_update = (
+        _extract_string_from_mapping(player, _LAST_UPDATE_KEYS)
+        or context.get("last_update")
+        or context.get("fetched_at")
+    )
+
+    return {
+        "team_abbr": team_abbr,
+        "team_name": team_name,
+        "player_name": player_name,
+        "injury": injury_text,
+        "practice_status": practice_status,
+        "game_status": game_status,
+        "player_id": player_id,
+        "source_player_id": player_id,
+        "last_update": last_update,
+    }
+
+
+def _extract_injuries_from_tables(
+    soup: BeautifulSoup,
+    context: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    
+    # Modern NFL injury pages have sections with matchup strips and two tables per section
+    sections = soup.find_all("section", class_="nfl-o-injury-report__unit")
+    if sections:
+        for section in sections:
+            # Extract team names from the section
+            team_titles = section.find_all("div", class_="nfl-t-stats__title")
+            team_names = [title.get_text(strip=True) for title in team_titles]
+            
+            # Find tables within this section
+            tables = section.find_all("table", class_="d3-o-table")
+            
+            # Match tables to team names (should be 1:1)
+            for idx, table in enumerate(tables):
+                team_name = team_names[idx] if idx < len(team_names) else None
+                records.extend(_extract_records_from_table(table, team_name, None, context))
+        
+        if records:
+            logger.debug("Extracted %d injury records from %d sections", len(records), len(sections))
+            return records
+    
+    # Fallback: try old-style table extraction
+    for table in soup.find_all("table"):
+        header_row = table.find("thead")
+        if not header_row:
+            continue
+        headers = [
+            _normalise_whitespace(th.get_text(" ", strip=True)).lower()
+            for th in header_row.find_all("th")
+        ]
+        if not headers or "player" not in headers:
+            continue
+
+        team_abbr = _clean_team_code(
+            table.get("data-team-abbr") or table.get("data-abbr")
+        )
+        team_name = table.get("data-team-name") or table.get("aria-label")
+        if not team_name:
+            heading = table.find_previous(["h2", "h3", "h4"])
+            if heading:
+                team_name = _normalise_whitespace(
+                    heading.get_text(" ", strip=True)
+                )
+
+        records.extend(_extract_records_from_table(table, team_name, team_abbr, context))
+
+    return records
+
+
+def _extract_records_from_table(
+    table: Any,
+    team_name: Optional[str],
+    team_abbr: Optional[str],
+    context: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Extract injury records from a single table."""
+    records: List[Dict[str, Any]] = []
+    
+    header_row = table.find("thead")
+    if not header_row:
+        return records
+        
+    headers = [
+        _normalise_whitespace(th.get_text(" ", strip=True)).lower()
+        for th in header_row.find_all("th")
+    ]
+    if not headers or "player" not in headers:
+        return records
+
+    header_index = {header: idx for idx, header in enumerate(headers)}
+    player_idx = _resolve_header_index(header_index, ("player", "player name"))
+    if player_idx is None:
+        return records
+    injury_idx = _resolve_header_index(
+        header_index,
+        ("injury", "injury description", "injury detail", "injuries"),
+    )
+    practice_idx = _resolve_header_index(
+        header_index,
+        ("practice status", "practice", "practice participation"),
+    )
+    game_idx = _resolve_header_index(
+        header_index,
+        ("game status", "status", "game"),
+    )
+
+    body = table.find("tbody")
+    if not body:
+        return records
+
+    for row in body.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) <= player_idx:
+            continue
+        player_name = _normalise_whitespace(
+            cells[player_idx].get_text(" ", strip=True)
+        )
+        if not player_name:
+            continue
+        record = {
+            "team_abbr": team_abbr,
+            "team_name": team_name,
+            "player_name": player_name,
+            "injury": _extract_cell_value(cells, injury_idx),
+            "practice_status": _extract_cell_value(cells, practice_idx),
+            "game_status": _extract_cell_value(cells, game_idx),
+            "player_id": None,
+            "source_player_id": None,
+            "last_update": context.get("fetched_at"),
+        }
+        records.append(record)
+
+    return records
+
+
+def _resolve_header_index(
+    header_index: Dict[str, int],
+    candidates: Sequence[str],
+) -> Optional[int]:
+    for candidate in candidates:
+        normalised = candidate.lower()
+        if normalised in header_index:
+            return header_index[normalised]
+    return None
+
+
+def _extract_cell_value(cells: Sequence[Any], index: Optional[int]) -> Optional[str]:
+    if index is None or index >= len(cells):
+        return None
+    text = cells[index].get_text(" ", strip=True)
+    return _normalise_whitespace(text) if text else None
+
+
+def _extract_status_value(mapping: Dict[str, Any], keys: Sequence[str]) -> Optional[str]:
+    raw = _extract_raw_value(mapping, keys)
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        nested = _extract_string_from_mapping(raw, ("status", "text", "value"))
+        if nested:
+            return nested
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                nested = _extract_string_from_mapping(
+                    item, ("status", "text", "value")
+                )
+                if nested:
+                    return nested
+            elif item:
+                return _normalise_whitespace(str(item))
+        return None
+    return _normalise_whitespace(str(raw))
+
+
+def _extract_raw_value(mapping: Dict[str, Any], keys: Sequence[str]) -> Any:
+    if not isinstance(mapping, dict):
+        return None
+    lowered = {str(key).lower(): value for key, value in mapping.items()}
+    for key in keys:
+        value = lowered.get(key.lower())
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_string_from_mapping(
+    mapping: Any,
+    keys: Sequence[str],
+) -> Optional[str]:
+    if not isinstance(mapping, dict):
+        return None
+    lowered = {str(key).lower(): value for key, value in mapping.items()}
+    for key in keys:
+        value = lowered.get(key.lower())
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if value:
+                return _normalise_whitespace(value)
+        elif isinstance(value, (int, float)):
+            return str(value)
+        elif isinstance(value, dict):
+            nested = _extract_string_from_mapping(
+                value, ("text", "value", "displayName", "name", "status")
+            )
+            if nested:
+                return nested
+    return None
+
+
+def _normalise_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _clean_team_code(team_code: Optional[str]) -> Optional[str]:
+    if team_code is None:
+        return None
+    code = str(team_code).strip().upper()
+    return code or None

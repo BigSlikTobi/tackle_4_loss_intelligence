@@ -1,0 +1,96 @@
+name: Load NFL Injuries (Daily)
+
+on:
+  schedule:
+    # Run daily at 6:00 PM ET = 10:00 PM UTC (during regular season)
+    # This timing ensures injury reports are updated after practice (typically released Wed-Fri)
+    - cron: '0 22 * * *'
+  
+  workflow_dispatch:  # Allow manual triggers
+    inputs:
+      season:
+        description: 'Season year (e.g., 2025)'
+        required: false
+        default: '2025'
+      week:
+        description: 'Week number (leave empty for auto-detect)'
+        required: false
+      season_type:
+        description: 'Season type (pre, reg, post) - leave empty for auto-detect'
+        required: false
+
+env:
+  PYTHON_VERSION: '3.11'
+  SEASON: '2025'
+
+jobs:
+  load-injuries:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/functions/data_loading/requirements.txt
+      
+      - name: Determine current NFL week
+        id: get_week
+        run: |
+          # Use manual input if provided, otherwise auto-detect
+          if [ -n "${{ github.event.inputs.week }}" ]; then
+            WEEK="${{ github.event.inputs.week }}"
+            SEASON_TYPE="${{ github.event.inputs.season_type }}"
+            if [ -z "$SEASON_TYPE" ]; then
+              SEASON_TYPE="reg"
+            fi
+            echo "Using manual input: Week $WEEK, Season type: $SEASON_TYPE"
+          else
+            # Auto-detect current week
+            OUTPUT=$(python src/functions/data_loading/scripts/get_current_week.py)
+            WEEK=$(echo $OUTPUT | cut -d' ' -f1)
+            SEASON_TYPE=$(echo $OUTPUT | cut -d' ' -f2)
+            echo "Auto-detected: Week $WEEK, Season type: $SEASON_TYPE"
+          fi
+          
+          echo "week=$WEEK" >> $GITHUB_OUTPUT
+          echo "season_type=$SEASON_TYPE" >> $GITHUB_OUTPUT
+          echo "### 📅 NFL Schedule" >> $GITHUB_STEP_SUMMARY
+          echo "- **Season**: ${{ github.event.inputs.season || env.SEASON }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Week**: $WEEK" >> $GITHUB_STEP_SUMMARY
+          echo "- **Season Type**: $SEASON_TYPE" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Load injury reports
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          SEASON="${{ github.event.inputs.season || env.SEASON }}"
+          WEEK="${{ steps.get_week.outputs.week }}"
+          SEASON_TYPE="${{ steps.get_week.outputs.season_type }}"
+          
+          echo "Loading injuries for Season $SEASON, Week $WEEK, Type $SEASON_TYPE"
+          
+          python src/functions/data_loading/scripts/injuries_cli.py \
+            --season $SEASON \
+            --week $WEEK \
+            --season-type $SEASON_TYPE \
+            --log-level INFO
+      
+      - name: Report status
+        if: always()
+        run: |
+          if [ $? -eq 0 ]; then
+            echo "✅ Injury reports loaded successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Injury reports load failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi

@@ -22,9 +22,9 @@ NFL data ingestion, transformation, and on-demand package assembly.
 
 - **Location**: [`src/functions/data_loading/`](src/functions/data_loading/)
 - **Status**: ✅ Production Ready
-- **Features**: Warehouse datasets, on-demand packages, Cloud Function API, CLI tools
+- **Features**: Warehouse datasets, on-demand packages, Cloud Function API, CLI tools, **injury reports**
 
-[**→ Full Documentation**](src/functions/data_loading/README.md)
+[**→ Full Documentation**](src/functions/data_loading/README.md) | [**→ Injury Reports**](src/functions/data_loading/INJURIES.md)
 
 **Quick Start:**
 ```bash
@@ -36,6 +36,9 @@ cp .env.example .env  # Configure Supabase
 # Load data
 python scripts/players_cli.py --dry-run
 python scripts/games_cli.py --season 2024
+
+# Load injury reports (see INJURIES.md)
+python scripts/injuries_cli.py --season 2025 --week 6
 
 # Test locally
 cd functions && ./run_local.sh
@@ -333,6 +336,7 @@ Each module is independent:
 ### Module Documentation
 - **[Data Loading README](src/functions/data_loading/README.md)** - Complete module documentation
 - **[Data Loading Testing & Deployment](src/functions/data_loading/TESTING_DEPLOYMENT.md)** - Local testing & Cloud deployment
+- **[Injury Reports](src/functions/data_loading/INJURIES.md)** - NFL injury scraping & historical tracking
 - **[News Extraction README](src/functions/news_extraction/README.md)** - Complete module documentation
 - **[News Extraction Deployment](src/functions/news_extraction/DEPLOYMENT.md)** - Testing & deployment guide
 - **[Content Summarization README](src/functions/content_summarization/README.md)** - Complete module documentation
