@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .....core.data.fetch import fetch_injury_data
 from .....core.data.transformers.injury import InjuryDataTransformer
@@ -48,6 +48,9 @@ class InjurySupabaseWriter(SupabaseWriter):
     """Writer that resolves player identifiers before persisting injuries."""
 
     allowed_columns = {
+        "season",
+        "week",
+        "season_type",
         "team_abbr",
         "player_id",
         "player_name",
@@ -59,7 +62,7 @@ class InjurySupabaseWriter(SupabaseWriter):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         supabase_client = kwargs.pop("supabase_client", None)
-        conflict_columns = kwargs.pop("conflict_columns", ("team_abbr", "player_id"))
+        conflict_columns = kwargs.pop("conflict_columns", ("season", "week", "season_type", "team_abbr", "player_id"))
         clear_column = kwargs.pop("clear_column", None)
         clear_guard = kwargs.pop("clear_guard", "")
         super().__init__(
@@ -73,12 +76,18 @@ class InjurySupabaseWriter(SupabaseWriter):
 
     def write(self, records: List[Dict[str, Any]], *, clear: bool = False) -> PipelineResult:
         processed_total = len(records)
+        
+        # Note: clear is not supported for injuries table
+        # Injuries are automatically updated via upsert on (team_abbr, player_id)
+        if clear:
+            self.logger.warning(
+                "Clear flag ignored for injuries table. "
+                "Records are automatically updated via upsert on (team_abbr, player_id)."
+            )
+        
         try:
             prepared, skipped = self._prepare_records(records)
             messages: List[str] = []
-            if clear:
-                self._clear_table()
-                messages.append("Cleared table before write")
 
             if not prepared:
                 if skipped:
@@ -116,6 +125,18 @@ class InjurySupabaseWriter(SupabaseWriter):
         index = self._load_player_index()
 
         for record in records:
+            # Extract season, week, season_type for versioning
+            season = record.get("season")
+            week = record.get("week")
+            season_type = _clean_str(record.get("season_type"))
+            
+            if not season or not week or not season_type:
+                self.logger.warning(
+                    "Missing season/week/season_type for record: %s", record
+                )
+                skipped.append(record)
+                continue
+            
             team_abbr = _clean_str(record.get("team_abbr"))
             player_name = _clean_str(record.get("player_name"))
             if not team_abbr or not player_name:
@@ -141,6 +162,9 @@ class InjurySupabaseWriter(SupabaseWriter):
 
             prepared.append(
                 {
+                    "season": season,
+                    "week": week,
+                    "season_type": season_type.upper(),  # Normalize to uppercase
                     "team_abbr": team_abbr,
                     "player_id": player_id,
                     "player_name": player_name,

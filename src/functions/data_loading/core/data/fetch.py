@@ -798,6 +798,28 @@ def _extract_injuries_from_tables(
     context: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
+    
+    # Modern NFL injury pages have sections with matchup strips and two tables per section
+    sections = soup.find_all("section", class_="nfl-o-injury-report__unit")
+    if sections:
+        for section in sections:
+            # Extract team names from the section
+            team_titles = section.find_all("div", class_="nfl-t-stats__title")
+            team_names = [title.get_text(strip=True) for title in team_titles]
+            
+            # Find tables within this section
+            tables = section.find_all("table", class_="d3-o-table")
+            
+            # Match tables to team names (should be 1:1)
+            for idx, table in enumerate(tables):
+                team_name = team_names[idx] if idx < len(team_names) else None
+                records.extend(_extract_records_from_table(table, team_name, None, context))
+        
+        if records:
+            logger.debug("Extracted %d injury records from %d sections", len(records), len(sections))
+            return records
+    
+    # Fallback: try old-style table extraction
     for table in soup.find_all("table"):
         header_row = table.find("thead")
         if not header_row:
@@ -808,23 +830,6 @@ def _extract_injuries_from_tables(
         ]
         if not headers or "player" not in headers:
             continue
-
-        header_index = {header: idx for idx, header in enumerate(headers)}
-        player_idx = _resolve_header_index(header_index, ("player", "player name"))
-        if player_idx is None:
-            continue
-        injury_idx = _resolve_header_index(
-            header_index,
-            ("injury", "injury description", "injury detail"),
-        )
-        practice_idx = _resolve_header_index(
-            header_index,
-            ("practice status", "practice", "practice participation"),
-        )
-        game_idx = _resolve_header_index(
-            header_index,
-            ("game status", "status", "game"),
-        )
 
         team_abbr = _clean_team_code(
             table.get("data-team-abbr") or table.get("data-abbr")
@@ -837,31 +842,73 @@ def _extract_injuries_from_tables(
                     heading.get_text(" ", strip=True)
                 )
 
-        body = table.find("tbody")
-        if not body:
-            continue
+        records.extend(_extract_records_from_table(table, team_name, team_abbr, context))
 
-        for row in body.find_all("tr"):
-            cells = row.find_all("td")
-            if len(cells) <= player_idx:
-                continue
-            player_name = _normalise_whitespace(
-                cells[player_idx].get_text(" ", strip=True)
-            )
-            if not player_name:
-                continue
-            record = {
-                "team_abbr": team_abbr,
-                "team_name": team_name,
-                "player_name": player_name,
-                "injury": _extract_cell_value(cells, injury_idx),
-                "practice_status": _extract_cell_value(cells, practice_idx),
-                "game_status": _extract_cell_value(cells, game_idx),
-                "player_id": None,
-                "source_player_id": None,
-                "last_update": context.get("fetched_at"),
-            }
-            records.append(record)
+    return records
+
+
+def _extract_records_from_table(
+    table: Any,
+    team_name: Optional[str],
+    team_abbr: Optional[str],
+    context: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Extract injury records from a single table."""
+    records: List[Dict[str, Any]] = []
+    
+    header_row = table.find("thead")
+    if not header_row:
+        return records
+        
+    headers = [
+        _normalise_whitespace(th.get_text(" ", strip=True)).lower()
+        for th in header_row.find_all("th")
+    ]
+    if not headers or "player" not in headers:
+        return records
+
+    header_index = {header: idx for idx, header in enumerate(headers)}
+    player_idx = _resolve_header_index(header_index, ("player", "player name"))
+    if player_idx is None:
+        return records
+    injury_idx = _resolve_header_index(
+        header_index,
+        ("injury", "injury description", "injury detail", "injuries"),
+    )
+    practice_idx = _resolve_header_index(
+        header_index,
+        ("practice status", "practice", "practice participation"),
+    )
+    game_idx = _resolve_header_index(
+        header_index,
+        ("game status", "status", "game"),
+    )
+
+    body = table.find("tbody")
+    if not body:
+        return records
+
+    for row in body.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) <= player_idx:
+            continue
+        player_name = _normalise_whitespace(
+            cells[player_idx].get_text(" ", strip=True)
+        )
+        if not player_name:
+            continue
+        record = {
+            "team_abbr": team_abbr,
+            "team_name": team_name,
+            "player_name": player_name,
+            "injury": _extract_cell_value(cells, injury_idx),
+            "practice_status": _extract_cell_value(cells, practice_idx),
+            "game_status": _extract_cell_value(cells, game_idx),
+            "player_id": None,
+            "source_player_id": None,
+            "last_update": context.get("fetched_at"),
+        }
+        records.append(record)
 
     return records
 

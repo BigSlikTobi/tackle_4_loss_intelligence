@@ -10,8 +10,8 @@ import pandas as pd  # type: ignore
 from ....core.data.team_abbr import normalize_team_abbr
 from ....core.data.transform import BaseDataTransformer
 
-
 _TEAM_NAME_TO_ABBR: Dict[str, str] = {
+    # Full team names
     "arizonacardinals": "ARI",
     "atlantafalcons": "ATL",
     "baltimoreravens": "BAL",
@@ -49,6 +49,39 @@ _TEAM_NAME_TO_ABBR: Dict[str, str] = {
     "tennesseetitans": "TEN",
     "washingtoncommanders": "WAS",
     "washingtonfootballteam": "WAS",
+    # Short team names (from injury reports)
+    "cardinals": "ARI",
+    "falcons": "ATL",
+    "ravens": "BAL",
+    "bills": "BUF",
+    "panthers": "CAR",
+    "bears": "CHI",
+    "bengals": "CIN",
+    "browns": "CLE",
+    "cowboys": "DAL",
+    "broncos": "DEN",
+    "lions": "DET",
+    "packers": "GB",
+    "texans": "HOU",
+    "colts": "IND",
+    "jaguars": "JAX",
+    "chiefs": "KC",
+    "raiders": "LV",
+    "chargers": "LAC",
+    "rams": "LA",
+    "dolphins": "MIA",
+    "vikings": "MIN",
+    "patriots": "NE",
+    "saints": "NO",
+    "giants": "NYG",
+    "jets": "NYJ",
+    "eagles": "PHI",
+    "steelers": "PIT",
+    "49ers": "SF",
+    "seahawks": "SEA",
+    "buccaneers": "TB",
+    "titans": "TEN",
+    "commanders": "WAS",
 }
 
 
@@ -78,7 +111,15 @@ class InjuryDataTransformer(BaseDataTransformer):
         if last_update is None:
             last_update = datetime.now(timezone.utc).isoformat()
 
+        # Pass through season, week, and season_type for historical tracking
+        season = record.get("season")
+        week = record.get("week")
+        season_type = _clean_str(record.get("season_type"))
+
         return {
+            "season": season,
+            "week": week,
+            "season_type": season_type,
             "team_abbr": resolved_team,
             "player_name": player_name,
             "injury": injury,
