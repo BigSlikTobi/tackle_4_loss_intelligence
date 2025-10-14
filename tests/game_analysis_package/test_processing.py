@@ -1,0 +1,346 @@
+"""
+Test data normalization and merging services.
+
+Tests edge cases including:
+- NaN and Infinity values
+- Empty strings in ID fields
+- Null values in various formats
+- Nested structures
+- Data conflicts and merging
+"""
+
+import pytest
+import math
+from src.functions.game_analysis_package.core.processing import (
+    DataNormalizer,
+    DataMerger,
+    NormalizedData
+)
+from src.functions.game_analysis_package.core.contracts.game_package import (
+    GamePackageInput,
+    PlayData
+)
+from src.functions.game_analysis_package.core.fetching.data_fetcher import FetchResult
+
+
+class TestDataNormalizer:
+    """Test the DataNormalizer class."""
+    
+    def test_normalize_nan_values(self):
+        """Test that NaN values are replaced with None."""
+        normalizer = DataNormalizer()
+        
+        # Create fetch result with NaN values
+        fetch_result = FetchResult(
+            play_by_play=[
+                {"play_id": "1", "yards_gained": float('nan'), "score": 10},
+                {"play_id": "2", "yards_gained": 5.0, "score": float('nan')},
+            ]
+        )
+        
+        result = normalizer.normalize(fetch_result)
+        
+        # Check that NaN values are replaced with None
+        assert result.play_by_play[0]["yards_gained"] is None
+        assert result.play_by_play[0]["score"] == 10
+        assert result.play_by_play[1]["yards_gained"] == 5.0
+        assert result.play_by_play[1]["score"] is None
+        
+        # Check that normalization count is tracked
+        assert normalizer._normalization_count == 2
+    
+    def test_normalize_infinity_values(self):
+        """Test that Infinity values are replaced with None."""
+        normalizer = DataNormalizer()
+        
+        fetch_result = FetchResult(
+            play_by_play=[
+                {"play_id": "1", "value": float('inf')},
+                {"play_id": "2", "value": float('-inf')},
+                {"play_id": "3", "value": 10.5},
+            ]
+        )
+        
+        result = normalizer.normalize(fetch_result)
+        
+        assert result.play_by_play[0]["value"] is None
+        assert result.play_by_play[1]["value"] is None
+        assert result.play_by_play[2]["value"] == 10.5
+    
+    def test_normalize_empty_string_ids(self):
+        """Test that empty strings in ID fields are replaced with None."""
+        normalizer = DataNormalizer()
+        
+        fetch_result = FetchResult(
+            ngs_data={
+                "passing": [
+                    {"player_id": "00-0012345", "yards": 250},
+                    {"player_id": "", "yards": 100},
+                    {"player_id": "  ", "yards": 150},
+                ]
+            }
+        )
+        
+        result = normalizer.normalize(fetch_result)
+        
+        assert result.ngs_data["passing"][0]["player_id"] == "00-0012345"
+        assert result.ngs_data["passing"][1]["player_id"] is None
+        assert result.ngs_data["passing"][2]["player_id"] is None
+    
+    def test_normalize_null_strings(self):
+        """Test that 'null' strings are replaced with None."""
+        normalizer = DataNormalizer()
+        
+        fetch_result = FetchResult(
+            play_by_play=[
+                {"play_id": "1", "status": "null"},
+                {"play_id": "2", "status": "NULL"},
+                {"play_id": "3", "status": "active"},
+            ]
+        )
+        
+        result = normalizer.normalize(fetch_result)
+        
+        assert result.play_by_play[0]["status"] is None
+        assert result.play_by_play[1]["status"] is None
+        assert result.play_by_play[2]["status"] == "active"
+    
+    def test_normalize_nested_structures(self):
+        """Test that nested dicts and lists are normalized recursively."""
+        normalizer = DataNormalizer()
+        
+        fetch_result = FetchResult(
+            team_context={
+                "team": "SF",
+                "stats": {
+                    "passing_yards": 300,
+                    "rushing_yards": float('nan'),
+                },
+                "players": [
+                    {"player_id": "00-0012345", "yards": float('inf')},
+                    {"player_id": "", "yards": 100},
+                ]
+            }
+        )
+        
+        result = normalizer.normalize(fetch_result)
+        
+        assert result.team_context["stats"]["passing_yards"] == 300
+        assert result.team_context["stats"]["rushing_yards"] is None
+        assert result.team_context["players"][0]["yards"] is None
+        assert result.team_context["players"][1]["player_id"] is None
+    
+    def test_normalize_preserves_valid_data(self):
+        """Test that valid data is preserved unchanged."""
+        normalizer = DataNormalizer()
+        
+        fetch_result = FetchResult(
+            ngs_data={
+                "rushing": [
+                    {
+                        "player_id": "00-0012345",
+                        "yards": 100,
+                        "attempts": 20,
+                        "avg": 5.0,
+                        "touchdowns": 2,
+                    }
+                ]
+            }
+        )
+        
+        result = normalizer.normalize(fetch_result)
+        
+        record = result.ngs_data["rushing"][0]
+        assert record["player_id"] == "00-0012345"
+        assert record["yards"] == 100
+        assert record["attempts"] == 20
+        assert record["avg"] == 5.0
+        assert record["touchdowns"] == 2
+    
+    def test_normalize_tracks_issues(self):
+        """Test that normalization issues are tracked."""
+        normalizer = DataNormalizer()
+        
+        # Create data that will cause an error in normalization
+        fetch_result = FetchResult(
+            play_by_play=[
+                {"play_id": "1", "valid": True},
+            ]
+        )
+        
+        result = normalizer.normalize(fetch_result)
+        
+        # Should have processed record successfully
+        assert result.records_processed["play_by_play"] == 1
+        assert len(result.issues_found) == 0
+
+
+class TestDataMerger:
+    """Test the DataMerger class."""
+    
+    def test_merge_basic_structure(self):
+        """Test basic merge creates correct structure."""
+        merger = DataMerger()
+        
+        # Create minimal game package
+        package = GamePackageInput(
+            season=2024,
+            week=5,
+            game_id="2024_05_SF_KC",
+            plays=[
+                PlayData(
+                    play_id="1",
+                    game_id="2024_05_SF_KC",
+                    passer_player_id="00-0012345",
+                    receiver_player_id="00-0067890",
+                )
+            ]
+        )
+        
+        # Create normalized data
+        normalized = NormalizedData(
+            play_by_play=[],
+            snap_counts=[],
+            team_context={},
+            ngs_data={}
+        )
+        
+        result = merger.merge(package, normalized)
+        
+        # Check basic structure
+        assert result.season == 2024
+        assert result.week == 5
+        assert result.game_id == "2024_05_SF_KC"
+        assert len(result.plays) == 1
+        assert result.plays[0]["play_id"] == "1"
+    
+    def test_merge_initializes_player_data(self):
+        """Test that all players from plays are initialized in player_data."""
+        merger = DataMerger()
+        
+        package = GamePackageInput(
+            season=2024,
+            week=5,
+            game_id="2024_05_SF_KC",
+            plays=[
+                PlayData(
+                    play_id="1",
+                    game_id="2024_05_SF_KC",
+                    passer_player_id="00-0012345",
+                    receiver_player_id="00-0067890",
+                    tackler_player_ids=["00-0011111", "00-0022222"],
+                )
+            ]
+        )
+        
+        normalized = NormalizedData()
+        result = merger.merge(package, normalized)
+        
+        # Check all players are in player_data
+        assert "00-0012345" in result.player_data
+        assert "00-0067890" in result.player_data
+        assert "00-0011111" in result.player_data
+        assert "00-0022222" in result.player_data
+        assert len(result.player_data) == 4
+    
+    def test_merge_ngs_data(self):
+        """Test that NGS data is merged into player_data."""
+        merger = DataMerger()
+        
+        package = GamePackageInput(
+            season=2024,
+            week=5,
+            game_id="2024_05_SF_KC",
+            plays=[
+                PlayData(play_id="1", game_id="2024_05_SF_KC", passer_player_id="00-0012345")
+            ]
+        )
+        
+        normalized = NormalizedData(
+            ngs_data={
+                "passing": [
+                    {
+                        "player_gsis_id": "00-0012345",
+                        "completions": 25,
+                        "attempts": 35,
+                        "yards": 300,
+                    }
+                ],
+                "rushing": [
+                    {
+                        "player_gsis_id": "00-0067890",
+                        "attempts": 15,
+                        "yards": 75,
+                    }
+                ]
+            }
+        )
+        
+        result = merger.merge(package, normalized)
+        
+        # Check NGS data is in player_data
+        assert "ngs_stats" in result.player_data["00-0012345"]
+        assert "passing" in result.player_data["00-0012345"]["ngs_stats"]
+        assert result.player_data["00-0012345"]["ngs_stats"]["passing"]["yards"] == 300
+        
+        assert "ngs_stats" in result.player_data["00-0067890"]
+        assert "rushing" in result.player_data["00-0067890"]["ngs_stats"]
+        assert result.player_data["00-0067890"]["ngs_stats"]["rushing"]["yards"] == 75
+    
+    def test_merge_tracks_enrichment(self):
+        """Test that merge tracks enrichment counts."""
+        merger = DataMerger()
+        
+        package = GamePackageInput(
+            season=2024,
+            week=5,
+            game_id="2024_05_SF_KC",
+            plays=[
+                PlayData(play_id="1", game_id="2024_05_SF_KC", passer_player_id="00-0012345")
+            ]
+        )
+        
+        normalized = NormalizedData(
+            ngs_data={
+                "passing": [
+                    {"player_gsis_id": "00-0012345", "yards": 300},
+                    {"player_gsis_id": "00-0067890", "yards": 250},
+                ]
+            }
+        )
+        
+        result = merger.merge(package, normalized)
+        
+        # Check enrichment counts
+        assert result.players_enriched == 2
+        assert result.teams_enriched == 0
+    
+    def test_merge_to_dict(self):
+        """Test that merged data can be serialized to dict."""
+        merger = DataMerger()
+        
+        package = GamePackageInput(
+            season=2024,
+            week=5,
+            game_id="2024_05_SF_KC",
+            plays=[
+                PlayData(play_id="1", game_id="2024_05_SF_KC", passer_player_id="00-0012345")
+            ]
+        )
+        
+        normalized = NormalizedData()
+        result = merger.merge(package, normalized)
+        
+        # Convert to dict
+        result_dict = result.to_dict()
+        
+        # Check structure
+        assert "game_info" in result_dict
+        assert result_dict["game_info"]["game_id"] == "2024_05_SF_KC"
+        assert "plays" in result_dict
+        assert "player_data" in result_dict
+        assert "metadata" in result_dict
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -25,7 +25,7 @@
   - _Requirements: 1.1, 1.2_
 
 -
-  3. [ ] Implement player extraction and relevance scoring
+  3. [x] Implement player extraction and relevance scoring
 - [x] 3.1 Create player extraction service
   - Write PlayerExtractor class to scan plays and collect unique player IDs
   - Implement extraction from all play action fields (rusher, receiver, passer,
@@ -34,7 +34,7 @@
   - Add basic tests for player extraction functionality
   - _Requirements: 2.1_
 
-- [ ] 3.2 Implement relevance scoring algorithm
+- [x] 3.2 Implement relevance scoring algorithm
   - Write RelevanceScorer class with impact signal computation
   - Implement scoring for play frequency, production metrics (yards, TDs), and
     high-leverage events
@@ -60,8 +60,8 @@
   - _Requirements: 3.4, 8.3_
 
 -
-  5. [ ] Implement data processing and normalization
-- [ ] 5.1 Create data normalization service
+  5. [x] Implement data processing and normalization
+- [x] 5.1 Create data normalization service
   - Write DataNormalizer class to clean and standardize data
   - Replace invalid JSON values (NaN) with standard nulls
   - Ensure consistent identifiers across all data sources
@@ -69,7 +69,7 @@
   - Write unit tests for normalization edge cases
   - _Requirements: 4.1, 4.2, 4.3_
 
-- [ ] 5.2 Implement data merging logic
+- [x] 5.2 Implement data merging logic
   - Write data merging functionality to create coherent structure
   - Key data by game (season, week, game_id), teams (home/away), and players
     (unique ID)
