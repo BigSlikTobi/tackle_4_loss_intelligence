@@ -1,0 +1,94 @@
+{
+  "name": "Aggregate Summaries by Game",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "id": "2",
+      "name": "Loop Through Each Game",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [400, 300],
+      "parameters": {
+        "batchSize": 1
+      }
+    },
+    {
+      "id": "3",
+      "name": "Get Members for these Groups",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [600, 150],
+      "parameters": {
+        "url": "https://YOUR_SUPABASE_PROJECT_URL/rest/v1/members_view?select=*",
+        "authentication": "headerAuth",
+        "headerParametersUi": {
+          "parameter": [
+            {
+              "name": "apikey",
+              "value": "YOUR_SUPABASE_ANON_KEY"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_SUPABASE_ANON_KEY"
+            }
+          ]
+        },
+        "responseFormat": "json"
+      }
+    },
+    {
+      "id": "4",
+      "name": "Get Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [600, 450],
+      "parameters": {
+        "url": "https://YOUR_SUPABASE_PROJECT_URL/rest/v1/context_summaries?select=*",
+        "authentication": "headerAuth",
+        "headerParametersUi": {
+          "parameter": [
+            {
+              "name": "apikey",
+              "value": "YOUR_SUPABASE_ANON_KEY"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_SUPABASE_ANON_KEY"
+            }
+          ]
+        },
+        "responseFormat": "json"
+      }
+    },
+    {
+      "id": "5",
+      "name": "Aggregate Members for this Game",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300],
+      "parameters": {
+        "language": "JavaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// --- Pull current game context ---\nconst gameItems = $items('Loop Through Each Game', 0, 0);\nif (!gameItems?.length) {\n  throw new Error('No output from Loop Through Each Game.');\n}\nconst gameInfo = gameItems[0].json || {};\nconst gameId = gameInfo.game_id ?? null;\n\n// --- Pull articles & summaries ---\nconst articleItems = $items('Get Members for these Groups', 0, 0) || [];\nconst summaryItems = $items('Get Summary', 0, 0) || [];\n\n// --- Build lookup for summaries ---\nconst summaryByKey = new Map();\nfor (const { json } of summaryItems) {\n  const key = json?.news_url_id ?? json?.url ?? null;\n  if (!key) continue;\n  const text = json?.summary_text ?? json?.summary ?? null;\n  if (text) summaryByKey.set(String(key), text);\n}\n\n// --- Build memberList and summaries array ---\nconst memberList = [];\nconst summaries = [];\nconst seen = new Set();\n\nfor (const { json } of articleItems) {\n  const key = json?.news_url_id ?? json?.url ?? null;\n  const summary_text = (key ? summaryByKey.get(String(key)) : null) ?? json?.summary_text ?? json?.summary ?? null;\n\n  memberList.push({\n    game_id: gameId,\n    news_url_id: json?.news_url_id ?? null,\n    url: json?.url ?? null,\n    title: json?.title ?? null,\n    description: json?.description ?? null,\n    publisher: json?.publisher ?? null,\n    summary_text\n  });\n\n  if (summary_text && !seen.has(summary_text)) {\n    seen.add(summary_text);\n    summaries.push(summary_text);\n  }\n}\n\nreturn [{\n  json: {\n    gameInfo,\n    memberList,\n    summaries,\n    summaries_count: summaries.length\n  }\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": { "main": [[{ "node": "Loop Through Each Game", "type": "main", "index": 0 }]] },
+    "Loop Through Each Game": {
+      "main": [
+        { "node": "Get Members for these Groups", "type": "main", "index": 0 },
+        { "node": "Get Summary", "type": "main", "index": 0 },
+        { "node": "Aggregate Members for this Game", "type": "main", "index": 0 }
+      ]
+    },
+    "Get Members for these Groups": { "main": [[{ "node": "Aggregate Members for this Game", "type": "main", "index": 0 }]] },
+    "Get Summary": { "main": [[{ "node": "Aggregate Members for this Game", "type": "main", "index": 0 }]] }
+  }
+}

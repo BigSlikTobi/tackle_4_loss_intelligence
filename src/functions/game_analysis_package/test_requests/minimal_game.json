@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0.0",
+  "producer": "test.client/minimal@1.0.0",
+  "game_package": {
+    "season": 2024,
+    "week": 1,
+    "game_id": "2024_01_MIN_DET",
+    "plays": [
+      {
+        "play_id": "2024_01_MIN_DET_001",
+        "game_id": "2024_01_MIN_DET",
+        "quarter": 1,
+        "down": 1,
+        "yards_to_go": 10,
+        "posteam": "MIN",
+        "defteam": "DET",
+        "play_type": "pass",
+        "yards_gained": 5.0,
+        "passer_player_id": "00-0036212",
+        "receiver_player_id": "00-0034855"
+      }
+    ],
+    "correlation_id": "test-minimal-001"
+  }
+}
