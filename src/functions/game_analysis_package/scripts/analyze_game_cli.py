@@ -28,8 +28,8 @@ import argparse
 import json
 import logging
 import sys
+from typing import Dict, Any, Optional
 from pathlib import Path
-from typing import Dict, Any
 
 # Add project root to path (go up 4 levels: scripts -> game_analysis_package -> functions -> src -> project_root)
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
@@ -69,7 +69,12 @@ from src.functions.game_analysis_package.core.fetching import (
 from src.functions.game_analysis_package.core.processing import (
     DataNormalizer,
     DataMerger,
-    GameSummarizer
+    GameSummarizer,
+    AnalysisEnvelopeBuilder
+)
+from src.functions.game_analysis_package.core.pipeline import (
+    GameAnalysisPipeline,
+    PipelineConfig
 )
 
 logger = logging.getLogger(__name__)
@@ -292,9 +297,26 @@ def analyze_game_package(
             f"✓ Computed summaries: {game_summaries.teams_summarized} teams, "
             f"{game_summaries.players_summarized} players"
         )
+        # Use minimal_merged for envelope if no full merged data
+        if not merged_data:
+            merged_data = minimal_merged
     
-    # For now, return the analysis structure
-    # Full implementation would continue with envelope creation, etc.
+    # Step 9: Create analysis envelope
+    analysis_envelope = None
+    if game_summaries and merged_data:
+        logger.info("Step 9: Creating analysis envelope...")
+        envelope_builder = AnalysisEnvelopeBuilder()
+        correlation_id = package.correlation_id or f"{package.game_id}-cli"
+        analysis_envelope = envelope_builder.build_envelope(
+            merged_data=merged_data,
+            summaries=game_summaries,
+            correlation_id=correlation_id
+        )
+        logger.info("✓ Analysis envelope created")
+    else:
+        logger.info("Step 9: Skipping envelope creation (no summaries)")
+    
+    # Build result structure
     result = {
         "status": "analyzed",
         "correlation_id": package.correlation_id or f"{package.game_id}-cli",
@@ -351,9 +373,75 @@ def analyze_game_package(
     # Add summary results if available
     if game_summaries:
         result["game_summaries"] = game_summaries.to_dict()
+    
+    # Add analysis envelope if available
+    if analysis_envelope:
+        result["analysis_envelope"] = analysis_envelope.to_dict()
 
     
     return result
+
+
+def analyze_game_package_pipeline(
+    data: Dict[str, Any],
+    dry_run: bool = False,
+    strict: bool = False,
+    fetch_data: bool = False,
+    correlation_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Analyze a game package using the orchestrated pipeline.
+    
+    This is a streamlined version that uses GameAnalysisPipeline
+    for coordinated execution of all steps.
+    
+    Args:
+        data: Game package data
+        dry_run: If True, only validate without full processing
+        strict: If True, treat warnings as errors
+        fetch_data: If True, fetch data from upstream providers
+        correlation_id: Optional custom correlation ID
+        
+    Returns:
+        Analysis results in pipeline format
+    """
+    # Validate and create package
+    logger.info("Validating package structure...")
+    try:
+        package = validate_game_package(data)
+        logger.info(
+            f"✓ Package structure valid for {package.game_id} "
+            f"({package.season} Week {package.week}) "
+            f"with {len(package.plays)} plays"
+        )
+    except ValidationError as e:
+        logger.error(f"✗ Structural validation failed: {e}")
+        raise
+    
+    # Stop here if dry-run
+    if dry_run:
+        return {
+            "status": "validated",
+            "game_id": package.game_id,
+            "season": package.season,
+            "week": package.week,
+            "message": "Validation only - use without --dry-run for full analysis"
+        }
+    
+    # Configure pipeline
+    config = PipelineConfig(
+        fetch_data=fetch_data,
+        strict_validation=strict,
+        enable_envelope=True,
+        correlation_id=correlation_id
+    )
+    
+    # Execute pipeline
+    pipeline = GameAnalysisPipeline()
+    result = pipeline.process(package, config)
+    
+    # Convert to dictionary for output
+    return result.to_dict()
 
 
 def main():
@@ -424,6 +512,18 @@ For more information, see the module README.md
         help='Enable verbose debug logging'
     )
     
+    parser.add_argument(
+        '--pipeline',
+        action='store_true',
+        help='Use orchestrated pipeline mode (recommended for production)'
+    )
+    
+    parser.add_argument(
+        '--correlation-id',
+        type=str,
+        help='Custom correlation ID for request tracking'
+    )
+    
     args = parser.parse_args()
     
     # Configure logging level
@@ -435,13 +535,26 @@ For more information, see the module README.md
         # Load game package
         data = load_game_package(args.request)
         
-        # Analyze
-        result = analyze_game_package(
-            data, 
-            dry_run=args.dry_run, 
-            strict=args.strict,
-            fetch_data=args.fetch
-        )
+        # Choose analysis mode
+        if args.pipeline:
+            # Use orchestrated pipeline
+            logger.info("Using orchestrated pipeline mode")
+            result = analyze_game_package_pipeline(
+                data,
+                dry_run=args.dry_run,
+                strict=args.strict,
+                fetch_data=args.fetch,
+                correlation_id=getattr(args, 'correlation_id', None)
+            )
+        else:
+            # Use detailed step-by-step mode
+            logger.info("Using detailed step-by-step mode")
+            result = analyze_game_package(
+                data, 
+                dry_run=args.dry_run, 
+                strict=args.strict,
+                fetch_data=args.fetch
+            )
         
         # Format output
         if args.pretty:

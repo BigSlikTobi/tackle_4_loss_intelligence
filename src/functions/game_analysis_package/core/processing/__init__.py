@@ -13,6 +13,7 @@ from .game_summarizer import (
     TeamSummary,
     PlayerSummary
 )
+from .envelope_builder import AnalysisEnvelopeBuilder
 
 __all__ = [
     "DataNormalizer",
@@ -23,4 +24,5 @@ __all__ = [
     "GameSummaries",
     "TeamSummary",
     "PlayerSummary",
+    "AnalysisEnvelopeBuilder",
 ]
