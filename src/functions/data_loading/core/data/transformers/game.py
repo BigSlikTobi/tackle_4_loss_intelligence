@@ -141,6 +141,9 @@ class PlayByPlayDataTransformer(BaseDataTransformer):
             "game_date": self._normalise_value(record.get("game_date")),
             "clock": record.get("time"),
             "description": record.get("desc") or record.get("play_description"),
+            # Scoring indicators
+            "touchdown": record.get("touchdown"),
+            "safety": record.get("safety"),
         }
 
         participant_keys = [
@@ -151,6 +154,7 @@ class PlayByPlayDataTransformer(BaseDataTransformer):
             "interception_player_id",
             "punt_returner_player_id",
             "kickoff_returner_player_id",
+            "kicker_player_id",  # Include kicker for field goals and extra points
             "fumbled_1_player_id",
             "fumbled_2_player_id",
             "tackle_for_loss_1_player_id",

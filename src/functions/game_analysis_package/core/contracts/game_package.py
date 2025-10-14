@@ -37,6 +37,7 @@ class PlayData:
     play_type: Optional[str] = None
     yards_gained: Optional[float] = None
     touchdown: Optional[int] = None
+    safety: Optional[int] = None
     
     # Players involved (can be individual IDs or lists)
     passer_player_id: Optional[str] = None
@@ -292,7 +293,7 @@ class GamePackageInput:
         known_fields = {
             "play_id", "game_id", "quarter", "time", "down", "yards_to_go",
             "yardline", "posteam", "defteam", "play_type", "yards_gained",
-            "touchdown", "passer_player_id", "receiver_player_id",
+            "touchdown", "safety", "passer_player_id", "receiver_player_id",
             "rusher_player_id", "tackler_player_ids", "assist_tackler_player_ids",
             "sack_player_ids", "kicker_player_id", "punter_player_id",
             "returner_player_id", "interception_player_id",

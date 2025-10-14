@@ -126,6 +126,7 @@ def create_game_package(game_id: str, output_path: str) -> None:
             "play_type": safe_value(play.get("play_type")),
             "yards_gained": safe_value(play.get("yards_gained", 0)),
             "touchdown": safe_value(play.get("touchdown", 0)),
+            "safety": safe_value(play.get("safety", 0)),
             "passer_player_id": safe_value(play.get("passer_player_id")),
             "receiver_player_id": safe_value(play.get("receiver_player_id")),
             "rusher_player_id": safe_value(play.get("rusher_player_id")),

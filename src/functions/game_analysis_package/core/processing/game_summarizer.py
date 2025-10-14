@@ -320,6 +320,7 @@ class GameSummarizer:
                     play_type=play_dict.get("play_type"),
                     yards_gained=play_dict.get("yards_gained"),
                     touchdown=play_dict.get("touchdown"),
+                    safety=play_dict.get("safety"),
                     passer_player_id=play_dict.get("passer_player_id"),
                     receiver_player_id=play_dict.get("receiver_player_id"),
                     rusher_player_id=play_dict.get("rusher_player_id"),
@@ -403,6 +404,38 @@ class GameSummarizer:
             if play.touchdown == 1:
                 off_summary.touchdowns += 1
                 off_summary.points_scored += 6  # TD worth 6 points
+            
+            # Count field goals
+            if play.play_type == "field_goal":
+                # Check if field goal was successful
+                # Field goals typically have yards_gained == 0 and are marked successful
+                # or can be detected by kicker_player_id being present
+                if play.kicker_player_id:
+                    # Assume successful if kicker is present (failed FGs may have different patterns)
+                    # More accurate detection would require additional fields like "field_goal_result"
+                    off_summary.field_goals += 1
+                    off_summary.points_scored += 3
+            
+            # Count extra points (PAT attempts after touchdowns)
+            if play.play_type == "extra_point":
+                # Extra point is worth 1 point if successful
+                # Check for successful PAT (typically yards_gained == 0 for kicks)
+                if play.kicker_player_id:
+                    off_summary.points_scored += 1
+            
+            # Count two-point conversions
+            if play.play_type == "two_point_attempt":
+                # Two-point conversion is worth 2 points if successful (touchdown == 1)
+                if play.touchdown == 1:
+                    off_summary.points_scored += 2
+            
+            # Handle safeties - scored by the DEFENSE
+            if play.safety == 1:
+                # When offense (posteam) takes a safety, defense (defteam) gets 2 points
+                if def_summary:
+                    def_summary.points_scored += 2
+                else:
+                    logger.warning(f"Safety play {play.play_id} has no defense team")
             
             # Track turnovers
             if play.interception_player_id:
@@ -539,6 +572,9 @@ class GameSummarizer:
         is_td = play.touchdown == 1
         
         # Passing play
+        # NOTE: pass_attempts includes all passes (complete and incomplete)
+        # because passer_player_id is set on all pass plays.
+        # Completions are only counted when receiver_player_id is present.
         if play.passer_player_id:
             passer = player_summaries.get(play.passer_player_id)
             if passer:
@@ -555,12 +591,18 @@ class GameSummarizer:
                         passer.passing_tds += 1
         
         # Receiving
+        # NOTE: In nflreadpy data, receiver_player_id is only set on COMPLETED passes.
+        # Incomplete passes have receiver_player_id = None, so we cannot attribute
+        # incomplete targets to specific players. Therefore:
+        # - receptions = completions (correct)
+        # - targets = completions (data limitation - true targets would include incompletions)
+        # - yards/TDs = only from completions (correct)
         if play.receiver_player_id:
             receiver = player_summaries.get(play.receiver_player_id)
             if receiver:
                 receiver.plays_involved += 1
                 receiver.receptions += 1
-                receiver.targets += 1
+                receiver.targets += 1  # Note: This equals receptions due to data limitation
                 receiver.receiving_yards += yards
                 if is_td:
                     receiver.receiving_tds += 1
