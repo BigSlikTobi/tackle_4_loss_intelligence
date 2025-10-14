@@ -68,7 +68,8 @@ from src.functions.game_analysis_package.core.fetching import (
 )
 from src.functions.game_analysis_package.core.processing import (
     DataNormalizer,
-    DataMerger
+    DataMerger,
+    GameSummarizer
 )
 
 logger = logging.getLogger(__name__)
@@ -234,8 +235,66 @@ def analyze_game_package(
     else:
         logger.info("Step 7: Skipping data merge (no normalized data)")
     
-        # For now, return the analysis structure
-    # Full implementation would continue with summarization, envelope creation, etc.
+    # Step 8: Compute game summaries
+    game_summaries = None
+    if merged_data:
+        logger.info("Step 8: Computing team and player summaries...")
+        summarizer = GameSummarizer()
+        game_summaries = summarizer.summarize(merged_data, relevant_players)
+        logger.info(
+            f"✓ Computed summaries: {game_summaries.teams_summarized} teams, "
+            f"{game_summaries.players_summarized} players"
+        )
+    else:
+        # Create summaries from plays even without merged data
+        logger.info("Step 8: Computing summaries from play data only...")
+        summarizer = GameSummarizer()
+        # Create minimal merged data structure for summarization
+        from src.functions.game_analysis_package.core.processing.data_merger import MergedData
+        minimal_merged = MergedData(
+            season=package.season,
+            week=package.week,
+            game_id=package.game_id,
+            plays=[
+                {
+                    "play_id": play.play_id,
+                    "game_id": play.game_id,
+                    "quarter": play.quarter,
+                    "time": play.time,
+                    "down": play.down,
+                    "yards_to_go": play.yards_to_go,
+                    "yardline": play.yardline,
+                    "posteam": play.posteam,
+                    "defteam": play.defteam,
+                    "play_type": play.play_type,
+                    "yards_gained": play.yards_gained,
+                    "touchdown": play.touchdown,
+                    "safety": play.safety,
+                    "passer_player_id": play.passer_player_id,
+                    "receiver_player_id": play.receiver_player_id,
+                    "rusher_player_id": play.rusher_player_id,
+                    "tackler_player_ids": play.tackler_player_ids,
+                    "assist_tackler_player_ids": play.assist_tackler_player_ids,
+                    "sack_player_ids": play.sack_player_ids,
+                    "kicker_player_id": play.kicker_player_id,
+                    "punter_player_id": play.punter_player_id,
+                    "returner_player_id": play.returner_player_id,
+                    "interception_player_id": play.interception_player_id,
+                    "forced_fumble_player_id": play.forced_fumble_player_id,
+                    "fumble_recovery_player_id": play.fumble_recovery_player_id,
+                }
+                for play in package.plays
+            ],
+            player_data={pid: {"player_id": pid} for pid in player_ids}
+        )
+        game_summaries = summarizer.summarize(minimal_merged, relevant_players)
+        logger.info(
+            f"✓ Computed summaries: {game_summaries.teams_summarized} teams, "
+            f"{game_summaries.players_summarized} players"
+        )
+    
+    # For now, return the analysis structure
+    # Full implementation would continue with envelope creation, etc.
     result = {
         "status": "analyzed",
         "correlation_id": package.correlation_id or f"{package.game_id}-cli",
@@ -288,6 +347,11 @@ def analyze_game_package(
         
         # Include the enriched package in the result
         result["enriched_package"] = merged_data.to_dict()
+    
+    # Add summary results if available
+    if game_summaries:
+        result["game_summaries"] = game_summaries.to_dict()
+
     
     return result
 
