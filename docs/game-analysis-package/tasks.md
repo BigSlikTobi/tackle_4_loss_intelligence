@@ -95,8 +95,8 @@
   - _Requirements: 5.2, 5.3_
 
 -
-  7. [ ] Create analysis envelope builder
-- [ ] 7.1 Implement LLM-friendly envelope structure
+  7. [x] Create analysis envelope builder
+- [x] 7.1 Implement LLM-friendly envelope structure
   - Write AnalysisEnvelopeBuilder class for compact envelope creation
   - Create game header, team summaries, and player map components
   - Implement key sequence extraction for notable game moments
@@ -104,7 +104,7 @@
   - Write unit tests for envelope structure and content
   - _Requirements: 6.1, 6.3_
 
-- [ ] 7.2 Implement data pointer management
+- [x] 7.2 Implement data pointer management
   - Add pointer/link creation for comprehensive datasets outside envelope
   - Link to detailed NGS tables and supplementary data
   - Ensure pointers are accessible and properly formatted
@@ -112,8 +112,8 @@
   - _Requirements: 6.2, 6.4_
 
 -
-  8. [ ] Create main pipeline orchestration
-- [ ] 8.1 Implement GameAnalysisPipeline class
+  8. [x] Create main pipeline orchestration
+- [x] 8.1 Implement GameAnalysisPipeline class
   - Write main pipeline class orchestrating all 9 steps
   - Integrate validation, extraction, scoring, bundling, fetching,
     normalization, summarization, and envelope creation
@@ -121,7 +121,7 @@
   - Write integration tests for complete pipeline execution
   - _Requirements: 1.3, 2.4, 3.4, 4.4, 5.3, 6.4_
 
-- [ ] 8.2 Implement correlation ID management
+- [x] 8.2 Implement correlation ID management
   - Write correlation ID generation and tracking utilities
   - Ensure IDs are propagated through entire pipeline
   - Add logging and tracing capabilities for n8n integration
