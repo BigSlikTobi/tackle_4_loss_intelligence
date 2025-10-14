@@ -66,6 +66,10 @@ from src.functions.game_analysis_package.core.bundling.request_builder import (
 from src.functions.game_analysis_package.core.fetching import (
     DataFetcher
 )
+from src.functions.game_analysis_package.core.processing import (
+    DataNormalizer,
+    DataMerger
+)
 
 logger = logging.getLogger(__name__)
 
@@ -204,8 +208,34 @@ def analyze_game_package(
     else:
         logger.info("Step 5: Skipping data fetch (use --fetch to enable)")
     
-    # For now, return the analysis structure
-    # Full implementation would continue with data normalization, merging, etc.
+    # Step 6: Normalize data (if fetched)
+    normalized_data = None
+    if fetch_result:
+        logger.info("Step 6: Normalizing fetched data...")
+        normalizer = DataNormalizer()
+        normalized_data = normalizer.normalize(fetch_result)
+        logger.info(
+            f"✓ Normalized {sum(normalized_data.records_processed.values())} records, "
+            f"fixed {len(normalized_data.issues_found)} issues"
+        )
+    else:
+        logger.info("Step 6: Skipping data normalization (no data fetched)")
+    
+    # Step 7: Merge data into enriched package (if normalized)
+    merged_data = None
+    if normalized_data:
+        logger.info("Step 7: Merging data into enriched package...")
+        merger = DataMerger()
+        merged_data = merger.merge(package, normalized_data)
+        logger.info(
+            f"✓ Merged data: {merged_data.players_enriched} players enriched, "
+            f"{merged_data.teams_enriched} teams enriched"
+        )
+    else:
+        logger.info("Step 7: Skipping data merge (no normalized data)")
+    
+        # For now, return the analysis structure
+    # Full implementation would continue with summarization, envelope creation, etc.
     result = {
         "status": "analyzed",
         "correlation_id": package.correlation_id or f"{package.game_id}-cli",
@@ -239,6 +269,25 @@ def analyze_game_package(
                 },
             },
         }
+    
+    # Add normalization results if available
+    if normalized_data:
+        result["normalization_result"] = {
+            "records_processed": normalized_data.records_processed,
+            "issues_found": len(normalized_data.issues_found),
+            "issues": normalized_data.issues_found[:10],  # First 10 issues only
+        }
+    
+    # Add merge results if available
+    if merged_data:
+        result["merge_result"] = {
+            "players_enriched": merged_data.players_enriched,
+            "teams_enriched": merged_data.teams_enriched,
+            "conflicts_resolved": len(merged_data.conflicts_resolved),
+        }
+        
+        # Include the enriched package in the result
+        result["enriched_package"] = merged_data.to_dict()
     
     return result
 
