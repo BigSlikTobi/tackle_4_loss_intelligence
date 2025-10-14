@@ -100,6 +100,27 @@ class RelevanceScorer:
     a balanced representation from both teams.
     """
     
+    # Position specificity ranking (lower rank = more specific)
+    # More specific positions should be preferred when inferring from plays
+    POSITION_SPECIFICITY = {
+        'QB': 1,    # Quarterback - very specific
+        'RB': 2,    # Running back - specific
+        'FB': 2,    # Fullback - specific
+        'WR': 2,    # Wide receiver - specific
+        'TE': 2,    # Tight end - specific
+        'DB': 3,    # Defensive back - moderately specific
+        'CB': 3,    # Cornerback - moderately specific
+        'S': 3,     # Safety - moderately specific
+        'LB': 3,    # Linebacker - moderately specific
+        'DL': 4,    # Defensive line - less specific
+        'DE': 4,    # Defensive end - less specific
+        'DT': 4,    # Defensive tackle - less specific
+        'K': 2,     # Kicker - specific
+        'P': 2,     # Punter - specific
+        'DEF': 5,   # Generic defense - very generic
+        'OFF': 5,   # Generic offense - very generic
+    }
+    
     def __init__(
         self,
         min_play_frequency: int = 1,
@@ -160,10 +181,13 @@ class RelevanceScorer:
             away_team
         )
         
-        logger.info(
-            f"Selected {len(selected_players)} players "
-            f"(avg score: {sum(p.relevance_score for p in selected_players) / len(selected_players):.2f})"
-        )
+        if selected_players:
+            avg_score = sum(p.relevance_score for p in selected_players) / len(selected_players)
+            logger.info(
+                f"Selected {len(selected_players)} players (avg score: {avg_score:.2f})"
+            )
+        else:
+            logger.warning("Selected 0 players - no players met selection criteria")
         
         return selected_players
     
@@ -539,15 +563,28 @@ class RelevanceScorer:
         position: Optional[str] = None,
         team: Optional[str] = None
     ):
-        """Update player metadata, preferring more specific information."""
+        """
+        Update player metadata, preferring more specific information.
+        
+        Uses POSITION_SPECIFICITY ranking to prefer more specific positions
+        (e.g., 'QB' over 'DEF', 'RB' over 'OFF').
+        """
         if player_id not in metadata:
             metadata[player_id] = {}
         
         if position:
-            # Prefer more specific positions
             current_pos = metadata[player_id].get('position')
-            if not current_pos or len(position) < len(current_pos):
+            if not current_pos:
+                # No existing position, set it
                 metadata[player_id]['position'] = position
+            else:
+                # Compare specificity - lower rank = more specific
+                new_specificity = self.POSITION_SPECIFICITY.get(position, 999)
+                current_specificity = self.POSITION_SPECIFICITY.get(current_pos, 999)
+                
+                if new_specificity < current_specificity:
+                    # New position is more specific, prefer it
+                    metadata[player_id]['position'] = position
         
         if team and 'team' not in metadata[player_id]:
             metadata[player_id]['team'] = team
