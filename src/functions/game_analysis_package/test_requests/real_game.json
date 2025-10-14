@@ -1,0 +1,41 @@
+{
+  "game_id": "2023_01_DET_KC",
+  "season": 2023,
+  "week": 1,
+  "correlation_id": "test-real-game-001",
+  "plays": [
+    {
+      "play_id": "2023_01_DET_KC_001",
+      "game_id": "2023_01_DET_KC",
+      "season": 2023,
+      "week": 1,
+      "quarter": 1,
+      "down": 1,
+      "distance": 10,
+      "yardline": 75,
+      "play_type": "pass",
+      "yards_gained": 15,
+      "posteam": "KC",
+      "defteam": "DET",
+      "passer_player_id": "00-0033873",
+      "receiver_player_id": "00-0036945",
+      "tackle_1_player_id": "00-0034853"
+    },
+    {
+      "play_id": "2023_01_DET_KC_002",
+      "game_id": "2023_01_DET_KC",
+      "season": 2023,
+      "week": 1,
+      "quarter": 1,
+      "down": 1,
+      "distance": 10,
+      "yardline": 60,
+      "play_type": "run",
+      "yards_gained": 8,
+      "posteam": "KC",
+      "defteam": "DET",
+      "rusher_player_id": "00-0036389",
+      "tackle_1_player_id": "00-0035228"
+    }
+  ]
+}

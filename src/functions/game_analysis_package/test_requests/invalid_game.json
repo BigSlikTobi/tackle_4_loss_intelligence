@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0.0",
+  "producer": "test.client/invalid@1.0.0",
+  "game_package": {
+    "season": 2024,
+    "week": 1,
+    "game_id": "2024_01_INVALID_TEST",
+    "plays": [
+      {
+        "play_id": "2024_01_001",
+        "game_id": "2024_01_INVALID_TEST",
+        "quarter": 1,
+        "down": 5,
+        "yards_to_go": 10,
+        "play_type": "pass",
+        "yards_gained": 5.0,
+        "passer_player_id": "00-0036212"
+      },
+      {
+        "play_id": "2024_01_002",
+        "game_id": "2024_01_INVALID_TEST",
+        "quarter": 6,
+        "down": 1,
+        "yards_to_go": 10,
+        "posteam": "TEAM1",
+        "defteam": "TEAM2",
+        "play_type": "run",
+        "yards_gained": 150.0,
+        "rusher_player_id": "00-0034855"
+      },
+      {
+        "play_id": "2024_01_002",
+        "game_id": "2024_01_INVALID_TEST",
+        "quarter": 1,
+        "down": 1,
+        "yards_to_go": -5,
+        "posteam": "TEAM1",
+        "defteam": "TEAM2",
+        "play_type": "pass",
+        "touchdown": 3,
+        "yards_gained": 5.0
+      }
+    ],
+    "correlation_id": "test-invalid-001"
+  }
+}

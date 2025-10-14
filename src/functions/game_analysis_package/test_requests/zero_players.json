@@ -1,0 +1,22 @@
+{
+  "game_id": "2023_01_DET_KC",
+  "season": 2023,
+  "week": 1,
+  "correlation_id": "test-zero-players",
+  "plays": [
+    {
+      "play_id": "2023_01_DET_KC_001",
+      "game_id": "2023_01_DET_KC",
+      "season": 2023,
+      "week": 1,
+      "quarter": 1,
+      "down": 1,
+      "distance": 10,
+      "yardline": 75,
+      "play_type": "pass",
+      "yards_gained": 15,
+      "posteam": "KC",
+      "defteam": "DET"
+    }
+  ]
+}
