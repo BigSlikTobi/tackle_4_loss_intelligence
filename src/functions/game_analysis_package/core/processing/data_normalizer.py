@@ -365,6 +365,6 @@ class DataNormalizer:
         Returns:
             Record with standardized IDs
         """
-        # TODO: Implement ID standardization if needed
+        # TODO: Implement ID standardization if needed (issue #25)
         # For now, just return the record as-is
         return record
