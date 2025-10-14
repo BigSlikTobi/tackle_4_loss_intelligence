@@ -78,15 +78,15 @@
   - _Requirements: 4.4_
 
 -
-  6. [ ] Create summary computation services
-- [ ] 6.1 Implement team summary calculations
+  6. [x] Create summary computation services
+- [x] 6.1 Implement team summary calculations
   - Write GameSummarizer class for team-level metrics
   - Calculate total plays, total yards, yards per play, and success indicators
   - Ensure accuracy and consistency with underlying play-by-play data
   - Write unit tests for team summary calculations
   - _Requirements: 5.1, 5.3_
 
-- [ ] 6.2 Implement player summary calculations
+- [x] 6.2 Implement player summary calculations
   - Add player-level summary computation to GameSummarizer
   - Calculate plays involved, touches, yards, TDs, notable events, and relevance
     scores

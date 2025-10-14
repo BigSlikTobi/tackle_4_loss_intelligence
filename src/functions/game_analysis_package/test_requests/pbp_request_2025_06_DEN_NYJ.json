@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0.0",
+  "producer": "t4l.sports.packager/test@1.0.0",
+  "subject": {
+    "entity_type": "game",
+    "ids": {
+      "game_id": "2025_06_DEN_NYJ"
+    },
+    "display": {
+      "name": "DEN @ NYJ"
+    }
+  },
+  "scope": {
+    "granularity": "game",
+    "competition": "regular",
+    "temporal": {
+      "season": 2025,
+      "week": 6,
+      "games": ["2025_06_DEN_NYJ"]
+    },
+    "location": {
+      "timezone": "UTC"
+    }
+  },
+  "provenance": {
+    "sources": [
+      {
+        "name": "nfl.play_by_play",
+        "version": "2024.01",
+        "fetched_at_utc": "2025-10-14T09:26:00Z"
+      }
+    ],
+    "transforms": []
+  },
+  "bundles": [
+    {
+      "name": "pbp_game",
+      "schema_ref": "pbp.events.v1",
+      "record_grain": "event",
+      "provider": "pbp",
+      "filters": {
+        "season": 2025,
+        "week": 6,
+        "game_id": "2025_06_DEN_NYJ"
+      },
+      "storage_mode": "inlined",
+      "description": "Play-by-play events for DEN @ NYJ"
+    }
+  ]
+}
