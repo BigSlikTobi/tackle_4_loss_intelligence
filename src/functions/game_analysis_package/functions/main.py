@@ -33,9 +33,11 @@ from src.functions.game_analysis_package.core.contracts.game_package import (
 from src.functions.game_analysis_package.core.extraction.player_extractor import (
     PlayerExtractor
 )
+from src.functions.game_analysis_package.core.extraction.relevance_scorer import (
+    RelevanceScorer
+)
 from src.functions.game_analysis_package.core.bundling.request_builder import (
-    DataRequestBuilder,
-    RelevantPlayer
+    DataRequestBuilder
 )
 
 
@@ -120,14 +122,17 @@ def analysis_handler(request):
         player_ids = extractor.extract_players(package.plays)
         logger.info(f"Extracted {len(player_ids)} players from {len(package.plays)} plays")
         
-        # Build data request
-        # For now, create mock relevant players from extracted IDs
-        # In full implementation, this would come from relevance scoring
-        relevant_players = [
-            RelevantPlayer(player_id=pid, relevance_score=1.0)
-            for pid in list(player_ids)[:20]  # Limit for initial implementation
-        ]
+        # Score and select relevant players
+        scorer = RelevanceScorer()
+        relevant_players = scorer.score_and_select(
+            player_ids=player_ids,
+            plays=package.plays,
+            home_team=package.get_game_info().home_team,
+            away_team=package.get_game_info().away_team
+        )
+        logger.info(f"Selected {len(relevant_players)} relevant players")
         
+        # Build data request
         builder = DataRequestBuilder()
         request_obj = builder.build_request(
             game_info=package.get_game_info(),

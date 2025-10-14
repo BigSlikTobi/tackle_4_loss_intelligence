@@ -50,12 +50,21 @@ from src.functions.game_analysis_package.core.contracts.game_package import (
     validate_game_package,
     ValidationError
 )
+from src.functions.game_analysis_package.core.utils.validation import (
+    PackageValidator,
+    validate_package_with_details
+)
 from src.functions.game_analysis_package.core.extraction.player_extractor import (
     PlayerExtractor
 )
+from src.functions.game_analysis_package.core.extraction.relevance_scorer import (
+    RelevanceScorer
+)
 from src.functions.game_analysis_package.core.bundling.request_builder import (
-    DataRequestBuilder,
-    RelevantPlayer
+    DataRequestBuilder
+)
+from src.functions.game_analysis_package.core.fetching import (
+    DataFetcher
 )
 
 logger = logging.getLogger(__name__)
@@ -90,7 +99,9 @@ def load_game_package(file_path: str) -> Dict[str, Any]:
 
 def analyze_game_package(
     data: Dict[str, Any],
-    dry_run: bool = False
+    dry_run: bool = False,
+    strict: bool = False,
+    fetch_data: bool = False
 ) -> Dict[str, Any]:
     """
     Analyze a game package and produce enriched output.
@@ -98,22 +109,37 @@ def analyze_game_package(
     Args:
         data: Game package data
         dry_run: If True, only validate without full processing
+        strict: If True, treat warnings as errors
+        fetch_data: If True, fetch data from upstream providers
         
     Returns:
         Analysis results
     """
-    # Step 1: Validate game package
-    logger.info("Step 1: Validating game package...")
+    # Step 1: Basic validation (structure and contracts)
+    logger.info("Step 1a: Validating package structure...")
     try:
         package = validate_game_package(data)
         logger.info(
-            f"✓ Valid game package for {package.game_id} "
+            f"✓ Package structure valid for {package.game_id} "
             f"({package.season} Week {package.week}) "
             f"with {len(package.plays)} plays"
         )
     except ValidationError as e:
-        logger.error(f"✗ Validation failed: {e}")
+        logger.error(f"✗ Structural validation failed: {e}")
         raise
+    
+    # Step 1b: Detailed validation (data quality and consistency)
+    logger.info("Step 1b: Performing detailed validation...")
+    validation_result = validate_package_with_details(package, strict=strict)
+    
+    if not validation_result.is_valid:
+        logger.error(f"✗ Detailed validation failed: {validation_result.get_summary()}")
+        raise ValidationError(
+            f"Package validation failed for {package.game_id}: "
+            f"{len(validation_result.errors)} error(s) found"
+        )
+    
+    logger.info(f"✓ {validation_result.get_summary()}")
     
     if dry_run:
         logger.info("Dry-run mode: validation complete, skipping analysis")
@@ -122,7 +148,7 @@ def analyze_game_package(
             "game_id": package.game_id,
             "season": package.season,
             "week": package.week,
-            "play_count": len(package.plays)
+            "validation": validation_result.to_dict()
         }
     
     # Step 2: Extract players
@@ -131,15 +157,28 @@ def analyze_game_package(
     player_ids = extractor.extract_players(package.plays)
     logger.info(f"✓ Extracted {len(player_ids)} unique players")
     
-    # Step 3: Build data request
-    logger.info("Step 3: Building data request...")
+    # Step 3: Score and select relevant players
+    logger.info("Step 3: Scoring and selecting relevant players...")
+    scorer = RelevanceScorer()
+    relevant_players = scorer.score_and_select(
+        player_ids=player_ids,
+        plays=package.plays,
+        home_team=package.get_game_info().home_team,
+        away_team=package.get_game_info().away_team
+    )
+    logger.info(f"✓ Selected {len(relevant_players)} relevant players")
     
-    # For now, create mock relevant players from extracted IDs
-    # In full implementation, this would come from relevance scoring
-    relevant_players = [
-        RelevantPlayer(player_id=pid, relevance_score=1.0)
-        for pid in list(player_ids)[:20]  # Limit for demo
-    ]
+    # Log top players by relevance score
+    top_players = sorted(relevant_players, key=lambda p: p.relevance_score, reverse=True)[:5]
+    logger.info("  Top 5 players by relevance:")
+    for player in top_players:
+        logger.info(f"    Player {player.player_id}: score={player.relevance_score:.2f}, "
+                   f"plays={player.impact_signals.play_frequency}, "
+                   f"touches={player.impact_signals.touches}, "
+                   f"yards={player.impact_signals.yards}")
+    
+    # Step 4: Build data request
+    logger.info("Step 4: Building data request...")
     
     builder = DataRequestBuilder()
     request = builder.build_request(
@@ -151,8 +190,22 @@ def analyze_game_package(
         f"for {len(request.player_ids)} players"
     )
     
+    # Step 5: Fetch data (optional)
+    fetch_result = None
+    if fetch_data:
+        logger.info("Step 5: Fetching data from upstream providers...")
+        fetcher = DataFetcher(fail_fast=False)
+        fetch_result = fetcher.fetch(request)
+        logger.info(
+            f"✓ Fetched data: {len(fetch_result.sources_succeeded)}/{len(fetch_result.sources_attempted)} sources succeeded"
+        )
+        if fetch_result.sources_failed:
+            logger.warning(f"  Failed sources: {', '.join(fetch_result.sources_failed)}")
+    else:
+        logger.info("Step 5: Skipping data fetch (use --fetch to enable)")
+    
     # For now, return the analysis structure
-    # Full implementation would continue with data fetching, normalization, etc.
+    # Full implementation would continue with data normalization, merging, etc.
     result = {
         "status": "analyzed",
         "correlation_id": package.correlation_id or f"{package.game_id}-cli",
@@ -169,6 +222,23 @@ def analyze_game_package(
         },
         "data_request": request.to_dict(),
     }
+    
+    # Add fetch results if available
+    if fetch_result:
+        result["fetch_result"] = {
+            "sources_succeeded": fetch_result.sources_succeeded,
+            "sources_failed": fetch_result.sources_failed,
+            "errors": fetch_result.errors,
+            "data_counts": {
+                "play_by_play": len(fetch_result.play_by_play) if fetch_result.play_by_play else 0,
+                "snap_counts": len(fetch_result.snap_counts) if fetch_result.snap_counts else 0,
+                "team_context": len(fetch_result.team_context) if fetch_result.team_context else 0,
+                "ngs_data": {
+                    stat_type: len(data)
+                    for stat_type, data in fetch_result.ngs_data.items()
+                },
+            },
+        }
     
     return result
 
@@ -224,6 +294,18 @@ For more information, see the module README.md
     )
     
     parser.add_argument(
+        '--strict',
+        action='store_true',
+        help='Treat validation warnings as errors'
+    )
+    
+    parser.add_argument(
+        '--fetch',
+        action='store_true',
+        help='Fetch data from upstream providers (requires .env configuration)'
+    )
+    
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose debug logging'
@@ -241,7 +323,12 @@ For more information, see the module README.md
         data = load_game_package(args.request)
         
         # Analyze
-        result = analyze_game_package(data, dry_run=args.dry_run)
+        result = analyze_game_package(
+            data, 
+            dry_run=args.dry_run, 
+            strict=args.strict,
+            fetch_data=args.fetch
+        )
         
         # Format output
         if args.pretty:

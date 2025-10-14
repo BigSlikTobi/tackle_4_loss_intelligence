@@ -10,7 +10,7 @@
   - _Requirements: 8.1, 8.2, 8.3_
 
 -
-  2. [ ] Implement input validation and game package contracts
+  2. [x] Implement input validation and game package contracts
 - [x] 2.1 Create game package input contracts
   - Write GamePackageInput, PlayData, and GameInfo dataclasses with validation
   - Implement validation logic for required fields (season, week, game_id,
@@ -18,7 +18,7 @@
   - Add basic validation tests for core functionality
   - _Requirements: 1.1, 1.2, 1.3_
 
-- [ ] 2.2 Implement package validation service
+- [x] 2.2 Implement package validation service
   - Write PackageValidator class with comprehensive validation logic
   - Add descriptive error messages identifying specific game and request issues
   - Add basic tests for validation success and failure cases
@@ -43,7 +43,7 @@
   - _Requirements: 2.2, 2.3, 2.4_
 
 -
-  4. [ ] Create data request bundling system
+  4. [x] Create data request bundling system
 - [x] 4.1 Implement combined data request builder
   - Write DataRequestBuilder class to create single combined requests
   - Build requests for play-by-play, snap counts, team context, and
@@ -52,7 +52,7 @@
   - Write unit tests for request building logic
   - _Requirements: 3.1, 3.2, 3.3_
 
-- [ ] 4.2 Integrate with existing data loading providers
+- [x] 4.2 Integrate with existing data loading providers
   - Write DataFetcher class using existing provider registry
   - Implement fetching from pbp, snap_counts, pfr, and ngs providers
   - Add error handling for upstream source failures and rate limiting
