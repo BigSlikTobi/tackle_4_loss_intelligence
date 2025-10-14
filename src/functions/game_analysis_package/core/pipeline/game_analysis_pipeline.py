@@ -247,7 +247,7 @@ class GameAnalysisPipeline:
             if config.fetch_data:
                 logger.info(f"[{correlation_id}] Step 5: Fetching data...")
                 try:
-                    fetched_data = self.data_fetcher.fetch_data(data_request)
+                    fetched_data = self.data_fetcher.fetch(data_request)
                     result.data_fetched = True
                     logger.info(f"[{correlation_id}] ✓ Data fetched successfully")
                 except Exception as e:
