@@ -80,12 +80,13 @@ from src.functions.game_analysis_package.core.pipeline import (
 logger = logging.getLogger(__name__)
 
 
-def load_game_package(file_path: str) -> Dict[str, Any]:
+def load_game_package(file_path: str, clear_plays: bool = False) -> Dict[str, Any]:
     """
     Load game package from JSON file.
     
     Args:
         file_path: Path to JSON file
+        clear_plays: If True, clear plays array to trigger dynamic fetching
         
     Returns:
         Parsed JSON data
@@ -103,6 +104,12 @@ def load_game_package(file_path: str) -> Dict[str, Any]:
     
     with open(path, 'r') as f:
         data = json.load(f)
+    
+    # Clear plays array if requested (for dynamic fetching)
+    if clear_plays and 'plays' in data:
+        original_count = len(data.get('plays', []))
+        data['plays'] = []
+        logger.info(f"Cleared {original_count} plays from package (will fetch from database)")
     
     return data
 
@@ -507,6 +514,12 @@ For more information, see the module README.md
     )
     
     parser.add_argument(
+        '--fetch-plays',
+        action='store_true',
+        help='Fetch plays from database automatically (leave plays array empty in request file)'
+    )
+    
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose debug logging'
@@ -533,7 +546,7 @@ For more information, see the module README.md
     
     try:
         # Load game package
-        data = load_game_package(args.request)
+        data = load_game_package(args.request, clear_plays=args.fetch_plays)
         
         # Choose analysis mode
         if args.pipeline:

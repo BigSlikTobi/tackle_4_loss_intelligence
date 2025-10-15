@@ -28,9 +28,9 @@ class ContentFetcher:
     - Circuit breaker pattern
     
     Strategy:
-    1. URL Context API (via Gemini) - Fastest, free
+    1. URL Context API (via Gemini) - Fastest
     2. Simple HTTP + BeautifulSoup - Works for simple sites
-    3. Manual extraction with headers - Bypasses basic bot detection
+    3. Manual extraction with headers
     """
     
     # Common headers to mimic browser

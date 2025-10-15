@@ -60,3 +60,6 @@ functions/package-lock.json
 functions/package.json
 package-lock.json
 package.json
+
+# archived docs and files
+docs/game-analysis-package/archive

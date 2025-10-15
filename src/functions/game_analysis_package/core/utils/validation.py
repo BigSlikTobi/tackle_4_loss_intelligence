@@ -207,8 +207,11 @@ class PackageValidator:
     def _validate_game_info(self, package: GamePackageInput):
         """Validate game-level information."""
         # Check for reasonable play count
-        if len(package.plays) < 1:
-            self._add_error('plays', 'Package must contain at least one play')
+        # NOTE: Empty plays array (0 plays) is now allowed for dynamic fetching
+        # The pipeline will automatically fetch plays from database before validation
+        if len(package.plays) == 0:
+            # Empty array is OK - will be fetched dynamically
+            pass
         elif len(package.plays) < 50:
             self._add_warning('plays', f'Unusually low play count: {len(package.plays)} (typical game has 120-180 plays)')
         elif len(package.plays) > 250:
@@ -288,8 +291,9 @@ class PackageValidator:
         if plays_missing_play_type > total_plays * threshold:
             self._add_warning('plays', f'{plays_missing_play_type} plays missing play_type information')
         
+        # Changed from error to warning to support dynamically fetched plays with data quality issues
         if plays_missing_teams > 0:
-            self._add_error('plays', f'{plays_missing_teams} plays missing team information (posteam/defteam)')
+            self._add_warning('plays', f'{plays_missing_teams} plays missing team information (posteam/defteam)')
     
     def _validate_individual_play(self, play: PlayData):
         """Validate an individual play's data."""

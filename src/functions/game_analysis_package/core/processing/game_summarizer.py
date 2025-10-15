@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Set
 import logging
+import math  # For isnan() check
 
 from ..contracts.game_package import PlayData
 from .data_merger import MergedData
@@ -389,9 +390,9 @@ class GameSummarizer:
                 def_summary.total_plays += 1
                 def_summary.defensive_plays += 1
             
-            # Add yards
+            # Add yards (skip NaN values to prevent NaN propagation)
             yards = play.yards_gained or 0.0
-            if isinstance(yards, (int, float)):
+            if isinstance(yards, (int, float)) and not math.isnan(yards):
                 off_summary.total_yards += yards
                 
                 # Categorize by play type
