@@ -7,7 +7,7 @@ set -e
 echo "Starting local game analysis server..."
 echo ""
 echo "Server will start on http://localhost:8080"
-echo "Test with: curl -X POST http://localhost:8080 -H 'Content-Type: application/json' -d @../test_requests/sample_game.json"
+echo "Test with: curl -X POST http://localhost:8080 -H 'Content-Type: application/json' -d @../test_requests/http_api_test_minimal.json"
 echo ""
 
 # Ensure we're in the functions directory
@@ -16,5 +16,5 @@ cd "$(dirname "$0")"
 # Export port
 export PORT=8080
 
-# Run the function locally
-python main.py
+# Run the local development server (use python3 explicitly)
+python3 local_server.py

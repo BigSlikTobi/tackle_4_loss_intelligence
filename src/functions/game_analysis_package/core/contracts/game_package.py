@@ -145,11 +145,14 @@ class GamePackageInput:
     
     This is the top-level structure that clients submit for analysis.
     It includes all play-by-play data and optional metadata.
+    
+    NEW: Plays array is now optional! If empty or None, plays will be
+    fetched automatically from the database using season/week/game_id.
     """
     season: int
     week: int
     game_id: str
-    plays: List[PlayData]
+    plays: List[PlayData] = field(default_factory=list)  # Now optional with default!
     
     # Optional tracking and metadata
     correlation_id: Optional[str] = None
@@ -166,14 +169,15 @@ class GamePackageInput:
         if not self.game_id:
             raise ValueError("game_id is required")
         
-        # Validate plays
-        if not self.plays:
-            raise ValueError("At least one play is required")
+        # NEW: Plays are now optional - empty list is valid
+        # If plays is None, convert to empty list
+        if self.plays is None:
+            self.plays = []
         
         if not isinstance(self.plays, list):
             raise ValueError("plays must be a list")
         
-        # Validate all plays belong to this game
+        # Validate all plays belong to this game (only if plays provided)
         for i, play in enumerate(self.plays):
             if not isinstance(play, PlayData):
                 raise ValueError(f"Play at index {i} is not a PlayData instance")
@@ -182,6 +186,15 @@ class GamePackageInput:
                     f"Play {play.play_id} has mismatched game_id: "
                     f"expected {self.game_id}, got {play.game_id}"
                 )
+    
+    def needs_play_fetching(self) -> bool:
+        """
+        Check if plays need to be fetched from database.
+        
+        Returns:
+            True if plays array is empty and fetching is needed
+        """
+        return len(self.plays) == 0
     
     def get_game_info(self) -> GameInfo:
         """Extract GameInfo from this package."""

@@ -17,6 +17,8 @@ from ..extraction.player_extractor import PlayerExtractor
 from ..extraction.relevance_scorer import RelevanceScorer, RelevantPlayer
 from ..bundling.request_builder import DataRequestBuilder
 from ..fetching.data_fetcher import DataFetcher
+from ..fetching.play_fetcher import PlayFetcher
+from ..fetching.player_metadata_enricher import PlayerMetadataEnricher
 from ..processing.data_normalizer import DataNormalizer
 from ..processing.data_merger import DataMerger, MergedData
 from ..processing.game_summarizer import GameSummarizer, GameSummaries
@@ -122,15 +124,17 @@ class GameAnalysisPipeline:
     """
     Main orchestration pipeline for game analysis.
     
-    Coordinates all 9 steps:
+    Coordinates all 10+ steps:
+    0. Play fetching (optional - if plays array is empty)
     1. Package validation (structure and data quality)
     2. Player extraction (from play-by-play)
     3. Relevance scoring and selection
     4. Data request building
-    5. Data fetching (optional)
+    5. Data fetching (optional - NGS/snap counts)
     6. Data normalization
     7. Data merging and enrichment
     8. Summary computation (teams and players)
+    8.5. Player metadata enrichment (names, positions, teams from database)
     9. Analysis envelope creation
     
     Example:
@@ -146,6 +150,8 @@ class GameAnalysisPipeline:
     def __init__(self):
         """Initialize pipeline with component instances."""
         # Core processing components
+        self.play_fetcher = PlayFetcher()  # NEW: Dynamic play fetching
+        self.player_metadata_enricher = PlayerMetadataEnricher()  # NEW: Player metadata enrichment
         self.player_extractor = PlayerExtractor()
         self.relevance_scorer = RelevanceScorer()
         self.request_builder = DataRequestBuilder()
@@ -197,6 +203,45 @@ class GameAnalysisPipeline:
         )
         
         try:
+            # Step 0: Fetch plays if needed (NEW STEP!)
+            if package.needs_play_fetching():
+                logger.info(
+                    f"[{correlation_id}] Step 0: Fetching plays from database "
+                    f"(empty plays array detected)..."
+                )
+                try:
+                    fetch_result = self.play_fetcher.fetch_plays(
+                        season=package.season,
+                        week=package.week,
+                        game_id=package.game_id
+                    )
+                    
+                    # Replace empty plays array with fetched plays
+                    package.plays = fetch_result.plays
+                    
+                    logger.info(
+                        f"[{correlation_id}] ✓ Fetched {fetch_result.total_count} plays "
+                        f"in {fetch_result.retrieval_time:.2f}s from {fetch_result.source}"
+                    )
+                    result.warnings.append(
+                        f"Automatically fetched {fetch_result.total_count} plays from database"
+                    )
+                    
+                except Exception as e:
+                    error_msg = (
+                        f"Failed to fetch plays for {package.game_id}: {e}. "
+                        "Please provide plays manually in the request."
+                    )
+                    logger.error(f"[{correlation_id}] {error_msg}")
+                    result.status = "failed"
+                    result.errors.append(error_msg)
+                    return result
+            else:
+                logger.info(
+                    f"[{correlation_id}] Using {len(package.plays)} provided plays "
+                    "(skipping automatic fetch)"
+                )
+            
             # Step 1: Validate package
             logger.info(f"[{correlation_id}] Step 1: Validating package...")
             validation_result = self._validate_package(package, config.strict_validation)
@@ -307,6 +352,43 @@ class GameAnalysisPipeline:
                 f"{game_summaries.teams_summarized} teams, "
                 f"{game_summaries.players_summarized} players"
             )
+            
+            # Step 8.5: Enrich player summaries with metadata from nflreadpy
+            try:
+                logger.info(f"[{correlation_id}] Step 8.5: Enriching player metadata...")
+                
+                # Collect all player IDs that need metadata
+                player_ids = set(game_summaries.player_summaries.keys())
+                
+                if player_ids:
+                    # Fetch metadata from nflreadpy using the game's season
+                    player_metadata = self.player_metadata_enricher.fetch_player_metadata(
+                        player_ids=player_ids,
+                        season=package.season
+                    )
+                    
+                    # Enrich summaries with metadata
+                    self.player_metadata_enricher.enrich_player_summaries(
+                        player_summaries=game_summaries.player_summaries,
+                        metadata=player_metadata
+                    )
+                    
+                    logger.info(
+                        f"[{correlation_id}] ✓ Player metadata enriched: "
+                        f"{len(player_metadata)}/{len(player_ids)} players found in rosters"
+                    )
+                else:
+                    logger.info(f"[{correlation_id}] Step 8.5: No players to enrich")
+                    
+            except Exception as e:
+                # Don't fail pipeline if metadata enrichment fails - it's optional
+                logger.warning(
+                    f"[{correlation_id}] Player metadata enrichment failed: {e}. "
+                    "Continuing without metadata."
+                )
+                result.warnings.append(
+                    f"Player metadata enrichment failed: {e}"
+                )
             
             # Step 9: Create analysis envelope
             if config.enable_envelope:

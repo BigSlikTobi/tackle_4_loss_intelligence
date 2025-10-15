@@ -131,15 +131,18 @@ class PlayByPlayDataTransformer(BaseDataTransformer):
             "game_id": record.get("game_id"),
             "season": record.get("season"),
             "week": record.get("week"),
+            # Play context fields
+            "quarter": record.get("qtr") or record.get("quarter"),  # nflreadpy uses "qtr"
+            "time": record.get("time"),  # Store as "time" not "clock"
+            "down": record.get("down"),
+            "yards_to_go": record.get("ydstogo"),  # Store as "yards_to_go" not "distance"
+            "yardline": record.get("yardline_100"),  # Store as "yardline" not "yardline_100"
+            # Team and play info
             "posteam": record.get("posteam"),
             "defteam": record.get("defteam"),
             "play_type": record.get("play_type"),
             "yards_gained": record.get("yards_gained"),
-            "down": record.get("down"),
-            "distance": record.get("ydstogo"),
-            "yardline_100": record.get("yardline_100"),
             "game_date": self._normalise_value(record.get("game_date")),
-            "clock": record.get("time"),
             "description": record.get("desc") or record.get("play_description"),
             # Scoring indicators
             "touchdown": record.get("touchdown"),

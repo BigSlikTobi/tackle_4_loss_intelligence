@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0.0",
+  "producer": "test-client@1.0.0",
+  "fetch_data": false,
+  "enable_envelope": true,
+  "game_package": {
+    "season": 2025,
+    "week": 6,
+    "game_id": "2025_06_DEN_NYJ",
+    "plays": [
+      {
+        "play_id": "1",
+        "game_id": "2025_06_DEN_NYJ",
+        "posteam": "DEN",
+        "defteam": "NYJ",
+        "play_type": "pass",
+        "yards_gained": 10,
+        "passer_player_id": "00-0039732",
+        "receiver_player_id": "00-0038783"
+      },
+      {
+        "play_id": "2",
+        "game_id": "2025_06_DEN_NYJ",
+        "posteam": "NYJ",
+        "defteam": "DEN",
+        "play_type": "run",
+        "yards_gained": 3,
+        "rusher_player_id": "00-0038120"
+      },
+      {
+        "play_id": "3",
+        "game_id": "2025_06_DEN_NYJ",
+        "posteam": "DEN",
+        "defteam": "NYJ",
+        "play_type": "field_goal",
+        "yards_gained": 0,
+        "kicker_player_id": "00-0032569"
+      }
+    ]
+  }
+}

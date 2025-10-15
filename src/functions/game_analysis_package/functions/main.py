@@ -7,19 +7,22 @@ Accepts POST requests with game package JSON and returns enriched analysis.
 
 import json
 import logging
-import os
 import sys
 from pathlib import Path
+from typing import Any
 
-# Add project root to path
-project_root = Path(__file__).parent.parent.parent.parent.absolute()
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+import flask
 
-# Setup environment and logging
+# Add project root to path FIRST
+# From functions/main.py: go up to functions -> game_analysis_package -> functions -> src -> project_root (5 levels)
+project_root = Path(__file__).parent.parent.parent.parent.parent.absolute()
+sys.path.insert(0, str(project_root))
+
+# Now import after path is set
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
 
+# Load environment and setup logging
 load_env()
 setup_logging()
 
@@ -30,27 +33,13 @@ from src.functions.game_analysis_package.core.contracts.game_package import (
     validate_game_package,
     ValidationError
 )
-from src.functions.game_analysis_package.core.extraction.player_extractor import (
-    PlayerExtractor
-)
-from src.functions.game_analysis_package.core.extraction.relevance_scorer import (
-    RelevanceScorer
-)
-from src.functions.game_analysis_package.core.bundling.request_builder import (
-    DataRequestBuilder
+from src.functions.game_analysis_package.core.pipeline import (
+    GameAnalysisPipeline,
+    PipelineConfig
 )
 
 
-# CORS headers for browser access
-CORS_HEADERS = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Max-Age': '3600'
-}
-
-
-def analysis_handler(request):
+def analysis_handler(request: flask.Request) -> flask.Response:
     """
     HTTP Cloud Function entry point for game analysis.
     
@@ -62,156 +51,146 @@ def analysis_handler(request):
         request: Flask request object
         
     Returns:
-        Tuple of (response_data, status_code, headers)
+        Flask Response with JSON data
     """
     # Handle CORS preflight
     if request.method == 'OPTIONS':
-        return ('', 204, CORS_HEADERS)
+        return _cors_response({}, status=204)
     
     # Only accept POST
     if request.method != 'POST':
         logger.warning(f"Method not allowed: {request.method}")
-        return (
-            {'error': 'Method not allowed. Use POST to submit game packages.'},
-            405,
-            CORS_HEADERS
-        )
+        return _error_response('Method not allowed. Use POST to submit game packages.', status=405)
     
     try:
         # Parse request JSON
         try:
-            request_data = request.get_json()
-            if not request_data:
-                return (
-                    {'error': 'Invalid JSON or empty request body'},
-                    400,
-                    CORS_HEADERS
-                )
+            request_data = request.get_json(force=True)
+            if not isinstance(request_data, dict):
+                raise ValueError("JSON body must be an object")
         except Exception as e:
             logger.error(f"JSON parse error: {e}")
-            return (
-                {'error': f'Invalid JSON: {str(e)}'},
-                400,
-                CORS_HEADERS
-            )
+            return _error_response(f'Invalid JSON: {str(e)}', status=400)
         
         # Log request
         game_id = (
             request_data.get('game_package', {}).get('game_id')
             or request_data.get('game_id', 'unknown')
         )
-        logger.info(f"Processing game analysis request for {game_id}")
         
-        # Validate game package
-        try:
-            package = validate_game_package(request_data)
-        except ValidationError as e:
-            logger.warning(f"Validation failed for {game_id}: {e}")
-            return (
-                {
-                    'error': 'Validation failed',
-                    'message': str(e),
-                    'game_id': game_id
-                },
-                422,
-                CORS_HEADERS
+        # Check if plays will be fetched dynamically
+        game_package_temp = request_data.get('game_package', {})
+        plays_provided = game_package_temp.get('plays', [])
+        will_fetch_plays = not plays_provided or len(plays_provided) == 0
+        
+        if will_fetch_plays:
+            logger.info(f"Processing game analysis request for {game_id} (will fetch plays from database)")
+        else:
+            logger.info(f"Processing game analysis request for {game_id} (using {len(plays_provided)} provided plays)")
+        
+        # Extract game_package from request
+        game_package_data = request_data.get('game_package')
+        if not game_package_data:
+            logger.warning(f"Missing game_package field in request")
+            return _error_response(
+                'Request must include "game_package" field with game data',
+                status=400
             )
         
-        # Extract players
-        extractor = PlayerExtractor()
-        player_ids = extractor.extract_players(package.plays)
-        logger.info(f"Extracted {len(player_ids)} players from {len(package.plays)} plays")
+        # Validate and create package
+        try:
+            package = validate_game_package(game_package_data)
+        except ValidationError as e:
+            logger.warning(f"Validation failed for {game_id}: {e}")
+            return _error_response(str(e), status=422)
         
-        # Score and select relevant players
-        scorer = RelevanceScorer()
-        relevant_players = scorer.score_and_select(
-            player_ids=player_ids,
-            plays=package.plays,
-            home_team=package.get_game_info().home_team,
-            away_team=package.get_game_info().away_team
-        )
-        logger.info(f"Selected {len(relevant_players)} relevant players")
+        # Check for fetch_data flag in request
+        fetch_data = request_data.get('fetch_data', False)
+        enable_envelope = request_data.get('enable_envelope', True)
+        custom_correlation_id = request_data.get('correlation_id')
         
-        # Build data request
-        builder = DataRequestBuilder()
-        request_obj = builder.build_request(
-            game_info=package.get_game_info(),
-            relevant_players=relevant_players
+        # Configure pipeline
+        config = PipelineConfig(
+            fetch_data=fetch_data,
+            strict_validation=False,  # Be lenient in production
+            enable_envelope=enable_envelope,
+            correlation_id=custom_correlation_id
         )
+        
+        # Execute pipeline
+        pipeline = GameAnalysisPipeline()
+        result = pipeline.process(package, config)
+        
+        # Check result status
+        if result.status == 'failed':
+            logger.error(f"Pipeline failed for {game_id}: {result.errors}")
+            return _error_response(
+                '; '.join(result.errors),
+                status=500
+            )
         
         # Build response
-        # In full implementation, this would include:
-        # - Data fetching from upstream sources
-        # - Normalization and merging
-        # - Summarization
-        # - Envelope creation
-        
         response = {
             'schema_version': '1.0.0',
-            'correlation_id': package.correlation_id or f"{package.game_id}-{os.urandom(4).hex()}",
-            'status': 'success',
+            'correlation_id': result.correlation_id,
+            'status': result.status,
             'game_info': {
-                'game_id': package.game_id,
-                'season': package.season,
-                'week': package.week,
+                'game_id': result.game_id,
+                'season': result.season,
+                'week': result.week,
             },
-            'analysis_summary': {
-                'plays_analyzed': len(package.plays),
-                'players_extracted': len(player_ids),
-                'relevant_players': len(relevant_players),
-                'ngs_requests': len(request_obj.ngs_requests),
+            'validation': {
+                'passed': result.validation_passed,
+                'warnings': result.validation_warnings,
             },
-            'enriched_package': {
-                'note': 'Full implementation will include merged data from all sources',
-                'data_request': request_obj.to_dict(),
+            'processing': {
+                'players_extracted': result.players_extracted,
+                'players_selected': result.players_selected,
+                'data_fetched': result.data_fetched,
+                'plays_fetched_dynamically': will_fetch_plays,  # NEW: Indicate if plays were auto-fetched
             },
-            'analysis_envelope': {
-                'note': 'Full implementation will include LLM-ready compact envelope',
-                'game_header': {
-                    'game_id': package.game_id,
-                    'season': package.season,
-                    'week': package.week,
-                },
-            }
         }
         
-        logger.info(f"Successfully processed game {package.game_id}")
-        return (response, 200, CORS_HEADERS)
+        # Add summaries if available
+        if result.game_summaries:
+            response['game_summaries'] = result.game_summaries.to_dict()
+        
+        # Add envelope if available
+        if result.analysis_envelope:
+            response['analysis_envelope'] = result.analysis_envelope.to_dict()
+        
+        # Add enriched package if available
+        if result.merged_data:
+            response['enriched_package'] = result.merged_data.to_dict()
+        
+        # Add warnings if present
+        if result.warnings:
+            response['warnings'] = result.warnings
+        
+        logger.info(
+            f"Successfully processed game {package.game_id} "
+            f"[{result.correlation_id}] - Status: {result.status}"
+        )
+        return _cors_response(response)
         
     except ValidationError as e:
         logger.error(f"Validation error: {e}")
-        return (
-            {
-                'error': 'Validation failed',
-                'message': str(e)
-            },
-            422,
-            CORS_HEADERS
-        )
+        return _error_response(str(e), status=422)
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=True)
-        return (
-            {
-                'error': 'Internal server error',
-                'message': 'An unexpected error occurred processing your request'
-            },
-            500,
-            CORS_HEADERS
-        )
+        return _error_response('An unexpected error occurred processing your request', status=500)
 
 
-# For local testing with Flask
-if __name__ == '__main__':
-    from flask import Flask, request
-    
-    app = Flask(__name__)
-    
-    @app.route('/', methods=['POST', 'OPTIONS'])
-    def local_handler():
-        """Local development handler."""
-        response_data, status_code, headers = analysis_handler(request)
-        return response_data, status_code, headers
-    
-    port = int(os.environ.get('PORT', 8080))
-    print(f"Starting local server on http://localhost:{port}")
-    app.run(host='0.0.0.0', port=port, debug=True)
+def _cors_response(body: dict[str, Any], status: int = 200) -> flask.Response:
+    """Create a CORS-enabled response."""
+    response = flask.make_response(json.dumps(body, ensure_ascii=False), status)
+    response.headers["Content-Type"] = "application/json"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST,OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+
+def _error_response(message: str, status: int) -> flask.Response:
+    """Create an error response."""
+    return _cors_response({"error": message}, status=status)
