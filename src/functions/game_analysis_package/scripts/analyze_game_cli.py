@@ -76,6 +76,9 @@ from src.functions.game_analysis_package.core.pipeline import (
     GameAnalysisPipeline,
     PipelineConfig
 )
+from src.functions.game_analysis_package.core.utils.json_safe import (
+    json_dumps_safe
+)
 
 logger = logging.getLogger(__name__)
 
@@ -569,11 +572,11 @@ For more information, see the module README.md
                 fetch_data=args.fetch
             )
         
-        # Format output
+        # Format output with NaN-safe serialization
         if args.pretty:
-            output = json.dumps(result, indent=2)
+            output = json_dumps_safe(result, indent=2)
         else:
-            output = json.dumps(result)
+            output = json_dumps_safe(result)
         
         # Write output
         if args.output:

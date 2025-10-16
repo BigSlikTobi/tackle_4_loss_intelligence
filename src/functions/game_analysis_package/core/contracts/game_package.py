@@ -7,8 +7,10 @@ and well-formed.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from ..utils.json_safe import clean_nan_values
 
 
 @dataclass
@@ -128,14 +130,14 @@ class GameInfo:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        return clean_nan_values({
             "season": self.season,
             "week": self.week,
             "game_id": self.game_id,
             "home_team": self.home_team,
             "away_team": self.away_team,
             "game_date": self.game_date
-        }
+        })
 
 
 @dataclass
@@ -206,7 +208,7 @@ class GamePackageInput:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        return clean_nan_values({
             "season": self.season,
             "week": self.week,
             "game_id": self.game_id,
@@ -214,11 +216,12 @@ class GamePackageInput:
             "correlation_id": self.correlation_id,
             "schema_version": self.schema_version,
             "producer": self.producer
-        }
+        })
     
     @staticmethod
     def _play_to_dict(play: PlayData) -> Dict[str, Any]:
-        """Convert a PlayData instance to dictionary."""
+        """Convert a PlayData instance to dictionary (JSON-safe)."""
+
         result = {
             "play_id": play.play_id,
             "game_id": play.game_id,
@@ -245,12 +248,11 @@ class GamePackageInput:
             "fumble_recovery_player_id": play.fumble_recovery_player_id,
             "forced_fumble_player_id": play.forced_fumble_player_id,
         }
-        
-        # Add additional fields
+
         if play.additional_fields:
             result.update(play.additional_fields)
-        
-        return result
+
+        return clean_nan_values(result)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'GamePackageInput':
@@ -314,8 +316,12 @@ class GamePackageInput:
         }
         
         # Separate known and additional fields
-        play_fields = {k: v for k, v in data.items() if k in known_fields}
-        additional_fields = {k: v for k, v in data.items() if k not in known_fields}
+        sanitized_data = clean_nan_values(data)
+        play_fields = {k: sanitized_data.get(k) for k in known_fields if k in sanitized_data}
+        additional_fields = {
+            k: v for k, v in sanitized_data.items()
+            if k not in known_fields
+        }
         
         return PlayData(
             **play_fields,

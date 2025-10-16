@@ -12,6 +12,7 @@ Usage:
 import argparse
 import json
 import logging
+import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -29,9 +30,22 @@ logger = logging.getLogger(__name__)
 
 
 def safe_value(value: Any) -> Any:
-    """Convert pandas NaN and other special values to JSON-safe values."""
+    """
+    Convert pandas NaN, Infinity, and other special values to JSON-safe values.
+    
+    All NaN and Infinity values become None (null in JSON) to ensure
+    downstream JSON parsers can handle the output.
+    """
     if pd.isna(value):
         return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        try:
+            # Convert to int if it's a whole number
+            return int(value) if value == int(value) else float(value)
+        except (ValueError, OverflowError):
+            return None
     if isinstance(value, (int, float)):
         try:
             # Convert to int if it's a whole number
@@ -145,8 +159,9 @@ def create_game_package(game_id: str, output_path: str) -> None:
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     
+    # Use allow_nan=False to catch any remaining NaN values
     with open(output_file, 'w') as f:
-        json.dump(game_package, f, indent=2)
+        json.dump(game_package, f, indent=2, allow_nan=False)
     
     logger.info(f"✓ Game package written to {output_path}")
     logger.info(f"  - {len(game_package['game_package']['plays'])} plays")

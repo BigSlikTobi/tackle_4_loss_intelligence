@@ -7,7 +7,10 @@ including data quality checks, consistency validation, and detailed error report
 
 from typing import Dict, List, Optional, Set, Any, Tuple
 import logging
+import math
 from dataclasses import dataclass
+
+from ..utils.json_safe import clean_nan_values
 
 from ..contracts.game_package import (
     GamePackageInput,
@@ -16,6 +19,16 @@ from ..contracts.game_package import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _format_value_safe(value: Any) -> str:
+    """Format a value for display in error/warning messages."""
+    cleaned = clean_nan_values(value)
+    if cleaned is None:
+        return "null"
+    if isinstance(cleaned, float) and math.isinf(cleaned):
+        return "infinity"
+    return str(cleaned)
 
 
 @dataclass
@@ -68,13 +81,13 @@ class ValidationResult:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert validation result to dictionary."""
-        return {
+        return clean_nan_values({
             'is_valid': self.is_valid,
             'summary': self.get_summary(),
             'errors': [str(e) for e in self.errors],
             'warnings': [str(w) for w in self.warnings],
             'stats': self.stats
-        }
+        })
 
 
 class PackageValidator:
@@ -297,26 +310,30 @@ class PackageValidator:
     
     def _validate_individual_play(self, play: PlayData):
         """Validate an individual play's data."""
-        # Validate down (1-4)
-        if play.down is not None and (play.down < 1 or play.down > 4):
-            self._add_error('down', f'Invalid down value: {play.down}', play.play_id)
+        # Validate down (1-4) - skip if NaN
+        if play.down is not None and not (isinstance(play.down, float) and math.isnan(play.down)):
+            if play.down < 1 or play.down > 4:
+                self._add_error('down', f'Invalid down value: {_format_value_safe(play.down)}', play.play_id)
         
-        # Validate quarter (1-5, where 5 is overtime)
-        if play.quarter is not None and (play.quarter < 1 or play.quarter > 5):
-            self._add_error('quarter', f'Invalid quarter value: {play.quarter}', play.play_id)
+        # Validate quarter (1-5, where 5 is overtime) - skip if NaN
+        if play.quarter is not None and not (isinstance(play.quarter, float) and math.isnan(play.quarter)):
+            if play.quarter < 1 or play.quarter > 5:
+                self._add_error('quarter', f'Invalid quarter value: {_format_value_safe(play.quarter)}', play.play_id)
         
-        # Validate yards_to_go (0-99 is reasonable)
-        if play.yards_to_go is not None and (play.yards_to_go < 0 or play.yards_to_go > 99):
-            self._add_warning('yards_to_go', f'Unusual yards_to_go value: {play.yards_to_go}', play.play_id)
+        # Validate yards_to_go (0-99 is reasonable) - skip if NaN
+        if play.yards_to_go is not None and not (isinstance(play.yards_to_go, float) and math.isnan(play.yards_to_go)):
+            if play.yards_to_go < 0 or play.yards_to_go > 99:
+                self._add_warning('yards_to_go', f'Unusual yards_to_go value: {_format_value_safe(play.yards_to_go)}', play.play_id)
         
-        # Validate yards_gained (reasonable range: -99 to 99)
-        if play.yards_gained is not None:
+        # Validate yards_gained (reasonable range: -99 to 99) - skip if NaN
+        if play.yards_gained is not None and not (isinstance(play.yards_gained, float) and math.isnan(play.yards_gained)):
             if play.yards_gained < -99 or play.yards_gained > 99:
-                self._add_warning('yards_gained', f'Unusual yards_gained value: {play.yards_gained}', play.play_id)
+                self._add_warning('yards_gained', f'Unusual yards_gained value: {_format_value_safe(play.yards_gained)}', play.play_id)
         
-        # Validate touchdown (0 or 1)
-        if play.touchdown is not None and play.touchdown not in [0, 1]:
-            self._add_warning('touchdown', f'Unusual touchdown value: {play.touchdown} (expected 0 or 1)', play.play_id)
+        # Validate touchdown (0 or 1) - skip if NaN
+        if play.touchdown is not None and not (isinstance(play.touchdown, float) and math.isnan(play.touchdown)):
+            if play.touchdown not in [0, 1]:
+                self._add_warning('touchdown', f'Unusual touchdown value: {_format_value_safe(play.touchdown)} (expected 0 or 1)', play.play_id)
         
         # Validate play type has a player associated
         if play.play_type == 'pass':

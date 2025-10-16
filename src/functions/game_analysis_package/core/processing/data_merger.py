@@ -11,10 +11,11 @@ This module provides the DataMerger class which:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 import logging
 
 from ..contracts.game_package import GamePackageInput, PlayData
+from ..utils.json_safe import clean_nan_values
 from .data_normalizer import NormalizedData
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ class MergedData:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        return clean_nan_values({
             "game_info": {
                 "season": self.season,
                 "week": self.week,
@@ -77,7 +78,7 @@ class MergedData:
                 "conflicts_resolved": self.conflicts_resolved,
             },
             "data_sources": self.data_sources,
-        }
+        })
 
 
 class DataMerger:
@@ -180,7 +181,8 @@ class DataMerger:
         return result
     
     def _play_to_dict(self, play: PlayData) -> Dict[str, Any]:
-        """Convert PlayData to dictionary for serialization."""
+        """Convert PlayData to a JSON-safe dictionary."""
+
         result = {
             "play_id": play.play_id,
             "game_id": play.game_id,
@@ -207,12 +209,11 @@ class DataMerger:
             "fumble_recovery_player_id": play.fumble_recovery_player_id,
             "forced_fumble_player_id": play.forced_fumble_player_id,
         }
-        
-        # Add additional fields
+
         if play.additional_fields:
             result.update(play.additional_fields)
-        
-        return result
+
+        return clean_nan_values(result)
     
     def _merge_play_by_play(
         self,
