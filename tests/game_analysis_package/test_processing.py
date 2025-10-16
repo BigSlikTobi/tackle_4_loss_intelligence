@@ -11,6 +11,8 @@ Tests edge cases including:
 
 import pytest
 import math
+import sys
+import types
 from src.functions.game_analysis_package.core.processing import (
     DataNormalizer,
     DataMerger,
@@ -20,7 +22,8 @@ from src.functions.game_analysis_package.core.contracts.game_package import (
     GamePackageInput,
     PlayData
 )
-from src.functions.game_analysis_package.core.fetching.data_fetcher import FetchResult
+from src.functions.game_analysis_package.core.fetching.data_fetcher import FetchResult, DataFetcher
+from src.functions.game_analysis_package.core.bundling.request_builder import CombinedDataRequest
 
 
 class TestDataNormalizer:
@@ -340,6 +343,138 @@ class TestDataMerger:
         assert "plays" in result_dict
         assert "player_data" in result_dict
         assert "metadata" in result_dict
+
+
+class TestDataFetcherSnapCounts:
+    """Tests for real snap count fetching."""
+
+    def test_fetch_snap_counts_filters_players(self, monkeypatch):
+        """Snap counts fetch populates payload for relevant players."""
+
+        fake_snap_data = [
+            {
+                "season": 2024,
+                "week": 1,
+                "game_id": "2024_01_BUF_NYJ",
+                "team": "BUF",
+                "opponent": "NYJ",
+                "player": "Offense Player",
+                "pfr_player_id": "PFR12345",
+                "offense_snaps": 60,
+                "offense_pct": 82.0,
+                "st_snaps": 6,
+                "st_pct": 12.0,
+            },
+            {
+                "season": 2024,
+                "week": 1,
+                "game_id": "2024_01_BUF_NYJ",
+                "team": "NYJ",
+                "opponent": "BUF",
+                "player": "Other Player",
+                "pfr_player_id": "PFR99999",
+                "offense_snaps": 5,
+                "offense_pct": 10.0,
+            },
+        ]
+
+        fake_module = types.ModuleType("nflreadpy")
+
+        def _fake_load_snap_counts(seasons):
+            assert seasons == [2024]
+            return fake_snap_data
+
+        def _fake_load_rosters(seasons):
+            assert seasons == [2024]
+            return [
+                {"pfr_id": "PFR12345", "gsis_id": "00-0012345"},
+                {"pfr_id": "PFR99999", "gsis_id": "00-0099999"},
+            ]
+
+        fake_module.load_snap_counts = _fake_load_snap_counts  # type: ignore[attr-defined]
+        fake_module.load_rosters = _fake_load_rosters  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "nflreadpy", fake_module)
+
+        fetcher = DataFetcher()
+        request = CombinedDataRequest(
+            season=2024,
+            week=1,
+            game_id="2024_01_BUF_NYJ",
+            home_team="NYJ",
+            away_team="BUF",
+            include_play_by_play=False,
+            include_snap_counts=True,
+            include_team_context=False,
+        )
+        request.player_ids = {"00-0012345"}
+
+        result = FetchResult()
+        fetcher._fetch_snap_counts(request, result)
+
+        assert "snap_counts" in result.provenance
+        assert "snap_counts" in result.sources_succeeded
+        assert len(result.snap_counts) == 1
+
+        payload = result.snap_counts[0]
+        assert payload["player_id"] == "00-0012345"
+        assert payload["snaps"] == 66  # 60 offense + 6 special teams
+        assert payload["snap_pct"] == pytest.approx(82.0)
+        assert payload["team"] == "BUF"
+
+    def test_fetch_snap_counts_id_normalization(self, monkeypatch):
+        """Snap count fetch handles varied GSIS ID formats."""
+
+        fake_snap_data = [
+            {
+                "season": 2023,
+                "week": 9,
+                "game_id": "2023_09_KC_MIA",
+                "team": "KC",
+                "opponent": "MIA",
+                "player": "Quarterback",
+                "pfr_player_id": "MAHOMPA00",
+                "offense_snaps": 65,
+                "offense_pct": 98.0,
+            }
+        ]
+
+        fake_module = types.ModuleType("nflreadpy")
+
+        def _fake_load_snap_counts(seasons):
+            assert seasons == [2023]
+            return fake_snap_data
+
+        def _fake_load_rosters(seasons):
+            assert seasons == [2023]
+            return [
+                {"pfr_id": "MAHOMPA00", "gsis_id": "000033873"},
+            ]
+
+        fake_module.load_snap_counts = _fake_load_snap_counts  # type: ignore[attr-defined]
+        fake_module.load_rosters = _fake_load_rosters  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "nflreadpy", fake_module)
+
+        fetcher = DataFetcher()
+        request = CombinedDataRequest(
+            season=2023,
+            week=9,
+            game_id="2023_09_KC_MIA",
+            home_team="KC",
+            away_team="MIA",
+            include_play_by_play=False,
+            include_snap_counts=True,
+            include_team_context=False,
+        )
+        request.player_ids = {"00-0033873"}
+
+        result = FetchResult()
+        fetcher._fetch_snap_counts(request, result)
+
+        assert len(result.snap_counts) == 1
+        payload = result.snap_counts[0]
+        assert payload["player_id"] == "00-0033873"
+        assert payload["snaps"] == 65
+        assert payload["snap_pct"] == pytest.approx(98.0)
 
 
 if __name__ == "__main__":

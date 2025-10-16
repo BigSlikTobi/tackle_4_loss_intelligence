@@ -6,7 +6,7 @@ play-by-play data, snap counts, team context, and Next Gen Stats.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 import logging
 import time
 
@@ -89,6 +89,8 @@ class DataFetcher:
         self.fail_fast = fail_fast
         # Import providers lazily to avoid circular dependencies
         self._providers_module = None
+        self._snap_counts_cache: Dict[int, List[Dict[str, Any]]] = {}
+        self._roster_map_cache: Dict[int, Dict[str, str]] = {}
     
     def _get_provider(self, name: str, **options: Any) -> Any:
         """Lazy import and access to data_loading providers."""
@@ -181,25 +183,41 @@ class DataFetcher:
         
         try:
             logger.debug(f"Fetching snap counts for {request.game_id}")
-            
-            # Snap counts provider fetches all players, then we filter
-            # NOTE: The provider requires pfr_id per player, but for now we'll fetch
-            # all snap counts for the game and filter by game_id
-            logger.warning(f"Snap counts fetching not yet fully implemented - provider requires pfr_id per player")
-            result.snap_counts = []
+
+            snap_records = self._load_snap_counts(request.season)
+            filtered = self._filter_snap_counts_for_game(snap_records, request)
+
+            result.snap_counts = filtered
             result.sources_succeeded.append(source)
-            
-            # Track provenance
+
+            record_count = len(filtered)
             result.provenance[source] = {
-                "source": "pfr",
+                "source": "nflreadpy",
                 "provider": "snap_counts",
                 "retrieval_time": time.time(),
-                "record_count": 0,
-                "note": "Provider requires per-player pfr_id - bulk fetch not yet implemented",
+                "record_count": record_count,
+                "season": request.season,
+                "week": request.week,
             }
+
+            if record_count:
+                logger.info(f"✓ Fetched snap counts for {record_count} players")
+            else:
+                logger.warning(
+                    "✓ Snap counts fetched but no records matched %s (season=%s, week=%s)",
+                    request.game_id,
+                    request.season,
+                    request.week
+                )
             
-            logger.info(f"✓ Snap counts fetch deferred (requires per-player implementation)")
-            
+        except ImportError as e:
+            self._handle_fetch_error(
+                source,
+                "nflreadpy is required for snap count fetching. Install with 'pip install nflreadpy'.",
+                e,
+                result
+            )
+
         except Exception as e:
             self._handle_fetch_error(source, str(e), e, result)
     
@@ -295,3 +313,290 @@ class DataFetcher:
         
         if self.fail_fast:
             raise FetchError(source, message, error)
+
+    def _load_snap_counts(self, season: int) -> List[Dict[str, Any]]:
+        """Load and cache snap counts for a season from nflreadpy."""
+        if season in self._snap_counts_cache:
+            return self._snap_counts_cache[season]
+
+        from nflreadpy import load_snap_counts  # Lazy import
+
+        raw_data = load_snap_counts(seasons=[season])
+        records = self._convert_generic_to_records(raw_data)
+        self._snap_counts_cache[season] = records
+        logger.debug(
+            "Cached %d snap count records for season %s",
+            len(records),
+            season
+        )
+        return records
+
+    def _filter_snap_counts_for_game(
+        self,
+        snap_records: List[Dict[str, Any]],
+        request: CombinedDataRequest
+    ) -> List[Dict[str, Any]]:
+        """Filter cached snap counts to match the requested game and players."""
+        game_records: List[Dict[str, Any]] = []
+        target_players: Set[str] = set()
+        for pid in request.player_ids:
+            if not pid:
+                continue
+            normalized = self._normalize_player_id(str(pid))
+            if normalized:
+                target_players.add(normalized)
+            target_players.add(str(pid))
+
+        for record in snap_records:
+            if not self._is_same_game(record, request):
+                continue
+
+            player_id = self._resolve_snap_player_id(record, request.season)
+            if not player_id:
+                continue
+
+            normalized_player_id = self._normalize_player_id(player_id) or player_id
+
+            if target_players and normalized_player_id not in target_players:
+                continue
+
+            payload = self._build_snap_payload(record, normalized_player_id)
+            game_records.append(payload)
+
+        return game_records
+
+    def _convert_generic_to_records(
+        self,
+        raw_data: Any
+    ) -> List[Dict[str, Any]]:
+        """Convert nflreadpy structures (Polars/Pandas/list) into dict records."""
+        if raw_data is None:
+            return []
+
+        # Polars DataFrame support
+        try:
+            import polars as pl  # type: ignore
+            if isinstance(raw_data, pl.DataFrame):  # pragma: no branch - depends on env
+                return [
+                    dict(zip(raw_data.columns, row))
+                    for row in raw_data.iter_rows()
+                ]
+        except ImportError:  # pragma: no cover - polars optional
+            pass
+
+        # Prefer to_pandas when available (works for Polars/Pandas hybrid objects)
+        if hasattr(raw_data, "to_pandas"):
+            df = raw_data.to_pandas()
+            return df.to_dict(orient="records")  # type: ignore[no-any-return]
+
+        # Native pandas DataFrame
+        try:
+            import pandas as pd  # type: ignore
+            if isinstance(raw_data, pd.DataFrame):
+                return raw_data.to_dict(orient="records")
+        except ImportError:  # pragma: no cover - pandas optional
+            pass
+
+        if isinstance(raw_data, list):
+            return [dict(item) for item in raw_data if isinstance(item, dict)]
+
+        if isinstance(raw_data, dict):
+            return [dict(raw_data)]
+
+        raise TypeError(
+            f"Unsupported snap count data type: {type(raw_data)}"
+        )
+
+    def _is_same_game(
+        self,
+        record: Dict[str, Any],
+        request: CombinedDataRequest
+    ) -> bool:
+        """Determine if a snap count record belongs to the requested game."""
+        season = self._coerce_int(record.get("season"))
+        if season is not None and season != request.season:
+            return False
+
+        week = self._coerce_int(record.get("week"))
+        if week is not None and week != request.week:
+            return False
+
+        game_id = self._clean_str(record.get("game_id"))
+        if game_id:
+            return game_id == request.game_id
+
+        pfr_game_id = self._clean_str(record.get("pfr_game_id"))
+        if pfr_game_id:
+            return pfr_game_id == request.game_id
+
+        team = self._clean_str(record.get("team"))
+        opponent = self._clean_str(record.get("opponent") or record.get("opp"))
+        if team and opponent and request.home_team and request.away_team:
+            return {team, opponent} == {request.home_team, request.away_team}
+
+        return False
+
+    def _resolve_snap_player_id(self, record: Dict[str, Any], season: int) -> Optional[str]:
+        """Resolve the NFL GSIS player ID from a snap count record."""
+        candidate_fields = (
+            "gsis_id",
+            "player_id",
+            "gsis",
+            "nfl_id",
+        )
+        for field in candidate_fields:
+            value = record.get(field)
+            if value:
+                text = str(value).strip()
+                normalized = self._normalize_player_id(text)
+                if normalized:
+                    return normalized
+
+        pfr_candidate = record.get("pfr_player_id") or record.get("pfr_id")
+        if pfr_candidate:
+            pfr_id = self._clean_str(pfr_candidate)
+            if pfr_id:
+                mapped = self._lookup_gsis_from_pfr(pfr_id, season)
+                if mapped:
+                    return self._normalize_player_id(mapped) or mapped
+        return None
+
+    def _build_snap_payload(
+        self,
+        record: Dict[str, Any],
+        player_id: str
+    ) -> Dict[str, Any]:
+        """Build a normalized snap count payload for downstream consumers."""
+        offensive_snaps = self._coerce_int(
+            record.get("offense_snaps") or record.get("offensive_snaps")
+        )
+        defensive_snaps = self._coerce_int(record.get("defense_snaps"))
+        special_snaps = self._coerce_int(
+            record.get("st_snaps") or record.get("special_teams_snaps")
+        )
+
+        offensive_pct = self._coerce_float(
+            record.get("offense_pct") or record.get("offensive_pct")
+        )
+        defensive_pct = self._coerce_float(record.get("defense_pct"))
+        special_pct = self._coerce_float(
+            record.get("st_pct") or record.get("special_teams_pct")
+        )
+
+        total_snaps = self._coerce_int(record.get("total_snaps") or record.get("snaps"))
+        if total_snaps is None:
+            component_values = [
+                value for value in (offensive_snaps, defensive_snaps, special_snaps)
+                if value is not None
+            ]
+            if component_values:
+                total_snaps = int(sum(component_values))
+
+        snap_pct = self._coerce_float(record.get("snap_pct"))
+        if snap_pct is None:
+            for candidate in (offensive_pct, defensive_pct, special_pct):
+                if candidate is not None:
+                    snap_pct = candidate
+                    break
+
+        payload = {
+            "player_id": player_id,
+            "player_name": record.get("player") or record.get("player_name"),
+            "game_id": self._clean_str(record.get("game_id") or record.get("pfr_game_id")),
+            "team": self._clean_str(record.get("team")),
+            "opponent": self._clean_str(record.get("opponent") or record.get("opp")),
+            "season": self._coerce_int(record.get("season")),
+            "week": self._coerce_int(record.get("week")),
+            "snaps": total_snaps,
+            "snap_pct": snap_pct,
+            "offensive_snaps": offensive_snaps,
+            "offensive_pct": offensive_pct,
+            "defensive_snaps": defensive_snaps,
+            "defensive_pct": defensive_pct,
+            "special_teams_snaps": special_snaps,
+            "special_teams_pct": special_pct,
+            "pfr_player_id": self._clean_str(record.get("pfr_player_id") or record.get("pfr_id")),
+        }
+
+        return payload
+
+    def _lookup_gsis_from_pfr(self, pfr_id: str, season: int) -> Optional[str]:
+        """Map a PFR player identifier to an NFL GSIS ID using roster data."""
+        if season not in self._roster_map_cache:
+            from nflreadpy import load_rosters  # Lazy import
+
+            roster_data = load_rosters([season])
+            records = self._convert_generic_to_records(roster_data)
+            mapping: Dict[str, str] = {}
+            for record in records:
+                pfr_value = self._clean_str(record.get("pfr_id") or record.get("pfr_player_id"))
+                gsis_value = self._clean_str(record.get("gsis_id") or record.get("player_id"))
+                if pfr_value and gsis_value:
+                    mapping[pfr_value] = gsis_value
+            self._roster_map_cache[season] = mapping
+            logger.debug(
+                "Cached roster map with %d entries for season %s",
+                len(mapping),
+                season
+            )
+
+        return self._roster_map_cache.get(season, {}).get(pfr_id)
+
+    @staticmethod
+    def _normalize_player_id(value: str) -> Optional[str]:
+        if not value:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if cleaned.startswith("00-") and len(cleaned) == 10:
+            return cleaned
+        if cleaned.startswith("00") and len(cleaned) == 9 and cleaned[2:].isdigit():
+            return f"00-{cleaned[2:]}"
+        digits = ''.join(ch for ch in cleaned if ch.isdigit())
+        if len(digits) == 7:
+            return f"00-{digits}"
+        if len(digits) == 8:
+            return f"00-{digits[-7:]}"
+        return cleaned
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        try:
+            converted = float(value)
+        except (TypeError, ValueError):
+            return None
+        if converted != converted:  # NaN check
+            return None
+        return int(round(converted))
+
+    @staticmethod
+    def _coerce_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, float):
+            if value != value:  # NaN
+                return None
+            return value
+        if isinstance(value, int):
+            return float(value)
+        try:
+            converted = float(value)
+        except (TypeError, ValueError):
+            return None
+        if converted != converted:  # NaN
+            return None
+        return converted
+
+    @staticmethod
+    def _clean_str(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None

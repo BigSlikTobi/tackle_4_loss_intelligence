@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional
 
+from ..utils.json_safe import clean_nan_values
+
 
 @dataclass
 class GameHeader:
@@ -30,7 +32,7 @@ class GameHeader:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "game_id": self.game_id,
             "season": self.season,
             "week": self.week,
@@ -39,6 +41,7 @@ class GameHeader:
             "date": self.date,
             "location": self.location,
         }
+        return clean_nan_values(result)
 
 
 @dataclass
@@ -63,7 +66,7 @@ class CompactTeamSummary:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "team": self.team,
             "points": self.points,
             "plays": self.total_plays,
@@ -75,6 +78,7 @@ class CompactTeamSummary:
             "fgs": self.field_goals,
             "to": self.turnovers,
         }
+        return clean_nan_values(result)
 
 
 @dataclass
@@ -103,9 +107,9 @@ class CompactPlayerSummary:
         
         # Only include non-empty stats
         if self.stats:
-            result["stats"] = self.stats
+            result["stats"] = clean_nan_values(self.stats)
         
-        return result
+        return clean_nan_values(result)
 
 
 @dataclass
@@ -143,7 +147,7 @@ class KeySequence:
         if self.description:
             result["desc"] = self.description
         
-        return result
+        return clean_nan_values(result)
 
 
 @dataclass
@@ -174,7 +178,7 @@ class DataPointer:
         if self.record_count is not None:
             result["record_count"] = self.record_count
         
-        return result
+        return clean_nan_values(result)
 
 
 @dataclass
@@ -200,7 +204,7 @@ class AnalysisEnvelope:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "version": self.envelope_version,
             "correlation_id": self.correlation_id,
             "game": self.game_header.to_dict(),
@@ -218,3 +222,4 @@ class AnalysisEnvelope:
                 for key, pointer in self.data_pointers.items()
             },
         }
+        return clean_nan_values(result)

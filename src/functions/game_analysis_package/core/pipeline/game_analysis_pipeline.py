@@ -13,6 +13,7 @@ from datetime import datetime
 
 from ..contracts.game_package import GamePackageInput, GameInfo
 from ..utils.validation import validate_package_with_details, ValidationError
+from ..utils.json_safe import clean_nan_values
 from ..extraction.player_extractor import PlayerExtractor
 from ..extraction.relevance_scorer import RelevanceScorer, RelevantPlayer
 from ..bundling.request_builder import DataRequestBuilder
@@ -117,7 +118,7 @@ class PipelineResult:
         if self.warnings:
             result["warnings"] = self.warnings
         
-        return result
+        return clean_nan_values(result)
 
 
 class GameAnalysisPipeline:

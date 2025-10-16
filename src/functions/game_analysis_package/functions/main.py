@@ -37,6 +37,9 @@ from src.functions.game_analysis_package.core.pipeline import (
     GameAnalysisPipeline,
     PipelineConfig
 )
+from src.functions.game_analysis_package.core.utils.json_safe import (
+    json_dumps_safe
+)
 
 
 def analysis_handler(request: flask.Request) -> flask.Response:
@@ -105,7 +108,10 @@ def analysis_handler(request: flask.Request) -> flask.Response:
             return _error_response(str(e), status=422)
         
         # Check for fetch_data flag in request
-        fetch_data = request_data.get('fetch_data', False)
+        fetch_data = request_data.get('fetch_data')
+        if fetch_data is None:
+            # Default to fetching enrichment data so summaries include snaps/NGS context
+            fetch_data = True
         enable_envelope = request_data.get('enable_envelope', True)
         custom_correlation_id = request_data.get('correlation_id')
         
@@ -182,8 +188,17 @@ def analysis_handler(request: flask.Request) -> flask.Response:
 
 
 def _cors_response(body: dict[str, Any], status: int = 200) -> flask.Response:
-    """Create a CORS-enabled response."""
-    response = flask.make_response(json.dumps(body, ensure_ascii=False), status)
+    """
+    Create a CORS-enabled response with NaN-safe JSON serialization.
+    
+    Uses utility functions to ensure NaN, Infinity, and -Infinity
+    are converted to null instead of causing JSON parsing errors.
+    """
+    # Clean and serialize with NaN-safe utility
+    response = flask.make_response(
+        json_dumps_safe(body, ensure_ascii=False),
+        status
+    )
     response.headers["Content-Type"] = "application/json"
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "POST,OPTIONS"

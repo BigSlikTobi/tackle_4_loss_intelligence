@@ -15,6 +15,7 @@ import logging
 import math  # For isnan() check
 
 from ..contracts.game_package import PlayData
+from ..utils.json_safe import clean_nan_values
 from .data_merger import MergedData
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ class TeamSummary:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "team": self.team,
             "total_plays": self.total_plays,
             "offensive_plays": self.offensive_plays,
@@ -87,6 +88,7 @@ class TeamSummary:
             "fumbles_lost": self.fumbles_lost,
             "time_of_possession": self.time_of_possession,
         }
+        return clean_nan_values(result)
 
 
 @dataclass
@@ -145,7 +147,13 @@ class PlayerSummary:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        def _zero(value):
+            return value if value is not None else 0
+
+        def _zero_float(value):
+            return float(value) if value is not None else 0.0
+
+        result = {
             "player_id": self.player_id,
             "player_name": self.player_name,
             "position": self.position,
@@ -165,10 +173,10 @@ class PlayerSummary:
             "rushing_tds": self.rushing_tds,
             "receiving_tds": self.receiving_tds,
             "passing_tds": self.passing_tds,
-            "pass_attempts": self.pass_attempts,
-            "completions": self.completions,
-            "completion_pct": self.completion_pct,
-            "interceptions": self.interceptions,
+            "pass_attempts": _zero(self.pass_attempts),
+            "completions": _zero(self.completions),
+            "completion_pct": _zero_float(self.completion_pct),
+            "interceptions": _zero(self.interceptions),
             "tackles": self.tackles,
             "sacks": self.sacks,
             "interceptions_caught": self.interceptions_caught,
@@ -177,6 +185,7 @@ class PlayerSummary:
             "notable_events": self.notable_events,
             "relevance_score": self.relevance_score,
         }
+        return clean_nan_values(result)
 
 
 @dataclass
@@ -202,7 +211,7 @@ class GameSummaries:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "game_info": {
                 "game_id": self.game_id,
                 "season": self.season,
@@ -223,6 +232,7 @@ class GameSummaries:
                 "teams_summarized": self.teams_summarized,
             },
         }
+        return clean_nan_values(result)
 
 
 class GameSummarizer:
@@ -700,11 +710,43 @@ class GameSummarizer:
             summary: Player summary to update
             snap_data: Snap count data dictionary
         """
-        if "snaps" in snap_data:
-            summary.snaps_played = snap_data["snaps"]
+        if not isinstance(snap_data, dict):
+            return
+
+        snaps_value = snap_data.get("snaps")
+        if snaps_value is None:
+            # Derive total snaps from unit-specific counts if provided
+            components = [
+                snap_data.get("offensive_snaps"),
+                snap_data.get("defensive_snaps"),
+                snap_data.get("special_teams_snaps"),
+            ]
+            numeric_components = [
+                value for value in components
+                if isinstance(value, (int, float))
+            ]
+            if numeric_components:
+                snaps_value = int(round(sum(numeric_components)))
+        elif isinstance(snaps_value, float):
+            snaps_value = int(round(snaps_value))
+
+        if isinstance(snaps_value, (int, float)):
+            summary.snaps_played = int(snaps_value)
         
-        if "snap_pct" in snap_data:
-            summary.snap_percentage = snap_data["snap_pct"]
+        snap_pct = snap_data.get("snap_pct")
+        if snap_pct is None:
+            for key in ("offensive_pct", "defensive_pct", "special_teams_pct"):
+                candidate = snap_data.get(key)
+                if candidate is not None:
+                    snap_pct = candidate
+                    break
+        
+        if isinstance(snap_pct, (int, float)):
+            summary.snap_percentage = float(snap_pct)
+
+        # If team metadata missing, backfill from snap counts
+        if not summary.team and isinstance(snap_data.get("team"), str):
+            summary.team = snap_data["team"]
     
     def _identify_notable_events(self, summary: PlayerSummary) -> None:
         """

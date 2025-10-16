@@ -492,6 +492,25 @@ class TestPlayerSummaries:
         assert passer.position == "QB"
         assert passer.team == "KC"
 
+    def test_player_summary_snap_counts_enrichment(self):
+        """Snap count data populates snaps played and percentage."""
+        summarizer = GameSummarizer()
+        summary = PlayerSummary(player_id="00-0099999")
+
+        snap_data = {
+            "offensive_snaps": 62,
+            "offensive_pct": 81.5,
+            "defensive_snaps": None,
+            "special_teams_snaps": 4,
+            "team": "KC"
+        }
+
+        summarizer._add_snap_counts(summary, snap_data)
+
+        assert summary.snaps_played == 66  # 62 offense + 4 special teams
+        assert summary.snap_percentage == pytest.approx(81.5)
+        assert summary.team == "KC"
+
 
 class TestGameSummaries:
     """Test GameSummaries container."""
