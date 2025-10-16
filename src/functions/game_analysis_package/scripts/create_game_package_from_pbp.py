@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import math
+import numbers
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -38,20 +39,19 @@ def safe_value(value: Any) -> Any:
     """
     if pd.isna(value):
         return None
-    if isinstance(value, float):
-        if math.isnan(value) or math.isinf(value):
-            return None
+    if isinstance(value, numbers.Real):
         try:
-            # Convert to int if it's a whole number
-            return int(value) if value == int(value) else float(value)
-        except (ValueError, OverflowError):
+            float_value = float(value)
+        except (TypeError, ValueError, OverflowError):
             return None
-    if isinstance(value, (int, float)):
-        try:
-            # Convert to int if it's a whole number
-            return int(value) if value == int(value) else float(value)
-        except (ValueError, OverflowError):
+
+        if math.isnan(float_value) or math.isinf(float_value):
             return None
+
+        if float_value.is_integer():
+            return int(float_value)
+
+        return float_value
     return value
 
 
