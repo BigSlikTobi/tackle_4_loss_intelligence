@@ -307,12 +307,14 @@ class GameAnalysisPipeline:
             normalized_data = None
             if fetched_data:
                 logger.info(f"[{correlation_id}] Step 6: Normalizing data...")
-                normalized_data = self.data_normalizer.normalize(
-                    fetched_data,
-                    correlation_id=correlation_id
+                normalized_data = self.data_normalizer.normalize(fetched_data)
+                records_processed = (
+                    sum(normalized_data.records_processed.values())
+                    if normalized_data.records_processed
+                    else 0
                 )
                 logger.info(
-                    f"[{correlation_id}] ✓ Normalized {normalized_data.records_processed} records"
+                    f"[{correlation_id}] ✓ Normalized {records_processed} records"
                 )
             else:
                 logger.info(f"[{correlation_id}] Step 6: Skipping normalization (no data)")
@@ -323,8 +325,7 @@ class GameAnalysisPipeline:
                 logger.info(f"[{correlation_id}] Step 7: Merging data...")
                 merged_data = self.data_merger.merge(
                     package=package,
-                    normalized_data=normalized_data,
-                    relevant_players=relevant_players
+                    normalized=normalized_data
                 )
                 result.merged_data = merged_data
                 logger.info(
