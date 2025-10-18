@@ -197,6 +197,21 @@ See `docs/architecture/function_isolation.md` for complete architecture document
 - When sharing scripts or notebooks, redact API responses and confirm logging stays at `INFO` or lower
 - See `docs/configuration.md` for detailed configuration architecture
 
+## Cloud Function Build Workflow (Image Selection Pattern)
+
+Use this checklist whenever you stand up a new Cloud Function module so it matches the `image_selection` implementation:
+
+1. **Module layout** – keep all business logic under `core/`, scripts in `scripts/`, and Cloud Function assets in `functions/`. Do not import across modules; rely only on `src/shared` utilities for common helpers.
+2. **Request-scoped credentials** – design the HTTP payload the way `image_selection` does: include optional `llm`, `search`, and `supabase` blocks so callers can provide keys per request. Services must gracefully degrade (e.g., fall back to DuckDuckGo or skip Supabase uploads) when those blocks are omitted.
+3. **Factory + config validation** – build a `core/factory.py` that parses the request payload into dataclasses defined in `core/config.py`. Keep validation logic inside the request model so the Cloud Function handler stays small.
+4. **Service orchestration** – encapsulate network calls and storage interactions inside a `core/service.py` class. If persistence is optional, guard those branches and document the behaviour (return original URLs when Supabase is disabled).
+5. **Cloud Function handler** – mirror `functions/main.py` by importing the factory/service, running them inside the handler, and using an async helper (`asyncio.run`) so the service can await external providers cleanly.
+6. **Local tooling** – provide `functions/local_server.py` and `functions/run_local.sh` to spin up the handler locally, plus a CLI under `scripts/` for manual testing with JSON payloads.
+7. **Deployment script** – follow `functions/deploy.sh`: generate temporary `main.py`/`requirements.txt`, deploy with `gcloud functions deploy`, set only generic env vars (e.g., `LOG_LEVEL`), and add `--clear-secrets` so previous revisions do not require Secret Manager entries. Mention in script output that credentials are supplied within each request.
+8. **Documentation** – update the module `README.md` with API payload examples, optional credential behaviour, and deployment instructions. Explicitly note when secrets are expected from callers rather than environment variables.
+
+Replicating these steps keeps every new Cloud Function independently deployable and aligned with the function-based isolation architecture.
+
 ## Quick Reference
 
 **Architecture**: `docs/architecture/function_isolation.md`  
