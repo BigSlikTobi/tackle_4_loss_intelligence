@@ -9,7 +9,7 @@ import re
 import ssl
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -286,7 +286,7 @@ class ImageSelectionService:
 
     async def _search_duckduckgo(self, query: str) -> List[ImageCandidate]:
         def _search() -> List[ImageCandidate]:
-            cutoff = datetime.utcnow() - timedelta(days=14)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=14)
             results: List[ImageCandidate] = []
             max_results = max(self.request.num_images * 6, 12)
             try:
@@ -312,7 +312,17 @@ class ImageSelectionService:
                         published = image.get("published")
                         if published:
                             try:
-                                published_dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
+                                published_dt = datetime.fromisoformat(
+                                    published.replace("Z", "+00:00")
+                                )
+                                if published_dt.tzinfo is None:
+                                    published_dt = published_dt.replace(
+                                        tzinfo=timezone.utc
+                                    )
+                                else:
+                                    published_dt = published_dt.astimezone(
+                                        timezone.utc
+                                    )
                                 if published_dt < cutoff:
                                     continue
                             except ValueError:
