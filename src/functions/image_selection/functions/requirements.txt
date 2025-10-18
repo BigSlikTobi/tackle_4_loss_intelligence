@@ -1,0 +1,9 @@
+pip-requirements
+functions-framework==3.*
+flask==3.*
+aiohttp>=3.9.0
+certifi>=2023.7.22
+duckduckgo-search>=4.4.3
+supabase>=2.0.0
+google-generativeai>=1.0.0
+openai>=1.12.0

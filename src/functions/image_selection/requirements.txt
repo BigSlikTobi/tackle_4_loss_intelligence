@@ -1,0 +1,8 @@
+#pip-requirements
+aiohttp>=3.9.0
+certifi>=2023.7.22
+duckduckgo-search>=4.4.3
+supabase>=2.0.0
+google-generativeai>=0.8.0
+openai>=1.12.0
+flask>=3.0.0
