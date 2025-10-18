@@ -42,7 +42,7 @@ class TopicExtractor:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gpt-5-mini",
+        model: str = "gpt-5-nano",
         max_retries: int = 3,
         timeout: int = 60,
         circuit_breaker_threshold: int = 5
@@ -52,7 +52,7 @@ class TopicExtractor:
         
         Args:
             api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
-            model: OpenAI model to use for extraction (default: gpt-5-mini)
+            model: OpenAI model to use for extraction (default: gpt-5-nano)
             max_retries: Maximum retry attempts for failed API calls
             timeout: Request timeout in seconds
             circuit_breaker_threshold: Consecutive failures before circuit opens
@@ -147,7 +147,7 @@ class TopicExtractor:
                     model=self.model,
                     input=prompt,
                     reasoning={"effort": "medium"},
-                    text={"verbosity": "medium"},
+                    text={"verbosity": "low"},
                     timeout=self.timeout,
                 )
                 

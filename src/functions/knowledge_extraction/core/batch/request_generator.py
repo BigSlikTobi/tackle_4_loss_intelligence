@@ -27,7 +27,7 @@ class BatchRequestGenerator:
     def __init__(
         self,
         reader: Optional[StoryGroupReader] = None,
-        model: str = "gpt-5-mini",
+        model: str = "gpt-5-nano",
         max_topics: Optional[int] = None,
         max_entities: Optional[int] = None,
         output_dir: Optional[Path] = None,
@@ -37,7 +37,7 @@ class BatchRequestGenerator:
         
         Args:
             reader: Story group reader (default: new instance)
-            model: OpenAI model to use (default: gpt-5-mini)
+            model: OpenAI model to use (default: gpt-5-nano)
             max_topics: Max topics per group (default: from env or 10)
             max_entities: Max entities per group (default: from env or 20)
             output_dir: Directory for output files (default: ./batch_files)
