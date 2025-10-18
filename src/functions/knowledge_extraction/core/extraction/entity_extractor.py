@@ -37,7 +37,7 @@ class EntityExtractor:
     """
     Extracts NFL entities (players, teams, games) from story content using LLM.
     
-    Uses OpenAI GPT-5-mini reasoning model to identify and extract entity mentions with context.
+    Uses OpenAI GPT-5-nano reasoning model to identify and extract entity mentions with context.
     
     Player Disambiguation:
     - Requires 2+ identifying hints per player (name + position/team)
@@ -54,7 +54,7 @@ class EntityExtractor:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gpt-5-mini",
+        model: str = "gpt-5-nano",
         max_retries: int = 3,
         timeout: int = 60,
         circuit_breaker_threshold: int = 5
@@ -64,7 +64,7 @@ class EntityExtractor:
         
         Args:
             api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
-            model: OpenAI model to use for extraction (default: gpt-5-mini)
+            model: OpenAI model to use for extraction (default: gpt-5-nano)
             max_retries: Maximum retry attempts for failed API calls
             timeout: Request timeout in seconds
             circuit_breaker_threshold: Consecutive failures before circuit opens
@@ -159,7 +159,7 @@ class EntityExtractor:
                     model=self.model,
                     input=prompt,
                     reasoning={"effort": "medium"},
-                    text={"verbosity": "medium"},
+                    text={"verbosity": "low"},
                     timeout=self.timeout,
                 )
                 

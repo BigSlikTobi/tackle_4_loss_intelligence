@@ -1,6 +1,6 @@
 # Knowledge Extraction Module
 
-**Extracts key topics and NFL entities from story groups** using GPT-5-mini reasoning model to build a knowledge graph for cross-referencing and analysis.
+**Extracts key topics and NFL entities from story groups** using GPT-5-nano reasoning model to build a knowledge graph for cross-referencing and analysis.
 
 ---
 
@@ -11,7 +11,7 @@
 **Status:** ✅ Production Ready
 
 **Key Features:**
-- 🧠 **GPT-5-mini with medium reasoning** - Optimized cost/performance balance ($3-10 per 1K groups)
+- 🧠 **GPT-5-nano with medium reasoning** - Optimized cost/performance balance ($3-10 per 1K groups)
 - 🔄 **Production resilience** - Retry logic, circuit breakers, rate limiting, timeout handling
 - 🎯 **Fuzzy entity matching** - Handles nicknames, abbreviations, and variations
 - 🔒 **Player disambiguation** - Requires 2+ identifying hints (name + position/team) to prevent ambiguity
@@ -149,8 +149,8 @@ python scripts/extract_knowledge_cli.py --retry-failed
            │
            ▼
 ┌─────────────────────┐
-│ Entity Extractor    │  ← GPT-5-mini extracts players/teams/games
-│ + Topic Extractor   │  ← GPT-5-mini extracts key topics
+│ Entity Extractor    │  ← GPT-5-nano extracts players/teams/games
+│ + Topic Extractor   │  ← GPT-5-nano extracts key topics
 └──────────┬──────────┘
            │
            ▼
@@ -188,7 +188,7 @@ python scripts/extract_knowledge_cli.py --retry-failed
 
 **Cost Optimization:**
 - ✅ **50% cost savings with batch processing** (OpenAI Batch API discount)
-- ✅ GPT-5-mini with medium reasoning (~$3-10 per 1,000 groups synchronous, $1.50-5 batch)
+- ✅ GPT-5-nano with medium reasoning (~$3-10 per 1,000 groups synchronous, $1.50-5 batch)
 - ✅ Batch operations to minimize API overhead
 - ✅ Smart caching of entity lookups
 
@@ -676,14 +676,14 @@ python scripts/extract_knowledge_cli.py --batch --retry-failed
 
 ### 2. Topic Extraction
 **Module:** `core/extraction/topic_extractor.py` (synchronous) or `core/batch/request_generator.py` (batch)
-- Uses GPT-5-mini with medium reasoning
+- Uses GPT-5-nano with medium reasoning
 - Extracts 2-4 word topic phrases
 - Normalizes to lowercase for consistency
 - Returns confidence scores
 
 ### 3. Entity Extraction
 **Module:** `core/extraction/entity_extractor.py` (synchronous) or `core/batch/request_generator.py` (batch)
-- Uses GPT-5-mini with medium reasoning
+- Uses GPT-5-nano with medium reasoning
 - Identifies players, teams, games
 - Captures mention text and context
 - Marks primary vs. secondary mentions
@@ -817,7 +817,7 @@ Attempt 3: Wait 4s
 
 ## Cost Estimation
 
-**GPT-5-mini Pricing (as of Oct 2025):**
+**GPT-5-nano Pricing (as of Oct 2025):**
 - Input: ~$0.10 per 1M tokens
 - Output: ~$0.40 per 1M tokens
 
