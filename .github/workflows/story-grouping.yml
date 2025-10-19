@@ -35,11 +35,11 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python src/functions/story_grouping/scripts/group_stories_cli.py \
-          --limit 25 --days 14
+          --limit 25 --days 14 --threshold 0.82
           
       - name: Report status
         if: always()
-        run: |
+        run: | 
           if [ $? -eq 0 ]; then
             echo "✅ Story grouping completed successfully"
           else
