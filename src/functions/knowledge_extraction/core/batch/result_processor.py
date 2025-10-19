@@ -12,7 +12,11 @@ from dataclasses import dataclass
 
 from ..db.knowledge_writer import KnowledgeWriter
 from ..extraction.entity_extractor import ExtractedEntity
-from ..extraction.topic_extractor import ExtractedTopic
+from ..extraction.topic_extractor import (
+    ExtractedTopic,
+    TOPIC_CATEGORY_LOOKUP,
+    normalize_topic_category,
+)
 from ..resolution.entity_resolver import EntityResolver, ResolvedEntity
 
 logger = logging.getLogger(__name__)
@@ -254,13 +258,29 @@ class BatchResultProcessor:
             
             topics = []
             for topic_data in data.get("topics", []):
+                raw_topic = topic_data.get("topic", "")
+                topic_text = raw_topic.strip()
+                
+                if not topic_text:
+                    logger.warning("Skipping empty topic entry in batch response")
+                    continue
+                
+                normalized_key = normalize_topic_category(topic_text)
+                canonical_topic = TOPIC_CATEGORY_LOOKUP.get(normalized_key)
+                
+                if not canonical_topic:
+                    logger.warning(
+                        "Skipping topic outside allowed categories in batch response: %s",
+                        topic_text,
+                    )
+                    continue
+                
                 topic = ExtractedTopic(
-                    topic=topic_data.get("topic", "").lower().strip(),
+                    topic=canonical_topic,
                     confidence=topic_data.get("confidence"),
                     rank=topic_data.get("rank"),
                 )
-                if topic.topic:  # Only add non-empty topics
-                    topics.append(topic)
+                topics.append(topic)
             
             return topics
             

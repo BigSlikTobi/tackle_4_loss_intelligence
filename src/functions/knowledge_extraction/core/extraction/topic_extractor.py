@@ -6,6 +6,7 @@ Extracts key topics and themes from NFL story content.
 
 import logging
 import os
+import re
 import time
 from typing import Dict, List, Optional
 from dataclasses import dataclass
@@ -14,6 +15,45 @@ import openai
 from openai import OpenAIError, RateLimitError, APITimeoutError
 
 logger = logging.getLogger(__name__)
+
+TOPIC_CATEGORIES: List[str] = [
+    "Quarterback Performance & Analysis",
+    "Running Back & Rushing Game",
+    "Wide Receiver & Passing Game",
+    "Defense & Turnovers",
+    "Coaching & Play Calling",
+    "Injuries & Player Health",
+    "Team Performance & Trends",
+    "Season Outlook & Predictions",
+    "Rookies & Emerging Players",
+    "Draft & College Prospects",
+    "Trades, Signings & Roster Moves",
+    "Contracts & Cap Management",
+    "Game Analysis & Highlights",
+    "Statistics & Rankings",
+    "Fantasy Football Impact",
+    "Offseason & Training Camp",
+    "Special Teams & Kicking Game",
+    "Refereeing & Rules",
+    "Player Profiles & Interviews",
+    "Team Culture & Leadership",
+    "League News & Administration",
+    "Off-Field & Lifestyle",
+    "Media & Fan Reactions",
+]
+
+
+def normalize_topic_category(label: str) -> str:
+    """Normalize a topic label for matching against allowed categories."""
+    cleaned = label.lower().strip()
+    cleaned = cleaned.replace("&", "and")
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned)
+    return " ".join(cleaned.split())
+
+
+TOPIC_CATEGORY_LOOKUP = {
+    normalize_topic_category(name): name.lower() for name in TOPIC_CATEGORIES
+}
 
 
 @dataclass
@@ -30,7 +70,7 @@ class TopicExtractor:
     Extracts key topics from NFL story content using LLM.
     
     Topics are normalized and stored as text for cross-referencing.
-    Examples: "qb performance", "injury update", "trade rumors"
+    Examples: "quarterback performance & analysis", "injuries & player health"
     
     Production features:
     - Exponential backoff retry on rate limits
@@ -199,29 +239,39 @@ class TopicExtractor:
     
     def _build_extraction_prompt(self, summary_text: str, max_topics: int) -> str:
         """Build the prompt for topic extraction."""
-        return f"""You are an expert NFL analyst specialized in topic extraction. Your task is to extract key NFL topics from this story summary. Focus on:
+        return f"""You are an expert NFL analyst specialized in topic extraction. Classify the key NFL themes from this story summary using the STANDARDIZED topic categories below.
 
-**Topic Categories:**
-
-1. **Performance**: QB performance, offensive performance, defensive performance, special teams
-2. **Game Type**: Sunday Night Football, Monday Night Football, playoff game, regular season
-3. **Events**: touchdowns, interceptions, injuries, trades, signings, releases, draft
-4. **Positions**: quarterback play, running back performance, wide receiver corps, offensive line
-5. **Strategy**: play calling, coaching decisions, game management, time management
-6. **Records**: milestones, career highs, franchise records, NFL records
-7. **Context**: rivalry game, divisional matchup, conference standings, playoff implications
-8. **Off-field**: contract negotiations, roster moves, coaching changes, front office
-9. **Injuries**: injury updates, injury reports, return from injury, injury concerns
-10. **Analysis**: game recap, performance analysis, season outlook, power rankings
+**Allowed Topic Categories (return the EXACT category names):**
+1. Quarterback Performance & Analysis
+2. Running Back & Rushing Game
+3. Wide Receiver & Passing Game
+4. Defense & Turnovers
+5. Coaching & Play Calling
+6. Injuries & Player Health
+7. Team Performance & Trends
+8. Season Outlook & Predictions
+9. Rookies & Emerging Players
+10. Draft & College Prospects
+11. Trades, Signings & Roster Moves
+12. Contracts & Cap Management
+13. Game Analysis & Highlights
+14. Statistics & Rankings
+15. Fantasy Football Impact
+16. Offseason & Training Camp
+17. Special Teams & Kicking Game
+18. Refereeing & Rules
+19. Player Profiles & Interviews
+20. Team Culture & Leadership
+21. League News & Administration
+22. Off-Field & Lifestyle
+23. Media & Fan Reactions
 
 **Guidelines:**
-- Use 2-4 word phrases (e.g., "qb performance", "injury update", "trade rumors")
-- Normalize to lowercase
-- Be specific but not too narrow (e.g., "passing touchdowns" not "3 passing touchdowns")
-- Focus on searchable, cross-reference topics
-- Avoid player/team names (those are entities, not topics)
-- **RANK topics by importance** (1=main topic, 2=secondary, 3+=minor themes)
-- Return {max_topics} or fewer topics, **ORDERED BY RANK**
+- Return only categories from the list above. Do NOT invent new categories.
+- If multiple categories apply, include each as a separate topic ranked by importance.
+- Provide at most {max_topics} categories, ordered by rank.
+- Avoid player or team names (handled separately as entities).
+- Keep confidence between 0 and 1 with two decimal precision.
 
 **RANKING SYSTEM:**
 - Rank 1: Primary topic(s) - the main theme/focus of the story
@@ -233,17 +283,17 @@ Return in JSON format, **ORDERED BY RANK** (rank 1 first, then 2, then 3, etc.):
 {{
   "topics": [
     {{
-      "topic": "qb performance",
+      "topic": "quarterback performance & analysis",
       "confidence": 0.95,
       "rank": 1
     }},
     {{
-      "topic": "passing touchdowns",
+      "topic": "injuries & player health",
       "confidence": 0.90,
       "rank": 1
     }},
     {{
-      "topic": "injury update",
+      "topic": "team performance & trends",
       "confidence": 0.85,
       "rank": 2
     }}
@@ -271,14 +321,25 @@ Remember:
             topics = []
             
             for topic_dict in data.get("topics", []):
-                topic_text = topic_dict.get("topic", "").strip().lower()
+                raw_topic = topic_dict.get("topic", "")
+                topic_text = raw_topic.strip()
                 
-                if not topic_text or len(topic_text) < 2:
-                    logger.warning(f"Skipping invalid topic: {topic_text}")
+                if not topic_text:
+                    logger.warning("Skipping empty topic entry")
+                    continue
+                
+                normalized_key = normalize_topic_category(topic_text)
+                canonical_topic = TOPIC_CATEGORY_LOOKUP.get(normalized_key)
+                
+                if not canonical_topic:
+                    logger.warning(
+                        "Skipping topic outside allowed categories: %s",
+                        topic_text,
+                    )
                     continue
                 
                 topic = ExtractedTopic(
-                    topic=topic_text,
+                    topic=canonical_topic,
                     confidence=topic_dict.get("confidence"),
                     rank=topic_dict.get("rank"),
                 )
