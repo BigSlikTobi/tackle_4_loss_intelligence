@@ -1,0 +1,1 @@
+"""Article summarization module scaffolding."""

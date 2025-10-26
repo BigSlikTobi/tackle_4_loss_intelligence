@@ -1,0 +1,1 @@
+"""Article translation module scaffolding."""
