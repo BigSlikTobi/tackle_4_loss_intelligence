@@ -1,0 +1,2 @@
+openai>=1.51
+pydantic>=2.9

@@ -1,0 +1,5 @@
+beautifulsoup4>=4.12
+httpx[http2]>=0.27
+lxml>=5.1
+playwright>=1.48
+pydantic>=2.9
