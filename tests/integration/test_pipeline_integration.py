@@ -173,7 +173,6 @@ class TestFullPipelineFlow:
         """Test that pipeline handles errors gracefully."""
         # Test with invalid data
         from src.functions.article_summarization.core.contracts.summary import SummarizationRequest
-        import pytest
         
         # Empty content should raise validation error
         with pytest.raises(Exception):  # ValidationError from pydantic
