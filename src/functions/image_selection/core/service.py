@@ -109,6 +109,7 @@ class ProcessedImage:
     width: Optional[int]
     height: Optional[int]
     title: str
+    record_id: Optional[str] = None
 
 
 class ImageSelectionService:
@@ -178,6 +179,7 @@ class ImageSelectionService:
                         if not await self._validate_candidate(session, candidate):
                             continue
                         public_url = candidate.url
+                        record: Optional[Dict[str, Any]] = None
                         if self.supabase is not None:
                             image_bytes = await self._download_image(
                                 session, candidate.url
@@ -185,7 +187,7 @@ class ImageSelectionService:
                             public_url = await self._upload_image(
                                 image_bytes, candidate
                             )
-                            await self._record_image(public_url, candidate)
+                            record = await self._record_image(public_url, candidate)
                         results.append(
                             ProcessedImage(
                                 public_url=public_url,
@@ -195,6 +197,7 @@ class ImageSelectionService:
                                 width=candidate.width,
                                 height=candidate.height,
                                 title=candidate.title,
+                                record_id=self._extract_record_id(record),
                             )
                         )
                     except Exception as exc:  # noqa: BLE001
@@ -561,22 +564,59 @@ class ImageSelectionService:
             raise RuntimeError("Supabase URL requested but Supabase is disabled")
         return config.url.rstrip("/")
 
-    async def _record_image(self, public_url: str, candidate: ImageCandidate) -> None:
+    async def _record_image(self, public_url: str, candidate: ImageCandidate) -> Optional[Dict[str, Any]]:
         if self.supabase is None or not self.supabase_table:
             raise RuntimeError("Supabase persistence is not configured")
 
-        def _insert() -> None:
+        def _insert() -> Optional[Dict[str, Any]]:
             payload = {
                 "image_url": public_url,
                 "original_url": candidate.context_url or candidate.url,
                 "author": candidate.author or "",
                 "source": candidate.source or "",
             }
-            response = self.supabase.table(self.supabase_table).insert(payload).execute()
-            if getattr(response, "error", None):
-                raise RuntimeError(response.error)  # type: ignore[arg-type]
+            table = self.supabase.table(self.supabase_table)
+            response = table.insert(payload).execute()
+            error = getattr(response, "error", None)
+            if error:
+                message = str(error).lower()
+                if "duplicate" in message or "unique" in message:
+                    existing = (
+                        table.select("id,image_url,original_url")
+                        .eq("image_url", payload["image_url"])
+                        .limit(1)
+                        .execute()
+                    )
+                    existing_data = getattr(existing, "data", None) or []
+                    if existing_data:
+                        logger.info("Reusing existing image record for %s", payload["image_url"])
+                        return existing_data[0]
+                raise RuntimeError(error)  # type: ignore[arg-type]
+            data = getattr(response, "data", None) or []
+            if data:
+                return data[0]
+            existing = (
+                table.select("id,image_url,original_url")
+                .eq("image_url", payload["image_url"])
+                .limit(1)
+                .execute()
+            )
+            existing_data = getattr(existing, "data", None) or []
+            if existing_data:
+                return existing_data[0]
+            return payload
 
-        await asyncio.to_thread(_insert)
+        return await asyncio.to_thread(_insert)
+
+    @staticmethod
+    def _extract_record_id(record: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not record or not isinstance(record, dict):
+            return None
+        for key in ("id", "image_id", "uuid", "record_id"):
+            value = record.get(key)
+            if value:
+                return str(value)
+        return None
 
     def _build_destination_path(self, original_url: str) -> str:
         digest = hashlib.md5(original_url.encode("utf-8")).hexdigest()

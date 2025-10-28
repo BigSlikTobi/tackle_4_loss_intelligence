@@ -154,6 +154,7 @@ async def run_request(payload: Dict[str, Any]) -> Dict[str, Any]:
         "count": len(results),
         "images": [
             {
+                "id": item.record_id,
                 "image_url": item.public_url,
                 "original_url": item.original_url,
                 "author": item.author,
@@ -161,6 +162,7 @@ async def run_request(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "width": item.width,
                 "height": item.height,
                 "title": item.title,
+                "record_id": item.record_id,
             }
             for item in results
         ],

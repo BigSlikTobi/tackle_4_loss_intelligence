@@ -1,0 +1,10 @@
+# Daily Team Update Pipeline Dependencies
+
+# Core dependencies
+python-dotenv>=1.0.0
+pydantic>=2.6.0
+httpx>=0.26.0
+supabase>=2.0.0
+
+# Utility
+typing-extensions>=4.7.0
