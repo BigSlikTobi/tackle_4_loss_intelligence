@@ -87,3 +87,6 @@ functions/PYTHON_313_NOTICE.md
 functions/FIX_SUMMARY.md
 functions/.env.yaml.example
 functions/.gcloudignore
+
+# Playwright browsers
+!.playwright/**

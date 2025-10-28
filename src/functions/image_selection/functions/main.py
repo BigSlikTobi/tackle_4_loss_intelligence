@@ -58,6 +58,7 @@ def image_selection_handler(request: flask.Request) -> flask.Response:
             "count": len(results),
             "images": [
                 {
+                    "id": image.record_id,
                     "image_url": image.public_url,
                     "original_url": image.original_url,
                     "author": image.author,
@@ -65,6 +66,7 @@ def image_selection_handler(request: flask.Request) -> flask.Response:
                     "width": image.width,
                     "height": image.height,
                     "title": image.title,
+                    "record_id": image.record_id,
                 }
                 for image in results
             ],

@@ -64,3 +64,9 @@ package.json
 
 # archived docs and files
 docs/game-analysis-package/archive
+
+# Local service logs
+.local_service_logs
+
+# Playwright files
+.playwright

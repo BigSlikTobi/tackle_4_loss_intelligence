@@ -88,6 +88,7 @@ omitted from the payload.
   "query": "san francisco 49ers touchdown",
   "images": [
     {
+      "id": "c7b6f987-3f94-4bc6-b43f-4b2d63a4a6c9",
       "image_url": "https://.../storage/v1/object/public/images/public/hash_123.jpg",
       "original_url": "https://source-site/image.jpg",
       "author": "Jane Smith",
@@ -99,6 +100,12 @@ omitted from the payload.
   ]
 }
 ```
+
+The `id` field is returned when Supabase persistence is enabled and represents the
+primary key of the stored `article_images` row, allowing downstream services to
+create relationships without re-querying Supabase. A duplicate `record_id` field
+is included for backwards compatibility with earlier integrations that expected
+that key name.
 
   When Supabase is disabled the `image_url` will match `original_url`, allowing the caller to decide
   how to host or cache the asset.
