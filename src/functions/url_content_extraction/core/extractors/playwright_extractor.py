@@ -226,7 +226,23 @@ class PlaywrightExtractor:
                 if amp_target and not amp_detector.is_amp_url(str(options.url)):
                     self._logger.debug("Following AMP link for %s", options.url)
                     await self._navigate(page, amp_target, options)
-                    await page.wait_for_timeout(1000)
+                    
+                    # Wait for AMP page to load
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    
+                    # Small scroll to trigger any lazy content on AMP page
+                    try:
+                        await page.mouse.wheel(0, 500)
+                        await page.wait_for_timeout(300)
+                    except PlaywrightError:
+                        pass
+                    
+                    # Handle consent on AMP page (critical for EU news sites with AMP mirrors)
+                    await consent_handler.solve_consent(page, logger=self._logger)
+                    
                     html = await page.content()
                 
                 # Try tree walker extraction (most robust for ESPN)
