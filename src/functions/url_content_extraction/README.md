@@ -220,7 +220,9 @@ Structured Output
 
 **AMP Pages**:
 - Automatically detected and followed to canonical
-- Light extractor preferred (AMP is static HTML)
+- **Consent handling after AMP navigation** (critical for EU sites)
+- Light extractor preferred for simple AMP (static HTML)
+- Small scroll to trigger lazy content on AMP pages
 
 ### Data Models
 
