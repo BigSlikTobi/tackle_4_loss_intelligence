@@ -10,7 +10,6 @@ import google.generativeai as genai
 from google.api_core.exceptions import GoogleAPIError
 from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 
-from src.shared.utils.config_validator import check_config_override, ConfigurationError
 from ..contracts.summary import ArticleSummary, SummarizationOptions, SummarizationRequest, parse_options
 from ..llm.rate_limiter import rate_limiter
 from ..processors.summary_formatter import format_summary
@@ -22,22 +21,15 @@ class GeminiSummarizationClient:
     def __init__(
         self,
         *,
-        model: str = "gemini-2.5-flash-lite",
+        model: str = "gemma-3n-e4b-it",
         api_key: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self._options = SummarizationOptions(model=model)
-        try:
-            self._api_key = check_config_override(
-                api_key, 
-                "GEMINI_API_KEY", 
-                required=True
-            )
-        except ConfigurationError as e:
-            raise ConfigurationError(
-                f"{e}\nRequired for article summarization. "
-                "See .env.example for configuration template."
-            )
+        self._api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if not self._api_key:
+            msg = "GEMINI_API_KEY environment variable is not set"
+            raise ValueError(msg)
         genai.configure(api_key=self._api_key)
         self._logger = logger or logging.getLogger(__name__)
 
