@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from openai import APIError, OpenAI
 
+from src.shared.utils.config_validator import check_config_override, ConfigurationError
 from ..contracts.team_article import GeneratedArticle, GenerationOptions, SummaryBundle, parse_generation_options
 from ..llm.prompt_builder import build_prompt
 from ..processors.article_validator import validate_article
@@ -26,10 +27,17 @@ class OpenAIGenerationClient:
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self._options = GenerationOptions(model=model)
-        self._api_key = api_key or os.getenv("OPENAI_API_KEY")
-        if not self._api_key:
-            msg = "OPENAI_API_KEY environment variable is not set"
-            raise ValueError(msg)
+        try:
+            self._api_key = check_config_override(
+                api_key, 
+                "OPENAI_API_KEY", 
+                required=True
+            )
+        except ConfigurationError as e:
+            raise ConfigurationError(
+                f"{e}\nRequired for team article generation. "
+                "See .env.example for configuration template."
+            )
         self._client = OpenAI(api_key=self._api_key)
         self._logger = logger or logging.getLogger(__name__)
 

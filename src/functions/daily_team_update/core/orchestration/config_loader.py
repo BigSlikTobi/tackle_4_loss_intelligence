@@ -6,6 +6,12 @@ import logging
 import os
 from typing import Dict, Optional
 
+from src.shared.utils.config_validator import (
+    validate_bool_env,
+    validate_int_env,
+    require_env,
+    ConfigurationError,
+)
 from ..contracts.config import (
     PipelineConfig,
     ServiceCoordinatorConfig,
@@ -105,13 +111,16 @@ def build_service_config(overrides: Optional[Dict[str, object]] = None) -> Servi
 
 
 def build_supabase_settings(overrides: Optional[Dict[str, object]] = None) -> SupabaseSettings:
+    """Build Supabase settings with validation."""
     overrides = overrides or {}
     try:
-        url = overrides.get("url") or os.environ["SUPABASE_URL"]
-        key = overrides.get("key") or os.environ["SUPABASE_KEY"]
-    except KeyError as exc:
-        missing = exc.args[0]
-        raise KeyError(f"Missing required environment variable: {missing}") from exc
+        url = overrides.get("url") or require_env("SUPABASE_URL", "Supabase project URL")
+        key = overrides.get("key") or require_env("SUPABASE_KEY", "Supabase service role key")
+    except ConfigurationError as exc:
+        raise ConfigurationError(
+            f"{exc}\nRequired for daily team update pipeline. "
+            "See .env.example for configuration template."
+        )
 
     return SupabaseSettings(
         url=url,
