@@ -1,4 +1,4 @@
-"""Deployment wrapper for the team article generation Cloud Function."""
+"""Deployment wrapper for the article translation Cloud Function."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ project_root = Path(__file__).resolve().parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.functions.team_article_generation.functions.main import handle_request
+from src.functions.article_translation.functions.main import handle_request
 
 logger = logging.getLogger(__name__)
 
 
-def team_article_generation_handler(request: flask.Request) -> flask.Response:
+def article_translation_handler(request: flask.Request) -> flask.Response:
     if request.method == "OPTIONS":
         return _cors_response({}, status=204)
 
@@ -32,7 +32,7 @@ def team_article_generation_handler(request: flask.Request) -> flask.Response:
         status_code = 200 if result.get("status") == "success" else 400
         return _cors_response(result, status=status_code)
     except Exception as exc:
-        logger.exception("Unexpected error in team article generation handler")
+        logger.exception("Unexpected error in article translation handler")
         return _cors_response(
             {"status": "error", "message": f"Internal error: {exc}"},
             status=500
