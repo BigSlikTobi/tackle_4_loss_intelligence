@@ -178,7 +178,6 @@ class OpenAITranslationClient:
             if "```json" in text or "```" in text:
                 try:
                     # Extract content between ```json and ``` or ``` and ```
-                    import re
                     json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
                     if json_match:
                         json_str = json_match.group(1).strip()
