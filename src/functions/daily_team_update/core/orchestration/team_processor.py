@@ -49,134 +49,199 @@ class TeamProcessor:
         self._writer = ArticleWriter(supabase, dry_run=pipeline_config.dry_run)
         self._relationships = RelationshipManager(supabase, dry_run=pipeline_config.dry_run)
 
-    def process(self, team: TeamRecord) -> TeamProcessingResult:
-        """Run the pipeline for a single team and return the structured result."""
+    def process(self, team: TeamRecord, cached_result: TeamProcessingResult | None = None) -> TeamProcessingResult:
+        """Run the pipeline for a single team and return the structured result.
+        
+        Args:
+            team: The team to process
+            cached_result: Optional cached result from previous attempt with intermediate data
+        """
 
-        logger.info("Processing team %s", team.abbreviation)
-        result = TeamProcessingResult(
+        is_retry = cached_result is not None and cached_result.retry_count > 0
+        logger.info(
+            "Processing team %s%s",
+            team.abbreviation,
+            f" (retry attempt {cached_result.retry_count + 1})" if is_retry else ""
+        )
+        
+        result = cached_result or TeamProcessingResult(
             team_id=team.identifier,
             team_abbr=team.abbreviation,
             team_name=team.name,
         )
+        
+        if is_retry:
+            result.retry_count += 1
+        
         start_time = time.perf_counter()
 
         try:
-            stage_start = time.perf_counter()
-            try:
-                urls = self._fetch_team_urls(team)
-            except Exception as exc:  # noqa: BLE001
-                result.add_stage_duration("url_fetch", time.perf_counter() - stage_start)
-                logger.error("Failed fetching URLs for %s: %s", team.abbreviation, exc)
-                self._errors.record(team.abbreviation, "url_fetch", exc, retryable=True)
-                result.add_error(
-                    FailureDetail(
-                        stage="url_fetch",
-                        message=str(exc),
-                        retryable=True,
-                    )
-                )
-                result.status = "failed"
-                setattr(exc, RECORDED_FLAG, True)
-                if not self._config.continue_on_error:
-                    raise
-                return result
+            # Stage 1: URL Fetch (use cache if available)
+            if result.cached_urls:
+                logger.info("Using cached URLs for %s (%d URLs)", team.abbreviation, len(result.cached_urls))
+                urls = result.cached_urls
             else:
-                result.add_stage_duration("url_fetch", time.perf_counter() - stage_start)
+                stage_start = time.perf_counter()
+                try:
+                    urls = self._fetch_team_urls(team)
+                    result.cached_urls = urls  # Cache for potential retry
+                except Exception as exc:  # noqa: BLE001
+                    result.add_stage_duration("url_fetch", time.perf_counter() - stage_start)
+                    logger.error("Failed fetching URLs for %s: %s", team.abbreviation, exc)
+                    self._errors.record(team.abbreviation, "url_fetch", exc, retryable=True)
+                    result.add_error(
+                        FailureDetail(
+                            stage="url_fetch",
+                            message=str(exc),
+                            retryable=True,
+                        )
+                    )
+                    result.status = "failed"
+                    setattr(exc, RECORDED_FLAG, True)
+                    if not self._config.continue_on_error:
+                        raise
+                    return result
+                else:
+                    result.add_stage_duration("url_fetch", time.perf_counter() - stage_start)
+                    
             result.urls_processed = len(urls)
             if not urls:
                 result.status = "success" if self._config.allow_empty_urls else "no_news"
                 return result
 
-            stage_start = time.perf_counter()
-            try:
-                extracted, extraction_failures = self._service.extract_content(team, urls)
-            finally:
-                result.add_stage_duration("content_extraction", time.perf_counter() - stage_start)
-            for failure in extraction_failures:
-                result.add_error(failure)
-            if not extracted:
-                result.status = "failed"
-                result.add_error(
-                    FailureDetail(
-                        stage="content_extraction",
-                        message="No content could be extracted for any URL",
-                        retryable=False,
+            # Stage 2: Content Extraction (use cache if available)
+            if result.cached_extracted:
+                logger.info("Using cached extracted content for %s (%d articles)", team.abbreviation, len(result.cached_extracted))
+                extracted = result.cached_extracted
+                extraction_failures = []
+            else:
+                stage_start = time.perf_counter()
+                try:
+                    extracted, extraction_failures = self._service.extract_content(team, urls)
+                    # Cache extracted content for retry
+                    result.cached_extracted = [
+                        {
+                            "url": art.url,
+                            "title": art.title,
+                            "content": art.content,
+                            "author": art.author,
+                            "published_at": art.published_at,
+                        }
+                        for art in extracted
+                    ]
+                finally:
+                    result.add_stage_duration("content_extraction", time.perf_counter() - stage_start)
+                for failure in extraction_failures:
+                    result.add_error(failure)
+                if not extracted:
+                    result.status = "failed"
+                    result.add_error(
+                        FailureDetail(
+                            stage="content_extraction",
+                            message="No content could be extracted for any URL",
+                            retryable=False,
+                        )
                     )
-                )
-                return result
+                    return result
 
-            stage_start = time.perf_counter()
-            try:
-                summaries, summarisation_failures = self._service.summarise_articles(team, extracted)
-            finally:
-                result.add_stage_duration("summarization", time.perf_counter() - stage_start)
-            for failure in summarisation_failures:
-                result.add_error(failure)
-            if not summaries:
-                result.status = "failed"
-                result.add_error(
-                    FailureDetail(
-                        stage="summarization",
-                        message="Summarisation service returned no usable summaries",
-                        retryable=False,
+            # Stage 3: Summarization (use cache if available)
+            if result.cached_summaries:
+                logger.info("Using cached summaries for %s (%d summaries)", team.abbreviation, len(result.cached_summaries))
+                summaries = [
+                    ArticleSummary(source_url=s["source_url"], content=s["content"])
+                    for s in result.cached_summaries
+                ]
+                summarisation_failures = []
+            else:
+                stage_start = time.perf_counter()
+                try:
+                    # Reconstruct extracted articles from cache
+                    from ..integration.service_coordinator import ExtractedArticle
+                    extracted_articles = [
+                        ExtractedArticle(
+                            url=art["url"],
+                            title=art.get("title"),
+                            content=art["content"],
+                            author=art.get("author"),
+                            published_at=art.get("published_at"),
+                        )
+                        for art in result.cached_extracted
+                    ]
+                    summaries, summarisation_failures = self._service.summarise_articles(team, extracted_articles)
+                    # Cache summaries for retry
+                    result.cached_summaries = [
+                        {"source_url": s.source_url, "content": s.content}
+                        for s in summaries
+                    ]
+                finally:
+                    result.add_stage_duration("summarization", time.perf_counter() - stage_start)
+                for failure in summarisation_failures:
+                    result.add_error(failure)
+                if not summaries:
+                    result.status = "failed"
+                    result.add_error(
+                        FailureDetail(
+                            stage="summarization",
+                            message="Summarisation service returned no usable summaries",
+                            retryable=False,
+                        )
                     )
-                )
-                return result
+                    return result
 
             result.summaries_generated = len(summaries)
 
+            # Stage 4: Article Generation - MUST succeed
             stage_start = time.perf_counter()
             try:
                 article = self._service.generate_article(team, summaries)
+            except ServiceInvocationError as exc:
+                result.add_stage_duration("article_generation", time.perf_counter() - stage_start)
+                logger.error("Article generation failed for %s: %s", team.abbreviation, exc)
+                self._errors.record(team.abbreviation, exc.stage, exc, retryable=exc.retryable)
+                result.add_error(FailureDetail(stage=exc.stage, message=str(exc), retryable=exc.retryable))
+                result.mark_incomplete("No article generated")
+                return result
             finally:
                 result.add_stage_duration("article_generation", time.perf_counter() - stage_start)
+            
+            # Stage 5: Translation - MUST succeed  
             translated = None
             stage_start = time.perf_counter()
             try:
                 translated = self._service.translate_article(article)
             except ServiceInvocationError as exc:
                 result.add_stage_duration("translation", time.perf_counter() - stage_start)
-                if not self._config.continue_on_error:
-                    setattr(exc, RECORDED_FLAG, True)
-                    raise
-                logger.warning(
-                    "Translation failed for team %s: %s", team.abbreviation, exc
-                )
-                result.add_error(
-                    FailureDetail(
-                        stage="translation",
-                        message=str(exc),
-                        retryable=exc.retryable,
-                    )
-                )
-                setattr(exc, RECORDED_FLAG, True)
+                logger.error("Translation failed for %s: %s", team.abbreviation, exc)
+                self._errors.record(team.abbreviation, exc.stage, exc, retryable=exc.retryable)
+                result.add_error(FailureDetail(stage=exc.stage, message=str(exc), retryable=exc.retryable))
+                result.mark_incomplete("No translation generated")
+                return result
             else:
                 result.add_stage_duration("translation", time.perf_counter() - stage_start)
 
+            # Stage 6: Image Selection - MUST succeed
             images: List[SelectedImage] = []
             if self._config.image_count > 0:
                 stage_start = time.perf_counter()
                 try:
                     images = self._service.select_images(article=article, translated=translated)
+                    if not images:
+                        raise ServiceInvocationError(
+                            "image_selection",
+                            f"No images returned (requested {self._config.image_count})",
+                            retryable=True
+                        )
                 except ServiceInvocationError as exc:
                     result.add_stage_duration("image_selection", time.perf_counter() - stage_start)
-                    if not self._config.continue_on_error:
-                        setattr(exc, RECORDED_FLAG, True)
-                        raise
-                    logger.warning(
-                        "Image selection failed for team %s: %s", team.abbreviation, exc
-                    )
-                    result.add_error(
-                        FailureDetail(
-                            stage="image_selection",
-                            message=str(exc),
-                            retryable=exc.retryable,
-                        )
-                    )
-                    setattr(exc, RECORDED_FLAG, True)
+                    logger.error("Image selection failed for %s: %s", team.abbreviation, exc)
+                    self._errors.record(team.abbreviation, exc.stage, exc, retryable=exc.retryable)
+                    result.add_error(FailureDetail(stage=exc.stage, message=str(exc), retryable=exc.retryable))
+                    result.mark_incomplete("No images selected")
+                    return result
                 else:
                     result.add_stage_duration("image_selection", time.perf_counter() - stage_start)
 
+            # Stage 7: Persistence
             stage_start = time.perf_counter()
             try:
                 article_records = self._persist_outputs(
@@ -193,6 +258,7 @@ class TeamProcessor:
                 )
             finally:
                 result.add_stage_duration("persistence", time.perf_counter() - stage_start)
+            
             result.mark_success(
                 summaries=len(summaries),
                 images=len(images),
@@ -200,6 +266,22 @@ class TeamProcessor:
             )
             result.article_generated = True
             result.translation_generated = result.translation_generated or bool(article_records.get("de"))
+            
+            # Final validation: Ensure we have everything
+            if not result.is_complete():
+                missing = []
+                if not result.article_generated:
+                    missing.append("article")
+                if not result.translation_generated:
+                    missing.append("translation")
+                if result.images_selected == 0:
+                    missing.append("images")
+                    
+                reason = f"Missing: {', '.join(missing)}"
+                logger.warning("Team %s marked incomplete: %s", team.abbreviation, reason)
+                result.mark_incomplete(reason)
+                return result
+                
         except ServiceInvocationError as exc:
             if getattr(exc, RECORDED_FLAG, False):
                 if not self._config.continue_on_error:

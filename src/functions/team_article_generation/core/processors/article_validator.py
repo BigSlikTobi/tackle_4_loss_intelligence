@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import List
+
 from ..contracts.team_article import GeneratedArticle, SummaryBundle
 
 

@@ -93,7 +93,9 @@ class ServiceCoordinator:
     ) -> None:
         self._config = config
         self._pipeline_config = pipeline_config
-        timeout = httpx.Timeout(pipeline_config.summarization_batch_size * 30, connect=5.0)
+        # Use None timeout at client level to allow per-request timeouts to take effect
+        # connect timeout is still 5 seconds for fast failure on network issues
+        timeout = httpx.Timeout(None, connect=5.0)
         self._http = http_client or httpx.Client(timeout=timeout)
         self._image_selection_defaults = self._prepare_image_selection_defaults()
 

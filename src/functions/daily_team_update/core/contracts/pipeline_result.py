@@ -46,7 +46,7 @@ class TeamProcessingResult(BaseModel):
     )
     status: str = Field(
         default="skipped",
-        description="Outcome status (success|failed|no_news|skipped)",
+        description="Outcome status (success|failed|no_news|skipped|incomplete)",
     )
     urls_processed: int = Field(default=0, ge=0)
     summaries_generated: int = Field(default=0, ge=0)
@@ -62,6 +62,25 @@ class TeamProcessingResult(BaseModel):
         description="Elapsed time (seconds) recorded per pipeline stage",
     )
     errors: List[FailureDetail] = Field(default_factory=list)
+    
+    # Cache for intermediate results to enable retry without re-extraction
+    cached_urls: List[dict] = Field(
+        default_factory=list,
+        description="Cached URLs from successful fetch stage"
+    )
+    cached_extracted: List[dict] = Field(
+        default_factory=list,
+        description="Cached extracted articles for retry"
+    )
+    cached_summaries: List[dict] = Field(
+        default_factory=list,
+        description="Cached article summaries for retry"
+    )
+    retry_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of retry attempts for this team"
+    )
 
     def add_stage_duration(self, stage: str, duration: float) -> None:
         """Record the elapsed time for a stage."""
@@ -93,6 +112,23 @@ class TeamProcessingResult(BaseModel):
             self.article_ids.update(article_ids)
         self.article_generated = bool(article_ids and article_ids.get("en"))
         self.translation_generated = bool(article_ids and article_ids.get("de"))
+    
+    def is_complete(self) -> bool:
+        """Check if the team has all required outputs (article, translation, images)."""
+        has_article = self.article_generated and bool(self.article_ids.get("en"))
+        has_translation = self.translation_generated and bool(self.article_ids.get("de"))
+        has_images = self.images_selected > 0
+        
+        return has_article and has_translation and has_images
+    
+    def mark_incomplete(self, reason: str) -> None:
+        """Mark the result as incomplete due to missing required outputs."""
+        self.status = "incomplete"
+        self.add_error(FailureDetail(
+            stage="validation",
+            message=f"Incomplete result: {reason}",
+            retryable=True
+        ))
 
 
 class PipelineMetrics(BaseModel):
@@ -137,6 +173,8 @@ class PipelineResult(BaseModel):
     success_count: int = Field(default=0, ge=0)
     failure_count: int = Field(default=0, ge=0)
     skipped_count: int = Field(default=0, ge=0)
+    incomplete_count: int = Field(default=0, ge=0)
+    retry_count: int = Field(default=0, ge=0, description="Number of retry attempts executed")
     config_snapshot: Dict[str, object] = Field(default_factory=dict)
     results: List[TeamProcessingResult] = Field(default_factory=list)
     metrics: PipelineMetrics = Field(default_factory=PipelineMetrics)
@@ -151,6 +189,8 @@ class PipelineResult(BaseModel):
             self.success_count += 1
         elif result.status == "failed":
             self.failure_count += 1
+        elif result.status == "incomplete":
+            self.incomplete_count += 1
         else:
             self.skipped_count += 1
 
@@ -171,6 +211,8 @@ class PipelineResult(BaseModel):
             "success_count": self.success_count,
             "failure_count": self.failure_count,
             "skipped_count": self.skipped_count,
+            "incomplete_count": self.incomplete_count,
+            "retry_count": self.retry_count,
             "config": self.config_snapshot,
             "metrics": {**metrics_dump, "duration_seconds": self.metrics.duration_seconds},
             "results": [result.model_dump() for result in self.results],

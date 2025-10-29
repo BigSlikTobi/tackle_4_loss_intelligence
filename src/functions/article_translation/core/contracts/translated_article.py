@@ -12,7 +12,7 @@ class TranslationOptions(BaseModel):
 
     model: str = Field(default="gpt-5-mini")
     service_tier: str = Field(default="flex")
-    request_timeout_seconds: int = Field(default=600, ge=60, le=900)
+    request_timeout_seconds: int = Field(default=360, ge=180, le=1200)
     temperature: float | None = Field(default=None, description="Sampling temperature if supported")
     max_output_tokens: int | None = Field(default=None, description="Token limit if supported")
     tone_guidance: str = Field(

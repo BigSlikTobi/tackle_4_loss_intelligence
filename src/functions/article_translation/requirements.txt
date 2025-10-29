@@ -1,2 +1,3 @@
 openai>=1.51
 pydantic>=2.9
+tenacity>=8.3

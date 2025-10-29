@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..contracts.summary import SummarizationOptions, SummarizationRequest
+from .contracts.summary import SummarizationOptions, SummarizationRequest
 
 SUMMARIZATION_PROMPT_TEMPLATE = (
     "You are an NFL beat reporter summarizing a news article for internal editors. "

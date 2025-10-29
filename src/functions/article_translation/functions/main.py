@@ -8,6 +8,15 @@ import os
 from typing import Any, Dict, List
 
 from pydantic import ValidationError
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+    after_log,
+    RetryCallState,
+)
 
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
@@ -21,6 +30,42 @@ from src.functions.article_translation.core.llm.openai_translator import (
 load_env()
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
+
+
+def _log_retry_attempt(retry_state: RetryCallState) -> None:
+    """Log detailed information about each retry attempt."""
+    attempt = retry_state.attempt_number
+    if retry_state.outcome and retry_state.outcome.failed:
+        exception = retry_state.outcome.exception()
+        logger.warning(
+            "TRANSLATION_RETRY_ATTEMPT_%d: Retrying translation due to %s: %s",
+            attempt,
+            type(exception).__name__,
+            str(exception)[:200],
+            extra={
+                "retry_attempt": attempt,
+                "error_type": type(exception).__name__,
+                "will_retry": attempt < 3
+            }
+        )
+
+
+# Retry configuration for LLM translation failures
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((RuntimeError, ConnectionError, TimeoutError)),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    after=_log_retry_attempt,
+    reraise=True,
+)
+def _translate_with_retry(
+    client: OpenAITranslationClient,
+    request_model: TranslationRequest,
+    options: Dict[str, Any] | None,
+) -> Any:
+    """Execute translation with automatic retry on transient failures."""
+    return client.translate(request_model, options=options)
 
 
 def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -95,23 +140,71 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
 
     base_options = request.get("options") if isinstance(request.get("options"), dict) else {}
     merged_options = _merge_options(base_options, request.get("llm_options"))
+    
+    # If caller doesn't specify timeout, use a safe default that leaves buffer for response handling
+    # Ensure OpenAI timeout is always less than HTTP timeout to avoid connection drops
+    if "request_timeout_seconds" not in merged_options:
+        # Default to 360 seconds (6 minutes) - leaves 60s buffer for 420s HTTP timeout
+        merged_options["request_timeout_seconds"] = 360
+        logger.debug("Using default OpenAI timeout: 360 seconds")
 
+    # Use retry wrapper for translation - will attempt up to 3 times
+    attempt_count = 0
     try:
-        translated = client.translate(
+        translated = _translate_with_retry(
+            client,
             request_model,
             options=merged_options if merged_options else None,
         )
-    except Exception as exc:  # noqa: BLE001 - expose translation failures to caller
-        logger.warning(
-            "Translation failed for article %s: %s",
+        
+        # Log successful translation (especially if it took multiple attempts)
+        logger.info(
+            "Translation successful: article_id=%s, language=%s->%s, has_error=%s",
             request_model.article_id or "<unknown>",
-            exc,
+            request_model.source_language,
+            request_model.language,
+            bool(translated.error),
         )
-        return {"status": "error", "message": str(exc)}
+        
+    except Exception as exc:  # noqa: BLE001 - expose translation failures to caller
+        # Log comprehensive failure information for monitoring
+        error_details = {
+            "article_id": request_model.article_id or "<unknown>",
+            "source_language": request_model.source_language,
+            "target_language": request_model.language,
+            "headline": request_model.headline[:100] if request_model.headline else None,
+            "content_length": len(request_model.content),
+            "content_word_count": sum(len(p.split()) for p in request_model.content),
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "model": model_override or "gpt-5-mini",
+        }
+        
+        logger.error(
+            "TRANSLATION_FAILURE_AFTER_RETRIES: Article translation failed after 3 attempts. "
+            "Details: %s",
+            error_details,
+            extra={"translation_failure": error_details}
+        )
+        
+        # Also log to structured format for easy querying
+        logger.error(
+            "Translation failed: article_id=%s, language=%s->%s, error=%s",
+            error_details["article_id"],
+            error_details["source_language"],
+            error_details["target_language"],
+            error_details["error_type"],
+        )
+        
+        return {
+            "status": "error",
+            "message": f"Translation failed after 3 attempts: {exc}",
+            "error_details": error_details
+        }
 
     if not translated.content:
-        logger.info(
-            "Translation returned empty content for %s; using source text instead",
+        logger.warning(
+            "TRANSLATION_EMPTY_CONTENT: Translation returned empty content for %s; using source text instead",
             request_model.article_id or "<unknown>",
         )
         translated.content = request_model.content
@@ -135,8 +228,28 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
         "preserved_terms": translated.preserved_terms,
     }
 
+    final_status = "success" if not translated.error else "partial"
+    
+    # Log final result summary
+    logger.info(
+        "TRANSLATION_COMPLETE: status=%s, article_id=%s, language=%s, "
+        "word_count=%d, has_error=%s",
+        final_status,
+        request_model.article_id or "<unknown>",
+        translated.language,
+        translated.word_count,
+        bool(translated.error),
+        extra={
+            "status": final_status,
+            "article_id": request_model.article_id,
+            "target_language": translated.language,
+            "word_count": translated.word_count,
+            "error": translated.error,
+        }
+    )
+
     return {
-        "status": "success" if not translated.error else "partial",
+        "status": final_status,
         "article": article_payload,
     }
 
