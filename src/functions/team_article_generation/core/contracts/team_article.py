@@ -13,7 +13,7 @@ class GenerationOptions(BaseModel):
     model: str = Field(default="gpt-5", description="OpenAI model identifier")
     temperature: float | None = Field(default=None, description="Sampling temperature if supported")
     max_output_tokens: int | None = Field(default=None, description="Maximum output tokens if supported")
-    service_tier: str = Field(default="flex", description="OpenAI service tier, e.g., flex")
+    service_tier: str | None = Field(default=None, description="OpenAI service tier (e.g., 'flex'); omit if not supported")
     request_timeout_seconds: int = Field(default=600, ge=60, le=900)
     narrative_focus: str = Field(
         default=(

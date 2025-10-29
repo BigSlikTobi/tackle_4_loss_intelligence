@@ -33,8 +33,13 @@ def validate_article(article: GeneratedArticle, bundle: SummaryBundle | None = N
 
     if bundle and bundle.team_name:
         team_name = bundle.team_name.strip()
-        if team_name and team_name not in article.headline:
-            article.error = f"Headline must mention {team_name}"
-            return article
+        if team_name:
+            lowered_name = team_name.lower()
+            headline_has_name = lowered_name in article.headline.lower()
+            sub_header_has_name = lowered_name in article.sub_header.lower()
+            intro_has_name = lowered_name in article.introduction_paragraph.lower()
+            if not (headline_has_name or sub_header_has_name or intro_has_name):
+                article.error = f"Article must mention {team_name} in headline, sub-header, or introduction"
+                return article
 
     return article

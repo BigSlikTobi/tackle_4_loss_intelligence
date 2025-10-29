@@ -57,12 +57,22 @@ class OpenAIGenerationClient:
                 {"role": "system", "content": self._system_prompt(bundle)},
                 {"role": "user", "content": prompt},
             ],
-            "service_tier": opts.service_tier,
         }
+        if opts.service_tier:
+            request_kwargs["service_tier"] = opts.service_tier
         if opts.temperature is not None:
             request_kwargs["temperature"] = opts.temperature
         if opts.max_output_tokens is not None:
             request_kwargs["max_output_tokens"] = opts.max_output_tokens
+        
+        # Log the complete request payload for debugging
+        full_request = {**request_kwargs, "response_format": {"type": "json_schema", "json_schema": schema}}
+        self._logger.info(
+            "OpenAI request payload for %s: %s",
+            bundle.team_abbr,
+            json.dumps(full_request, indent=2, ensure_ascii=False)
+        )
+        
         try:
             response = client.responses.create(
                 **request_kwargs,
