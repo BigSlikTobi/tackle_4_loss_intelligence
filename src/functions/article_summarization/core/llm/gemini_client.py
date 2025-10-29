@@ -13,6 +13,7 @@ from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 from ..contracts.summary import ArticleSummary, SummarizationOptions, SummarizationRequest, parse_options
 from ..llm.rate_limiter import rate_limiter
 from ..processors.summary_formatter import format_summary
+from ..prompts import build_summarization_prompt
 
 
 class GeminiSummarizationClient:
@@ -75,18 +76,7 @@ class GeminiSummarizationClient:
         return text
 
     def _build_prompt(self, request: SummarizationRequest, options: SummarizationOptions) -> str:
-        team_clause = f"Focus on insights about the {request.team_name}." if request.team_name else "Focus only on the team mentioned in the article."
-        removal_clause = ", ".join(options.remove_patterns)
-        return (
-            "You are an NFL beat reporter summarizing a news article for internal editors. "
-            "Remove boilerplate, advertisements, video transcripts, promotional copy, and unrelated paragraphs. "
-            f"{team_clause} "
-            "Preserve key facts, quotes, and meaningful context without speculation. "
-            "Do not add analysis or commentary. Output a concise paragraph (120-180 words). "
-            f"Never include phrases related to: {removal_clause}.\n\n"
-            "Article Content:\n"
-            f"{request.content}"
-        )
+        return build_summarization_prompt(request, options)
 
     @staticmethod
     def _extract_text(result: Any) -> str:

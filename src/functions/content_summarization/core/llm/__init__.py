@@ -14,6 +14,7 @@ from google import genai
 from google.genai.types import GenerateContentConfig
 
 from .content_fetcher import ContentFetcher
+from ..prompts import build_article_content_prompt, build_url_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -82,48 +83,6 @@ class GeminiClient:
     - Resource cleanup
     """
 
-    # Prompt template designed to prevent hallucination
-    SUMMARIZATION_PROMPT = """Analyze the content from this URL: {url}
-
-CRITICAL INSTRUCTIONS:
-1. If you CAN access the URL content:
-   - ONLY use facts and information explicitly stated in the article
-   - DO NOT add external context, background information, or your own knowledge
-   - DO NOT make assumptions or inferences beyond what's written
-   - Quote or paraphrase only what appears in the source content
-
-2. If you CANNOT access the URL content (e.g., paywall, JavaScript-required, or blocked):
-   - Clearly state that the content was not accessible
-   - Return null/empty values for all fields
-   - DO NOT attempt to guess or infer article content
-   - DO NOT use your training data knowledge about similar topics
-
-Please provide:
-
-1. COMPREHENSIVE SUMMARY (3-5 paragraphs):
-   - Summarize the main content and key messages
-   - Include important details, quotes, and context from the article
-   - Maintain factual accuracy
-
-2. KEY POINTS (bullet list):
-   - 5-7 main takeaways from the article
-   - Each point should be a concise factual statement
-
-3. ENTITIES MENTIONED:
-   - Players: List all NFL player names mentioned (format: "FirstName LastName")
-   - Teams: List all NFL team names mentioned (use official names)
-   - Games: List any specific games referenced (format: "Team1 vs Team2, Week X")
-
-4. ARTICLE CLASSIFICATION:
-   - Type: (news, analysis, preview, recap, injury_report, transaction, or other)
-   - Sentiment: (positive, negative, neutral, mixed)
-   - Quality: (high, medium, low) based on depth and factual content
-
-5. INJURY UPDATES (if applicable):
-   - Any injury-related information mentioned in the article
-   - Include player names and injury status if available
-
-Format your response as structured data that can be easily parsed."""
 
     def __init__(
         self,
@@ -245,7 +204,7 @@ Format your response as structured data that can be easily parsed."""
                 tools.append({"google_search": {}})
 
             # Create the prompt
-            prompt = self.SUMMARIZATION_PROMPT.format(url=url)
+            prompt = build_url_prompt(url)
             if title:
                 prompt = f"Article title: {title}\n\n{prompt}"
 
@@ -481,45 +440,11 @@ Format your response as structured data that can be easily parsed."""
         logger.info(f"Content fetched via {method}, length: {len(content)} chars")
         
         # Build prompt with fetched content
-        title_line = f"Title: {title}" if title else ""
-        content_prompt = f"""Analyze the following article content.
-
-URL: {url}
-{title_line}
-
-CRITICAL INSTRUCTIONS:
-1. ONLY use facts and information from the article content below
-2. DO NOT add external context or your own knowledge
-3. Extract structured information accurately
-
-ARTICLE CONTENT:
-{content}
-
-Please provide:
-
-1. COMPREHENSIVE SUMMARY (3-5 paragraphs):
-   - Summarize the main content and key messages
-   - Include important details and context
-   - Maintain factual accuracy
-
-2. KEY POINTS (bullet list):
-   - 5-7 main takeaways
-   - Each point should be concise and factual
-
-3. ENTITIES MENTIONED:
-   - Players: List all NFL player names (format: "FirstName LastName")
-   - Teams: List all NFL team names (use official names)
-   - Games: List any specific games referenced
-
-4. ARTICLE CLASSIFICATION:
-   - Type: (news, analysis, preview, recap, injury_report, transaction, or other)
-   - Sentiment: (positive, negative, neutral, mixed)
-   - Quality: (high, medium, low) based on depth
-
-5. INJURY UPDATES (if applicable):
-   - Any injury-related information
-
-Format your response clearly with section headers."""
+        content_prompt = build_article_content_prompt(
+            url=url,
+            title=title,
+            content=content,
+        )
         
         try:
             # Call Gemini with text content (no URL context tool)

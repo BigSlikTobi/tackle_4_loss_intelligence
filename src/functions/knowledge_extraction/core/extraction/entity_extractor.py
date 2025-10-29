@@ -13,6 +13,8 @@ from dataclasses import dataclass
 import openai
 from openai import OpenAIError, RateLimitError, APITimeoutError
 
+from ..prompts import build_entity_extraction_prompt
+
 logger = logging.getLogger(__name__)
 
 
@@ -211,134 +213,8 @@ class EntityExtractor:
     
     def _build_extraction_prompt(self, summary_text: str, max_entities: int) -> str:
         """Build the prompt for entity extraction."""
-        return f"""You are an expert NFL analyst specialized in entity extraction. Your task is to extract NFL entities from this story summary with STRICT DISAMBIGUATION REQUIREMENTS.
+        return build_entity_extraction_prompt(summary_text, max_entities)
 
-**CRITICAL: Player Disambiguation Rules**
-For EVERY player mention, you MUST provide AT LEAST 2 identifying hints:
-1. Player name (required)
-2. Position (QB, RB, WR, TE, etc.) OR Team (abbreviation like BUF, KC, or full name)
-
-**Why this matters:**
-- Multiple players can have the same name (e.g., Josh Allen QB vs Josh Allen LB)
-- Without disambiguation, we cannot accurately resolve players to database records
-- ONLY extract a player if you can identify AT LEAST 2 hints from the text
-
-**Example Valid Extractions:**
-✅ "Josh Allen" + "quarterback" → mention_text: "Josh Allen", position: "QB"
-✅ "Josh Allen" + "Bills" → mention_text: "Josh Allen", team_name: "Bills"
-✅ "Mahomes" + "Chiefs QB" → mention_text: "Mahomes", position: "QB", team_abbr: "KC"
-✅ "Travis Kelce" + "tight end" → mention_text: "Travis Kelce", position: "TE"
-✅ "Allen" + "Bills QB" → mention_text: "Allen", position: "QB", team_name: "Bills"
-
-**Example INVALID Extractions (DO NOT EXTRACT):**
-❌ "Josh Allen" with no position or team mentioned → SKIP this player
-❌ "Allen" alone without position or team → SKIP - needs disambiguation
-❌ "Smith" with no position or team → SKIP this player
-❌ "the quarterback" with no name → SKIP this reference
-
-**Entity Types to Extract:**
-
-1. **PLAYERS**: Any NFL player mentioned WITH 2+ identifying hints
-   - REQUIRED: Player name (full or last name)
-   - REQUIRED: Position (QB, RB, WR, TE, etc.) OR Team (abbreviation/full name)
-   - OPTIONAL: Additional context for confidence
-   - If you cannot find 2+ hints, DO NOT extract the player
-
-2. **TEAMS**: Any NFL team mentioned
-   - Use both full names and abbreviations: Kansas City Chiefs, Chiefs, KC
-   - Include possessive forms: "Chiefs'", "Chargers'"
-
-3. **GAMES**: Specific matchups or games
-   - Include opponent info: "Chiefs vs Chargers", "Sunday Night Football matchup"
-   - Include game context: "Week 4 game", "playoff game"
-
-For each entity, provide:
-- entity_type: "player", "team", or "game"
-- mention_text: The exact name/text as it appears in the summary
-- context: A brief phrase showing how it's used (3-5 words)
-- is_primary: true if this is the main subject, false if just mentioned
-- confidence: Your confidence in this extraction (0.0 to 1.0)
-- rank: Importance ranking (1=main subject, 2=secondary, 3=tertiary, etc.)
-
-**RANKING SYSTEM:**
-- Rank 1: Main subject(s) of the story - the primary player/team/game being discussed
-- Rank 2: Secondary important entities - significantly mentioned or involved
-- Rank 3+: Tertiary entities - mentioned but not central to the story
-
-**FOR PLAYERS ONLY - REQUIRED DISAMBIGUATION FIELDS:**
-- position: Player position if mentioned (QB, RB, WR, TE, DE, LB, etc.) - use null if not found
-- team_abbr: Team abbreviation if mentioned (BUF, KC, SF, etc.) - use null if not found
-- team_name: Team full name if mentioned (Bills, Chiefs, 49ers, etc.) - use null if not found
-
-**IMPORTANT:** For players, you MUST provide at least ONE of: position, team_abbr, or team_name.
-If you cannot find ANY of these, DO NOT extract the player - skip it entirely.
-
-Return up to {max_entities} entities in JSON format, **ORDERED BY RANK** (rank 1 first, then 2, then 3, etc.):
-
-{{
-  "entities": [
-    {{
-      "entity_type": "player",
-      "mention_text": "Josh Allen",
-      "context": "throws 3 touchdowns",
-      "is_primary": true,
-      "confidence": 0.95,
-      "rank": 1,
-      "position": "QB",
-      "team_abbr": "BUF",
-      "team_name": "Bills"
-    }},
-    {{
-      "entity_type": "team",
-      "mention_text": "Bills",
-      "context": "Buffalo Bills offense",
-      "is_primary": true,
-      "confidence": 0.98,
-      "rank": 1,
-      "position": null,
-      "team_abbr": null,
-      "team_name": null
-    }},
-    {{
-      "entity_type": "player",
-      "mention_text": "Stefon Diggs",
-      "context": "caught 2 TDs",
-      "is_primary": false,
-      "confidence": 0.90,
-      "rank": 2,
-      "position": "WR",
-      "team_abbr": "BUF",
-      "team_name": "Bills"
-    }},
-    {{
-      "entity_type": "team",
-      "mention_text": "Dolphins",
-      "context": "opponent team",
-      "is_primary": false,
-      "confidence": 0.95,
-      "rank": 2,
-      "position": null,
-      "team_abbr": null,
-      "team_name": null
-    }}
-  ]
-}}
-
-**SUMMARY TO ANALYZE:**
-
-{summary_text}
-
-**Final Reminders:**
-- For PLAYERS: Require AT LEAST 2 hints (name + position/team)
-- If you only see a player name without position or team, DO NOT extract it
-- Be conservative with confidence scores
-- Mark only 1-2 entities as primary (main subjects)
-- **RANK entities by importance** (1=main subject, 2=secondary, 3+=minor mentions)
-- **ORDER the response by rank** (all rank 1 entities first, then rank 2, etc.)
-- Capture all name variations when you have sufficient disambiguation info
-- For teams and games, disambiguation fields should be null
-"""
-    
     def _parse_response(self, response_text: str) -> List[ExtractedEntity]:
         """Parse LLM response into ExtractedEntity objects."""
         import json

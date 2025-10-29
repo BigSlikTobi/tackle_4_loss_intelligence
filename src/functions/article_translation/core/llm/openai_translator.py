@@ -17,7 +17,7 @@ from ..contracts.translated_article import (
     parse_translation_options,
 )
 from ..processors.structure_validator import validate_structure
-from .prompt_builder import build_prompt
+from ..prompts import build_translation_prompt, build_translation_system_prompt
 
 
 class OpenAITranslationClient:
@@ -52,14 +52,14 @@ class OpenAITranslationClient:
         options: TranslationOptions | dict | None = None,
     ) -> TranslatedArticle:
         opts = parse_translation_options(options or self._options.model_dump())
-        prompt = build_prompt(request, opts)
+        prompt = build_translation_prompt(request, opts)
         schema = self._build_schema()
 
         client = self._client.with_options(timeout=float(opts.request_timeout_seconds))
         request_kwargs: dict[str, Any] = {
             "model": opts.model,
             "input": [
-                {"role": "system", "content": self._system_prompt(request, opts)},
+                {"role": "system", "content": self._system_prompt(opts)},
                 {"role": "user", "content": prompt},
             ],
             "service_tier": opts.service_tier,
@@ -103,12 +103,8 @@ class OpenAITranslationClient:
         article = validate_structure(article, reference=request)
         return article
 
-    def _system_prompt(self, request: TranslationRequest, options: TranslationOptions) -> str:
-        return (
-            "You are a professional translator specialising in NFL coverage. "
-            "Ensure terminology stays accurate, preserve statistics, and keep the style consistent with "
-            f"{options.tone_guidance.lower()}"
-        )
+    def _system_prompt(self, options: TranslationOptions) -> str:
+        return build_translation_system_prompt(options)
 
     @staticmethod
     def _build_schema() -> dict[str, Any]:
