@@ -11,9 +11,12 @@ from openai import APIError, OpenAI
 
 from src.shared.utils.config_validator import check_config_override, ConfigurationError
 from ..contracts.team_article import GeneratedArticle, GenerationOptions, SummaryBundle, parse_generation_options
-from ..llm.prompt_builder import build_prompt
 from ..processors.article_validator import validate_article
 from ..processors.narrative_analyzer import find_central_narrative
+from ..prompts import (
+    build_team_article_prompt,
+    build_team_article_system_prompt,
+)
 
 
 class OpenAIGenerationClient:
@@ -48,7 +51,7 @@ class OpenAIGenerationClient:
         options: GenerationOptions | dict | None = None,
     ) -> GeneratedArticle:
         opts = parse_generation_options(options or self._options.model_dump())
-        prompt = build_prompt(bundle, opts)
+        prompt = build_team_article_prompt(bundle, opts)
         schema = self._build_schema()
         client = self._client.with_options(timeout=float(opts.request_timeout_seconds))
         request_kwargs = {
@@ -104,12 +107,7 @@ class OpenAIGenerationClient:
         return validate_article(article, bundle=bundle)
 
     def _system_prompt(self, bundle: SummaryBundle) -> str:
-        team_label = bundle.team_name or bundle.team_abbr
-        return (
-            "You are an experienced NFL beat writer crafting a daily update article. "
-            "Use only the provided summaries, avoid speculation, and ensure the piece reads like a cohesive story. "
-            f"Write in third person about the {team_label}."
-        )
+        return build_team_article_system_prompt(bundle)
 
     @staticmethod
     def _build_schema() -> dict[str, Any]:

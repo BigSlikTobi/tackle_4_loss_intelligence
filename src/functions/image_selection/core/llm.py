@@ -7,16 +7,13 @@ import logging
 from typing import Any, Dict
 
 from .config import LLMConfig
-
-logger = logging.getLogger(__name__)
-
-DEFAULT_PROMPT_TEMPLATE = (
-    "You turn article text into a concise web image search query. "
-    "Return only the final query with at most {max_words} words, "
-    "favoring specific nouns (teams, players, locations) and avoiding generic words.\n\n"
-    "Article text:\n{article_text}\n"
+from .prompts import (
+    IMAGE_QUERY_PROMPT_TEMPLATE,
+    IMAGE_QUERY_SYSTEM_PROMPT,
+    build_image_query_prompt,
 )
 
+logger = logging.getLogger(__name__)
 
 class LLMClient:
     """Base class for provider specific LLM clients."""
@@ -24,13 +21,13 @@ class LLMClient:
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
         if not self.config.prompt_template:
-            self.config.prompt_template = DEFAULT_PROMPT_TEMPLATE
+            self.config.prompt_template = IMAGE_QUERY_PROMPT_TEMPLATE
 
     def _build_prompt(self, article_text: str) -> str:
-        truncated = article_text[:2000]
-        return self.config.prompt_template.format(
-            article_text=truncated,
+        return build_image_query_prompt(
+            article_text,
             max_words=self.config.max_query_words,
+            template=self.config.prompt_template,
         )
 
     async def generate_query(self, article_text: str) -> str:
@@ -120,10 +117,7 @@ class OpenAILLMClient(LLMClient):
                 messages=[
                     {
                         "role": "system",
-                        "content": (
-                            "You produce short web image search queries. "
-                            "Return only the query string."
-                        ),
+                        "content": IMAGE_QUERY_SYSTEM_PROMPT,
                     },
                     {"role": "user", "content": prompt},
                 ],

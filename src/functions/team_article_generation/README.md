@@ -256,7 +256,7 @@ team_article_generation/
 │   │   └── team_article.py           # Data models
 │   ├── llm/
 │   │   ├── openai_client.py          # OpenAI API client
-│   │   └── prompt_builder.py         # Dynamic prompt construction
+│   │   └── prompts.py               # Prompt templates and builders
 │   └── processors/
 │       ├── narrative_analyzer.py     # Theme detection
 │       └── article_validator.py      # Output validation

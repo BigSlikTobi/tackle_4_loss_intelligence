@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import openai
 from openai import OpenAIError, RateLimitError, APITimeoutError
 
+from ..prompts import build_topic_extraction_prompt
+
 logger = logging.getLogger(__name__)
 
 TOPIC_CATEGORIES: List[str] = [
@@ -239,78 +241,7 @@ class TopicExtractor:
     
     def _build_extraction_prompt(self, summary_text: str, max_topics: int) -> str:
         """Build the prompt for topic extraction."""
-        return f"""You are an expert NFL analyst specialized in topic extraction. Classify the key NFL themes from this story summary using the STANDARDIZED topic categories below.
-
-**Allowed Topic Categories (return the EXACT category names):**
-1. Quarterback Performance & Analysis
-2. Running Back & Rushing Game
-3. Wide Receiver & Passing Game
-4. Defense & Turnovers
-5. Coaching & Play Calling
-6. Injuries & Player Health
-7. Team Performance & Trends
-8. Season Outlook & Predictions
-9. Rookies & Emerging Players
-10. Draft & College Prospects
-11. Trades, Signings & Roster Moves
-12. Contracts & Cap Management
-13. Game Analysis & Highlights
-14. Statistics & Rankings
-15. Fantasy Football Impact
-16. Offseason & Training Camp
-17. Special Teams & Kicking Game
-18. Refereeing & Rules
-19. Player Profiles & Interviews
-20. Team Culture & Leadership
-21. League News & Administration
-22. Off-Field & Lifestyle
-23. Media & Fan Reactions
-
-**Guidelines:**
-- Return only categories from the list above. Do NOT invent new categories.
-- If multiple categories apply, include each as a separate topic ranked by importance.
-- Provide at most {max_topics} categories, ordered by rank.
-- Avoid player or team names (handled separately as entities).
-- Keep confidence between 0 and 1 with two decimal precision.
-
-**RANKING SYSTEM:**
-- Rank 1: Primary topic(s) - the main theme/focus of the story
-- Rank 2: Secondary topics - important supporting themes
-- Rank 3+: Minor topics - mentioned but not central
-
-Return in JSON format, **ORDERED BY RANK** (rank 1 first, then 2, then 3, etc.):
-
-{{
-  "topics": [
-    {{
-      "topic": "quarterback performance & analysis",
-      "confidence": 0.95,
-      "rank": 1
-    }},
-    {{
-      "topic": "injuries & player health",
-      "confidence": 0.90,
-      "rank": 1
-    }},
-    {{
-      "topic": "team performance & trends",
-      "confidence": 0.85,
-      "rank": 2
-    }}
-  ]
-}}
-
-**SUMMARY TO ANALYZE:**
-
-{summary_text}
-
-Remember:
-- Be conservative with confidence scores
-- Topics should be reusable across many stories
-- Think about what users would search for
-- **RANK by importance** (1=main, 2=secondary, 3+=minor)
-- **ORDER response by rank** (all rank 1 first, then rank 2, etc.)
-"""
+        return build_topic_extraction_prompt(summary_text, max_topics)
     
     def _parse_response(self, response_text: str) -> List[ExtractedTopic]:
         """Parse LLM response into ExtractedTopic objects."""

@@ -7,7 +7,7 @@ FUNCTION_NAME="team-article-generation"
 REGION="us-central1"
 RUNTIME="python312"
 ENTRY_POINT="team_article_generation_handler"
-MEMORY="1024MB"
+MEMORY="2048MB"
 TIMEOUT="540s"
 
 GREEN='\033[0;32m'
@@ -57,6 +57,7 @@ cat > main.py <<'EOF'
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -69,20 +70,33 @@ if str(project_root) not in sys.path:
 
 from src.functions.team_article_generation.functions.main import handle_request
 
+logger = logging.getLogger(__name__)
+
 
 def team_article_generation_handler(request: flask.Request) -> flask.Response:
     if request.method == "OPTIONS":
         return _cors_response({}, status=204)
 
-    payload: Dict[str, Any] = request.get_json(silent=True) or {}
-    result = handle_request(payload)
-    return _cors_response(result)
+    if request.method != "POST":
+        return _cors_response({"status": "error", "message": "Method not allowed. Use POST."}, status=405)
+
+    try:
+        payload: Dict[str, Any] = request.get_json(silent=True) or {}
+        result = handle_request(payload)
+        status_code = 200 if result.get("status") == "success" else 400
+        return _cors_response(result, status=status_code)
+    except Exception as exc:
+        logger.exception("Unexpected error in team article generation handler")
+        return _cors_response(
+            {"status": "error", "message": f"Internal error: {exc}"},
+            status=500
+        )
 
 
 def _cors_response(body: Dict[str, Any] | list[Any], status: int = 200) -> flask.Response:
     response = flask.make_response(json.dumps(body, ensure_ascii=False), status)
     headers = response.headers
-    headers["Content-Type"] = "application/json"
+    headers["Content-Type"] = "application/json; charset=utf-8"
     headers["Access-Control-Allow-Origin"] = "*"
     headers["Access-Control-Allow-Methods"] = "POST,OPTIONS"
     headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
@@ -94,8 +108,8 @@ cat > requirements.txt <<'EOF'
 functions-framework==3.*
 flask==3.*
 python-dotenv>=1.0.0
-openai>=1.51
-pydantic>=2.9
+openai>=1.51.0
+pydantic>=2.9.0
 EOF
 
 info "Deploying Cloud Function"
