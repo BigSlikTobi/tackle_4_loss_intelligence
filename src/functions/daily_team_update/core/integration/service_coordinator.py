@@ -222,6 +222,19 @@ class ServiceCoordinator:
             }
         
         response = self._post_json("article_generation", endpoint.url, payload, endpoint.build_headers(), endpoint.timeout_seconds)
+
+        # Some deployments wrap upstream failures in a 200 with a status payload; surface these cleanly.
+        if isinstance(response, dict):
+            status = response.get("status")
+            if status and status.lower() != "success":
+                message = response.get("message") or "Article generation service returned an error"
+                # Treat non-success status as retryable unless explicitly marked otherwise.
+                raise ServiceInvocationError(
+                    "article_generation",
+                    message,
+                    retryable=True,
+                )
+
         article = response.get("article") or response
         if not isinstance(article, dict):
             raise ServiceInvocationError("article_generation", "Invalid article payload returned")
@@ -241,6 +254,14 @@ class ServiceCoordinator:
         except Exception as exc:  # noqa: BLE001
             raise ServiceInvocationError("article_generation", f"Malformed article response: {exc}") from exc
         if not generated.headline or not generated.introduction_paragraph or not generated.content:
+            logger.debug(
+                "Article generation missing required fields for %s: payload=%s normalised_headline=%r normalised_intro=%r paragraphs=%d",
+                team.abbreviation,
+                article,
+                generated.headline,
+                generated.introduction_paragraph,
+                len(generated.content),
+            )
             raise ServiceInvocationError("article_generation", "Article response missing required fields")
         return generated
 
