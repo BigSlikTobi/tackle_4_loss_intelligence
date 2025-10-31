@@ -46,7 +46,7 @@ class ServiceEndpointConfig(BaseModel):
     """HTTP endpoint definition for an external service call."""
 
     url: HttpUrl
-    timeout_seconds: int = Field(default=90, ge=5, le=300)
+    timeout_seconds: int = Field(default=90, ge=5, le=600)
     api_key: Optional[str] = Field(
         default=None,
         description="Optional API key sent via X-API-Key header",
