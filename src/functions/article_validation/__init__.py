@@ -1,0 +1,1 @@
+"""Article validation function module."""
