@@ -1,0 +1,10 @@
+{
+  "article": {
+    "headline": "Test Article",
+    "content": "This is a minimal test article to verify basic validation functionality."
+  },
+  "article_type": "team_article",
+  "llm": {
+    "api_key": "YOUR_GEMINI_API_KEY"
+  }
+}
