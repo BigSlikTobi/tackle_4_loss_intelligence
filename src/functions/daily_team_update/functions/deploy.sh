@@ -55,8 +55,25 @@ info "Deploying to project: ${PROJECT_ID} (account: ${ACTIVE_ACCOUNT})"
 
 cd "$PROJECT_ROOT"
 
+# Create temporary deployment directory
+TEMP_DEPLOY_DIR=$(mktemp -d -t daily-team-update-deploy.XXXXXX)
+info "Created temporary deployment directory: $TEMP_DEPLOY_DIR"
+
+# Ensure cleanup happens even if deployment fails
+cleanup() {
+  if [ -d "$TEMP_DEPLOY_DIR" ]; then
+    info "Cleaning up temporary deployment directory..."
+    rm -rf "$TEMP_DEPLOY_DIR"
+  fi
+}
+trap cleanup EXIT
+
+# Copy entire src/ directory to temp location
+info "Copying source files to temporary directory..."
+cp -r src "$TEMP_DEPLOY_DIR/"
+
 info "Generating temporary deployment entry point"
-cat > main.py <<'EOF'
+cat > "$TEMP_DEPLOY_DIR/main.py" <<'EOF'
 """Deployment wrapper for the daily team update Cloud Function."""
 
 from __future__ import annotations
@@ -75,7 +92,7 @@ def health_check(request: flask.Request):
 EOF
 
 info "Generating temporary requirements.txt"
-cat > requirements.txt <<'EOF'
+cat > "$TEMP_DEPLOY_DIR/requirements.txt" <<'EOF'
 # Cloud Function dependencies
 functions-framework==3.*
 flask==3.*
@@ -85,7 +102,7 @@ pydantic>=2.6.0
 python-dotenv>=1.0.0
 EOF
 
-info "Deploying Cloud Function..."
+info "Deploying Cloud Function from temporary directory..."
 gcloud functions deploy "${FUNCTION_NAME}" \
   --gen2 \
   --region="${REGION}" \
@@ -95,12 +112,11 @@ gcloud functions deploy "${FUNCTION_NAME}" \
   --allow-unauthenticated \
   --memory="${MEMORY}" \
   --timeout="${TIMEOUT}" \
-  --source=. \
+  --source="$TEMP_DEPLOY_DIR" \
   --set-env-vars="LOG_LEVEL=INFO" \
   --clear-secrets
 
-info "Cleaning up temporary files"
-rm -f main.py requirements.txt
+# Cleanup handled by trap
 
 info "Deployment complete"
 

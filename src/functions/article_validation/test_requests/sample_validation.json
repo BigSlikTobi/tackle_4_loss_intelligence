@@ -1,0 +1,42 @@
+{
+  "article": {
+    "headline": "Kansas City Chiefs Rally for Victory Against Raiders",
+    "sub_header": "Mahomes leads comeback in thrilling divisional matchup",
+    "introduction_paragraph": "The Kansas City Chiefs secured a dramatic 31-28 victory over the Las Vegas Raiders on Sunday, with Patrick Mahomes orchestrating a fourth-quarter comeback at Arrowhead Stadium.",
+    "content": [
+      "Patrick Mahomes threw for 348 yards and three touchdowns, including the game-winning 25-yard strike to Travis Kelce with 1:47 remaining in the fourth quarter. The victory keeps the Chiefs atop the AFC West with a 9-3 record.",
+      "The Raiders had taken a 28-24 lead early in the fourth quarter on a touchdown run by Josh Jacobs, but the Chiefs defense stiffened when it mattered most. Defensive tackle Chris Jones recorded two sacks in the final period.",
+      "Travis Kelce finished with eight receptions for 115 yards and two touchdowns, continuing his stellar season. The tight end now has 842 receiving yards on the year, putting him on pace for another 1,000-yard season.",
+      "Head coach Andy Reid praised his team's resilience after the game. The Chiefs will face the Buffalo Bills next Sunday in what could be a playoff preview."
+    ]
+  },
+  "article_type": "team_article",
+  "team_context": {
+    "team_id": "KC",
+    "team_name": "Kansas City Chiefs",
+    "season": 2024,
+    "week": 13
+  },
+  "source_summaries": [
+    "Patrick Mahomes threw for 348 yards and 3 TDs as the Chiefs beat the Raiders 31-28",
+    "Travis Kelce caught 8 passes for 115 yards and 2 TDs including the game-winner",
+    "Chris Jones had 2 sacks in the fourth quarter to help seal the victory",
+    "Chiefs improve to 9-3 with the win, maintaining first place in AFC West"
+  ],
+  "llm": {
+    "api_key": "YOUR_GEMINI_API_KEY",
+    "model": "gemini-2.5-flash-lite",
+    "enable_web_search": true,
+    "timeout_seconds": 60
+  },
+  "validation_config": {
+    "enable_factual": true,
+    "enable_contextual": true,
+    "enable_quality": true,
+    "factual_threshold": 0.7,
+    "contextual_threshold": 0.7,
+    "quality_threshold": 0.7,
+    "confidence_threshold": 0.8,
+    "timeout_seconds": 90
+  }
+}

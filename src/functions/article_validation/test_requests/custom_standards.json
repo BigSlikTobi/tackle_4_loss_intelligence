@@ -1,0 +1,51 @@
+{
+  "article": {
+    "headline": "Custom Standards Test",
+    "content": "Testing article with custom quality standards."
+  },
+  "article_type": "team_article",
+  "quality_standards": {
+    "article_type": "team_article",
+    "version": "1.0",
+    "quality_rules": [
+      {
+        "rule_id": "tone",
+        "description": "Article should maintain professional AP-style tone",
+        "weight": 0.3,
+        "validation_prompt": "Does this article maintain a professional, AP-style journalistic tone without sensationalism?"
+      },
+      {
+        "rule_id": "team_focus",
+        "description": "Content must be team-focused without excessive opponent coverage",
+        "weight": 0.3,
+        "validation_prompt": "Is this article primarily focused on the specified team rather than their opponents?"
+      },
+      {
+        "rule_id": "no_speculation",
+        "description": "No speculation about future events or outcomes",
+        "weight": 0.2,
+        "validation_prompt": "Does this article avoid speculation about future games, playoff scenarios, or potential outcomes?"
+      },
+      {
+        "rule_id": "recent_focus",
+        "description": "Focus on recent developments and current season",
+        "weight": 0.2,
+        "validation_prompt": "Does this article focus on recent games and current season developments rather than historical comparisons?"
+      }
+    ],
+    "contextual_requirements": {
+      "team_mention_required": true,
+      "player_team_verification": true,
+      "event_team_verification": true
+    },
+    "factual_verification": {
+      "verify_statistics": true,
+      "verify_game_results": true,
+      "verify_player_names": true,
+      "verify_roster_info": true
+    }
+  },
+  "llm": {
+    "api_key": "YOUR_GEMINI_API_KEY"
+  }
+}

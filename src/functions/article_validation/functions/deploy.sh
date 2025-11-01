@@ -1,15 +1,15 @@
 #!/bin/bash
-# Deployment script for the image selection Cloud Function
+# Deployment script for the article validation Cloud Function
 
 set -e
 
 # Configuration
-FUNCTION_NAME="image-selection"
+FUNCTION_NAME="article-validation"
 REGION="us-central1"
 RUNTIME="python312"
-ENTRY_POINT="select_article_images"
-MEMORY="1024MB"
-TIMEOUT="540s"
+ENTRY_POINT="validate_article"
+MEMORY="512MB"
+TIMEOUT="90s"
 
 # Output colors
 RED='\033[0;31m'
@@ -22,7 +22,7 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 echo ""
-info "Deploying image selection Cloud Function..."
+info "Deploying article validation Cloud Function..."
 echo ""
 info "Configuration:"
 echo "  Function: $FUNCTION_NAME"
@@ -57,7 +57,7 @@ echo ""
 info "Deployment will include the entire src/ tree for proper imports"
 info "Runtime credentials are supplied in each request payload (no Secret Manager entries required)"
 
-# Move to project root (functions -> image_selection -> functions -> src -> root)
+# Move to project root (functions -> article_validation -> functions -> src -> root)
 cd ../../../..
 
 info "Deploying from: $(pwd)"
@@ -68,7 +68,7 @@ if [ ! -d "src" ]; then
 fi
 
 # Create temporary deployment directory
-TEMP_DEPLOY_DIR=$(mktemp -d -t image-selection-deploy.XXXXXX)
+TEMP_DEPLOY_DIR=$(mktemp -d -t article-validation-deploy.XXXXXX)
 info "Created temporary deployment directory: $TEMP_DEPLOY_DIR"
 
 # Ensure cleanup happens even if deployment fails
@@ -86,20 +86,20 @@ cp -r src "$TEMP_DEPLOY_DIR/"
 
 info "Creating deployment entry point..."
 cat > "$TEMP_DEPLOY_DIR/main.py" <<'EOF'
-"""Deployment entry point for image_selection Cloud Function."""
+"""Deployment entry point for article_validation Cloud Function."""
 
 from __future__ import annotations
 
 import flask
 
-from src.functions.image_selection.functions.main import (
-    image_selection_handler,
+from src.functions.article_validation.functions.main import (
+    article_validation_handler,
     health_check_handler,
 )
 
 
-def select_article_images(request: flask.Request):
-    return image_selection_handler(request)
+def validate_article(request: flask.Request):
+    return article_validation_handler(request)
 
 
 def health_check(request: flask.Request):
@@ -116,11 +116,12 @@ flask==3.*
 # Service dependencies
 aiohttp>=3.9.0
 certifi>=2023.7.22
-duckduckgo-search>=4.4.3
 supabase>=2.0.0
 google-generativeai>=0.8.0
-openai>=1.12.0
 python-dotenv>=1.0.0
+
+# Retry and backoff
+tenacity>=8.2.0
 EOF
 info "Requirements file created"
 echo ""
@@ -151,7 +152,37 @@ if [ -n "$CALL_URL" ]; then
   echo "Test with:"
   echo "curl -X POST ${CALL_URL} \\
     -H 'Content-Type: application/json' \\
-    -d '{\"article_text\": \"Your article text\", \"num_images\": 2}'"
+    -d '{
+      \"article\": {
+        \"headline\": \"Test Article\",
+        \"content\": \"This is a test article.\"
+      },
+      \"article_type\": \"team_article\",
+      \"llm\": {
+        \"api_key\": \"YOUR_GEMINI_API_KEY\"
+      }
+    }'"
 else
   warn "Unable to fetch function URL automatically."
 fi
+echo ""
+info "Note: Credentials should be provided in request payload."
+info "Example payload structure:"
+echo '{
+  "article": {...},
+  "article_type": "team_article",
+  "llm": {
+    "api_key": "your-gemini-api-key",
+    "model": "gemini-2.5-flash-lite",
+    "enable_web_search": true
+  },
+  "validation_config": {
+    "enable_factual": true,
+    "enable_contextual": true,
+    "enable_quality": true
+  },
+  "supabase": {
+    "url": "your-supabase-url",
+    "key": "your-supabase-key"
+  }
+}'

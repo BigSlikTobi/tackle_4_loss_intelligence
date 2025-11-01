@@ -84,9 +84,26 @@ else
     ENV_FLAG=""
 fi
 
+# Create temporary deployment directory
+TEMP_DEPLOY_DIR=$(mktemp -d -t data-loading-deploy.XXXXXX)
+info "Created temporary deployment directory: $TEMP_DEPLOY_DIR"
+
+# Ensure cleanup happens even if deployment fails
+cleanup() {
+  if [ -d "$TEMP_DEPLOY_DIR" ]; then
+    info "Cleaning up temporary deployment directory..."
+    rm -rf "$TEMP_DEPLOY_DIR"
+  fi
+}
+trap cleanup EXIT
+
+# Copy entire src/ directory to temp location
+info "Copying source files to temporary directory..."
+cp -r src "$TEMP_DEPLOY_DIR/"
+
 # Create temporary main.py in root that imports from the correct location
 info "Creating deployment entry point..."
-cat > main.py << 'EOF'
+cat > "$TEMP_DEPLOY_DIR/main.py" << 'EOF'
 """Deployment entry point for data_loading Cloud Function."""
 
 from __future__ import annotations
@@ -152,20 +169,20 @@ def _error_response(message: str, status: int) -> flask.Response:
     return _cors_response({"error": message}, status=status)
 EOF
 
-# Copy requirements.txt to root for deployment
-info "Copying requirements.txt to root..."
-cp src/functions/data_loading/functions/requirements.txt requirements.txt
+# Copy requirements.txt to temp deployment directory
+info "Copying requirements.txt to deployment directory..."
+cp src/functions/data_loading/functions/requirements.txt "$TEMP_DEPLOY_DIR/requirements.txt"
 
-# Deploy the function
+# Deploy the function from temporary directory
 info "Starting deployment..."
-info "Entry point: package_handler (via root main.py)"
-info "Source: . (includes all of src/)"
+info "Entry point: package_handler (via main.py)"
+info "Source: $TEMP_DEPLOY_DIR (includes all of src/)"
 
 gcloud functions deploy "$FUNCTION_NAME" \
     --gen2 \
     --runtime="$RUNTIME" \
     --region="$REGION" \
-    --source=. \
+    --source="$TEMP_DEPLOY_DIR" \
     --entry-point="$ENTRY_POINT" \
     --trigger-http \
     --allow-unauthenticated \
@@ -177,9 +194,7 @@ gcloud functions deploy "$FUNCTION_NAME" \
 
 DEPLOY_STATUS=$?
 
-# Clean up temporary files
-info "Cleaning up temporary deployment files..."
-rm -f main.py requirements.txt
+# Cleanup handled by trap
 
 if [ $DEPLOY_STATUS -eq 0 ]; then
     info "Deployment successful!"

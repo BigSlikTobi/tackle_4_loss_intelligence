@@ -91,8 +91,25 @@ fi
 
 LOCAL_PLAYWRIGHT_DIR="${PROJECT_ROOT}/${PLAYWRIGHT_SUBPATH}"
 
+# Create temporary deployment directory
+TEMP_DEPLOY_DIR=$(mktemp -d -t url-content-extraction-deploy.XXXXXX)
+info "Created temporary deployment directory: $TEMP_DEPLOY_DIR"
+
+# Set up cleanup trap
+cleanup() {
+  if [ -n "$TEMP_DEPLOY_DIR" ] && [ -d "$TEMP_DEPLOY_DIR" ]; then
+    info "Cleaning up temporary directory: $TEMP_DEPLOY_DIR"
+    rm -rf "$TEMP_DEPLOY_DIR"
+  fi
+}
+trap cleanup EXIT
+
+# Copy source code to temporary directory
+info "Copying source code to temporary directory"
+cp -r src "$TEMP_DEPLOY_DIR/"
+
 info "Generating deployment entry point wrapper"
-cat > main.py <<'EOF'
+cat > "$TEMP_DEPLOY_DIR/main.py" <<'EOF'
 """Deployment wrapper for the URL content extraction Cloud Function."""
 
 from __future__ import annotations
@@ -131,7 +148,7 @@ def _cors_response(body: Dict[str, Any] | list[Any], status: int = 200) -> flask
 EOF
 
 info "Creating requirements.txt"
-cat > requirements.txt <<'EOF'
+cat > "$TEMP_DEPLOY_DIR/requirements.txt" <<'EOF'
 functions-framework==3.*
 flask==3.*
 python-dotenv>=1.0.0
@@ -198,12 +215,11 @@ gcloud functions deploy "${FUNCTION_NAME}" \
   --allow-unauthenticated \
   --memory="${MEMORY}" \
   --timeout="${TIMEOUT}" \
-  --source=. \
+  --source="$TEMP_DEPLOY_DIR" \
   --set-env-vars="LOG_LEVEL=INFO,PLAYWRIGHT_BROWSERS_PATH=${RUNTIME_PLAYWRIGHT_PATH}" \
   --clear-secrets
 
-info "Cleaning up temporary files"
-rm -f main.py requirements.txt
+# Cleanup handled by trap
 
 info "Deployment complete"
 

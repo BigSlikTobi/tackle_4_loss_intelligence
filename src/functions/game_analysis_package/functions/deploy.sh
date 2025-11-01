@@ -81,9 +81,26 @@ if [ ! -d "src" ]; then
     exit 1
 fi
 
+# Create temporary deployment directory
+TEMP_DEPLOY_DIR=$(mktemp -d -t game-analysis-package-deploy.XXXXXX)
+info "Created temporary deployment directory: $TEMP_DEPLOY_DIR"
+
+# Ensure cleanup happens even if deployment fails
+cleanup() {
+  if [ -d "$TEMP_DEPLOY_DIR" ]; then
+    info "Cleaning up temporary deployment directory..."
+    rm -rf "$TEMP_DEPLOY_DIR"
+  fi
+}
+trap cleanup EXIT
+
+# Copy entire src/ directory to temp location
+info "Copying source files to temporary directory..."
+cp -r src "$TEMP_DEPLOY_DIR/"
+
 # Create temporary main.py in root that imports from the correct location
 info "Creating deployment entry point..."
-cat > main.py << 'EOF'
+cat > "$TEMP_DEPLOY_DIR/main.py" << 'EOF'
 """Deployment entry point for game_analysis_package Cloud Function."""
 
 import json
@@ -262,7 +279,7 @@ info "Entry point created"
 
 # Create temporary requirements.txt that includes all dependencies
 info "Creating requirements.txt..."
-cat > requirements.txt << 'EOF'
+cat > "$TEMP_DEPLOY_DIR/requirements.txt" << 'EOF'
 # Cloud Function Dependencies
 functions-framework==3.*
 flask==3.*
@@ -292,8 +309,8 @@ EOF
 info "Requirements file created"
 echo ""
 
-# Deploy the function
-info "Deploying function..."
+# Deploy the function from temporary directory
+info "Deploying function from temporary directory..."
 gcloud functions deploy $FUNCTION_NAME \
     --gen2 \
     --region=$REGION \
@@ -303,13 +320,11 @@ gcloud functions deploy $FUNCTION_NAME \
     --allow-unauthenticated \
     --memory=$MEMORY \
     --timeout=$TIMEOUT \
-    --source=. \
+    --source="$TEMP_DEPLOY_DIR" \
     --clear-env-vars \
     --clear-secrets
 
-# Cleanup temporary files
-info "Cleaning up temporary files..."
-rm -f main.py requirements.txt
+# Cleanup handled by trap
 
 echo ""
 info "✓ Deployment complete!"
