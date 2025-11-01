@@ -1,0 +1,100 @@
+{
+  "article_type": "team_article",
+  "version": "1.0",
+  "metadata": {
+    "owner": "article_validation",
+    "description": "Quality and contextual standards for validating generated daily team updates."
+  },
+  "quality_rules": [
+    {
+      "identifier": "ap_style_voice",
+      "description": "Article maintains an objective AP-style newsroom tone with third-person narration and professional word choice.",
+      "weight": 1.0,
+      "severity": "warning",
+      "prompt": "Determine whether the article uses an impartial AP-style tone. Flag if it slips into first-person, fan-perspective enthusiasm, or promotional language.",
+      "metadata": {
+        "suggestion": "Rewrite affected sections into a neutral AP-style voice that preserves journalistic objectivity."
+      }
+    },
+    {
+      "identifier": "avoid_speculation",
+      "description": "Article avoids speculation, rumors, betting talk, or unfounded predictions; every claim is grounded in verifiable information from the provided summaries.",
+      "weight": 1.2,
+      "severity": "critical",
+      "prompt": "Check the article for speculative language, gambling angles, or conjecture. Mark failure if claims lack support in the summaries or verifiable reporting.",
+      "metadata": {
+        "suggestion": "Remove speculative or gambling-focused language and replace it with confirmed information or sourced quotes."
+      }
+    },
+    {
+      "identifier": "team_focus",
+      "description": "Article keeps the spotlight on the requested team; any league-wide context directly supports the team storyline.",
+      "weight": 1.2,
+      "severity": "critical",
+      "prompt": "Evaluate whether the article stays focused on the requested team. Fail the rule if large portions discuss other teams or league topics without tying back to the focus team.",
+      "metadata": {
+        "suggestion": "Refocus paragraphs to center on the requested team and trim unrelated league commentary."
+      }
+    },
+    {
+      "identifier": "recent_storyline",
+      "description": "Headline, subheader, and lead paragraph clearly communicate a concrete development from the past few days that matters to the team.",
+      "weight": 1.0,
+      "severity": "warning",
+      "prompt": "Review the headline, subheader, and introduction to confirm they highlight a timely development (within the past week) that directly affects the team.",
+      "metadata": {
+        "suggestion": "Rework the opening to emphasize a specific, current development that impacts the team this week."
+      }
+    },
+    {
+      "identifier": "structure_completeness",
+      "description": "Article returns all required JSON fields with substantive prose: headline, sub_header, introduction_paragraph, and a paragraph list with 3-6 fully written entries.",
+      "weight": 0.8,
+      "severity": "warning",
+      "prompt": "Ensure every required JSON field contains meaningful prose. Flag failures for placeholders, empty strings, or fewer than three body paragraphs.",
+      "metadata": {
+        "suggestion": "Fill missing sections with complete paragraphs and confirm at least three substantive body paragraphs are present."
+      }
+    }
+  ],
+  "contextual_requirements": {
+    "roster_alignment": {
+      "identifier": "roster_alignment",
+      "description": "Players mentioned are active members of the focus team (or their status with the team is clearly explained).",
+      "severity": "warning",
+      "enabled": true,
+      "metadata": {
+        "hint": "Cross-check player names against the current roster or note if they recently departed.",
+        "suggestion": "Clarify player-team relationships or remove unrelated player mentions."
+      }
+    },
+    "event_specificity": {
+      "identifier": "event_specificity",
+      "description": "Key events or quotes tie back to the focus team's recent activities such as injuries, transactions, or coach statements.",
+      "severity": "warning",
+      "enabled": true,
+      "metadata": {
+        "hint": "Highlight how each event affects the focus team rather than the league at large.",
+        "suggestion": "Add explicit links between the reported event and its impact on the team."
+      }
+    }
+  },
+  "factual_verification": {
+    "roster_updates_confirmed": {
+      "identifier": "roster_updates_confirmed",
+      "description": "Roster moves, injuries, or depth-chart changes are backed by cited reports or official statements.",
+      "enabled": true,
+      "metadata": {
+        "focus": "Verify transactions, injuries, and lineup notes against trusted sources."
+      }
+    },
+    "quote_attribution": {
+      "identifier": "quote_attribution",
+      "description": "Quotes include accurate speakers and context drawn from reputable coverage.",
+      "enabled": true,
+      "metadata": {
+        "focus": "Ensure every quoted statement has an identifiable, appropriate source."
+      }
+    }
+  }
+}
