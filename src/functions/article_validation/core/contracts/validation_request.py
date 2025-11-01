@@ -109,7 +109,7 @@ class ValidationRequest:
             if callable(validate):
                 validate()
             else:
-                _LOGGER.debug("%s provided without explicit validate()" , name)
+                _LOGGER.debug("%s provided without explicit validate()", name)
 
     def require_article_fields(self, required_fields: Iterable[str]) -> None:
         """Ensure the article mapping contains the supplied fields."""
