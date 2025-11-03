@@ -105,6 +105,8 @@ class TeamProcessingResult(BaseModel):
         if duration < 0:
             return
         previous = self.durations.get(stage, 0.0)
+        # Note: durations are accumulated for each stage to account for multiple executions
+        # (e.g., retries, validation attempts). This ensures total time spent per stage is tracked.
         self.durations[stage] = round(previous + duration, 4)
 
     def add_error(self, detail: FailureDetail) -> None:
