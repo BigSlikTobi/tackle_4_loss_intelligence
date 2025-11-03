@@ -613,6 +613,7 @@ class ServiceCoordinator:
             return True
         if lowered in {"0", "false", "no", "off"}:
             return False
+        logger.warning(f"Unrecognized boolean string: %r (expected one of 'true', 'false', etc.)", value)
         return None
 
     def _build_validation_llm_block(self) -> Optional[Dict[str, object]]:
