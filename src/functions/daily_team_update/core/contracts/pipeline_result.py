@@ -62,6 +62,23 @@ class TeamProcessingResult(BaseModel):
         description="Elapsed time (seconds) recorded per pipeline stage",
     )
     errors: List[FailureDetail] = Field(default_factory=list)
+    validation_decision: Optional[str] = Field(
+        default=None,
+        description="Final decision returned by article validation stage",
+    )
+    validation_attempts: int = Field(
+        default=0,
+        ge=0,
+        description="Number of validation attempts executed",
+    )
+    validation_rejection_reasons: List[str] = Field(
+        default_factory=list,
+        description="Reasons returned when validation rejected the article",
+    )
+    validation_review_reasons: List[str] = Field(
+        default_factory=list,
+        description="Review reasons returned by validation",
+    )
     
     # Cache for intermediate results to enable retry without re-extraction
     cached_urls: List[dict] = Field(
@@ -87,7 +104,8 @@ class TeamProcessingResult(BaseModel):
 
         if duration < 0:
             return
-        self.durations[stage] = round(duration, 4)
+        previous = self.durations.get(stage, 0.0)
+        self.durations[stage] = round(previous + duration, 4)
 
     def add_error(self, detail: FailureDetail) -> None:
         """Attach a failure detail to the result."""

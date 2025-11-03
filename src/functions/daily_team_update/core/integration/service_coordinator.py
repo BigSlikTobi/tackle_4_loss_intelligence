@@ -72,6 +72,18 @@ class SelectedImage:
     id: Optional[str] = None
 
 
+@dataclass(slots=True)
+class ArticleValidationReport:
+    """Structured response returned by the article validation service."""
+
+    status: str
+    decision: str
+    is_releasable: bool
+    rejection_reasons: List[str]
+    review_reasons: List[str]
+    processing_time_ms: Optional[int] = None
+
+
 class ServiceInvocationError(RuntimeError):
     """Raised when a downstream service call fails fatally."""
 
@@ -196,10 +208,18 @@ class ServiceCoordinator:
             summaries.append(ArticleSummary(source_url=source_url, content=content))
         return summaries, failures
 
+    def has_article_validation(self) -> bool:
+        """Return True when article validation endpoint has been configured."""
+
+        return self._config.article_validation is not None
+
     def generate_article(
         self,
         team: TeamRecord,
         summaries: Sequence[ArticleSummary],
+        *,
+        feedback: Optional[Sequence[str]] = None,
+        previous_article: Optional[GeneratedArticle] = None,
     ) -> GeneratedArticle:
         endpoint = self._config.require("article_generation")
         
@@ -208,14 +228,32 @@ class ServiceCoordinator:
         if openai_api_key:
             openai_api_key = openai_api_key.strip().strip('"').strip("'")
         
-        payload = {
+        payload: Dict[str, object] = {
             "team": {
                 "abbr": team.abbreviation,
                 "name": team.name,
             },
             "summaries": [asdict(summary) for summary in summaries],
         }
-        
+
+        cleaned_feedback = [
+            str(reason).strip()
+            for reason in (feedback or [])
+            if isinstance(reason, str) and str(reason).strip()
+        ]
+        if cleaned_feedback:
+            formatted_feedback = "\n".join(f"- {reason}" for reason in cleaned_feedback)
+            narrative_focus = (
+                "Focus on the primary storyline emerging from the provided summaries while addressing the "
+                "following validation feedback. Do not repeat the cited issues and ensure all facts remain accurate.\n"
+                f"{formatted_feedback}"
+            )
+            payload["options"] = {"narrative_focus": narrative_focus}
+            payload["validation_feedback"] = cleaned_feedback
+
+        if previous_article is not None:
+            payload["previous_article"] = asdict(previous_article)
+
         # Add LLM credentials if available
         if openai_api_key:
             payload["llm"] = {
@@ -266,6 +304,117 @@ class ServiceCoordinator:
             )
             raise ServiceInvocationError("article_generation", "Article response missing required fields")
         return generated
+
+    def validate_article(
+        self,
+        *,
+        team: TeamRecord,
+        article: GeneratedArticle,
+        summaries: Sequence[ArticleSummary],
+        previous_article: Optional[GeneratedArticle] = None,
+        rejection_reasons: Optional[Sequence[str]] = None,
+    ) -> ArticleValidationReport:
+        endpoint = self._config.article_validation
+        if endpoint is None:
+            raise ServiceInvocationError(
+                "article_validation",
+                "Article validation endpoint is not configured",
+                retryable=False,
+            )
+
+        payload: Dict[str, object] = {
+            "article_type": "team_article",
+            "article": {
+                "headline": article.headline,
+                "sub_header": article.sub_header,
+                "introduction_paragraph": article.introduction_paragraph,
+                "content": article.content,
+            },
+            "team_context": {
+                "team_id": team.identifier,
+                "team_abbr": team.abbreviation,
+                "team_name": team.name,
+            },
+        }
+
+        summaries_text = [summary.content for summary in summaries if summary.content]
+        if summaries_text:
+            payload["source_summaries"] = summaries_text
+
+        if previous_article is not None:
+            payload["previous_article"] = {
+                "headline": previous_article.headline,
+                "sub_header": previous_article.sub_header,
+                "introduction_paragraph": previous_article.introduction_paragraph,
+                "content": previous_article.content,
+            }
+
+        cleaned_rejections = [
+            str(reason).strip()
+            for reason in (rejection_reasons or [])
+            if isinstance(reason, str) and str(reason).strip()
+        ]
+        if cleaned_rejections:
+            payload["validation_feedback"] = {
+                "rejection_reasons": cleaned_rejections,
+            }
+
+        llm_block = self._build_validation_llm_block()
+        if llm_block:
+            payload["llm"] = llm_block
+
+        response = self._post_json(
+            "article_validation",
+            endpoint.url,
+            payload,
+            endpoint.build_headers(),
+            endpoint.timeout_seconds,
+        )
+
+        status = str(response.get("status") or "error").lower()
+        if status == "error":
+            message = response.get("error") or response.get("message") or "Article validation failed"
+            raise ServiceInvocationError("article_validation", message, retryable=False)
+
+        decision = str(response.get("decision") or "").lower()
+        if decision not in {"release", "reject", "review_required"}:
+            raise ServiceInvocationError(
+                "article_validation",
+                f"Unexpected validation decision: {decision or 'missing'}",
+                retryable=False,
+            )
+
+        rejection_list = self._normalise_reason_list(response.get("rejection_reasons"))
+        review_list = self._normalise_reason_list(response.get("review_reasons"))
+        processing_time = response.get("processing_time_ms")
+        try:
+            processing_time_ms = int(processing_time) if processing_time is not None else None
+        except (TypeError, ValueError):
+            processing_time_ms = None
+
+        report = ArticleValidationReport(
+            status=status,
+            decision=decision,
+            is_releasable=bool(response.get("is_releasable")),
+            rejection_reasons=rejection_list,
+            review_reasons=review_list,
+            processing_time_ms=processing_time_ms,
+        )
+
+        logger.info(
+            "Article validation decision for %s: decision=%s status=%s rejection=%d review=%d",
+            team.abbreviation,
+            decision,
+            status,
+            len(rejection_list),
+            len(review_list),
+        )
+        if rejection_list:
+            logger.info("Validation rejection reasons for %s: %s", team.abbreviation, rejection_list)
+        if review_list:
+            logger.info("Validation review reasons for %s: %s", team.abbreviation, review_list)
+
+        return report
 
     def translate_article(self, article: GeneratedArticle) -> TranslatedArticle:
         endpoint = self._config.require("translation")
@@ -441,3 +590,55 @@ class ServiceCoordinator:
             }
 
         return defaults
+
+    @staticmethod
+    def _normalise_reason_list(raw: object) -> List[str]:
+        if not isinstance(raw, Iterable) or isinstance(raw, (str, bytes)):
+            return []
+        reasons: List[str] = []
+        for entry in raw:
+            if not isinstance(entry, str):
+                continue
+            cleaned = entry.strip()
+            if cleaned:
+                reasons.append(cleaned)
+        return reasons
+
+    @staticmethod
+    def _interpret_bool(value: Optional[str]) -> Optional[bool]:
+        if value is None:
+            return None
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        return None
+
+    def _build_validation_llm_block(self) -> Optional[Dict[str, object]]:
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if api_key:
+            api_key = api_key.strip().strip('"').strip("'")
+        if not api_key:
+            return None
+
+        llm_block: Dict[str, object] = {"api_key": api_key}
+        model = os.getenv("GEMINI_MODEL") or os.getenv("GOOGLE_MODEL")
+        if model:
+            llm_block["model"] = model.strip().strip('"').strip("'")
+
+        enable_web_search = self._interpret_bool(os.getenv("GEMINI_ENABLE_WEB_SEARCH"))
+        if enable_web_search is None:
+            enable_web_search = self._interpret_bool(os.getenv("GOOGLE_ENABLE_WEB_SEARCH"))
+        if enable_web_search is not None:
+            llm_block["enable_web_search"] = enable_web_search
+
+        timeout_value = os.getenv("GEMINI_TIMEOUT_SECONDS") or os.getenv("GOOGLE_TIMEOUT_SECONDS")
+        if timeout_value:
+            try:
+                llm_block["timeout_seconds"] = int(timeout_value)
+            except ValueError:
+                logger.warning(
+                    "Invalid validation timeout configured: %s", timeout_value
+                )
+        return llm_block
