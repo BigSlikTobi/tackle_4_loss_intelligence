@@ -245,7 +245,7 @@ class TeamProcessor:
                     logger.warning(
                         "Validation rejected article for %s: %s", team.abbreviation, rejection_feedback
                     )
-                    if validation_attempts >= 2:
+                    if validation_attempts >= self._config.max_validation_attempts:
                         result.add_error(
                             FailureDetail(
                                 stage="article_validation",
