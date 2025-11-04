@@ -35,6 +35,16 @@ class ArticleWriter:
             language=language,
             article=article,
         )
+        if metadata:
+            review_reasons = metadata.get("review_reasons") if isinstance(metadata, dict) else None
+            if isinstance(review_reasons, (list, tuple)):
+                cleaned_reasons = [
+                    str(reason).strip()
+                    for reason in review_reasons
+                    if isinstance(reason, str) and str(reason).strip()
+                ]
+                if cleaned_reasons:
+                    payload["review_reasons"] = cleaned_reasons
         if self._dry_run:
             return {**payload, "id": "dry-run"}
         return self._client.upsert_article(payload)

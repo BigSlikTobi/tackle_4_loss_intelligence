@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import logging
 import time
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from ..contracts.config import PipelineConfig
 from ..contracts.pipeline_result import FailureDetail, TeamProcessingResult
@@ -204,7 +204,85 @@ class TeamProcessor:
             finally:
                 result.add_stage_duration("article_generation", time.perf_counter() - stage_start)
             
-            # Stage 5: Translation - MUST succeed  
+            # Stage 5: Article Validation
+            review_reasons: List[str] = []
+            if self._service.has_article_validation():
+                validation_attempts = 0
+                previous_article: Optional[GeneratedArticle] = None
+                rejection_feedback: List[str] = []
+                while True:
+                    stage_start = time.perf_counter()
+                    try:
+                        validation_report = self._service.validate_article(
+                            team=team,
+                            article=article,
+                            summaries=summaries,
+                            previous_article=previous_article,
+                            rejection_reasons=rejection_feedback or None,
+                        )
+                    except ServiceInvocationError as exc:
+                        result.add_stage_duration("article_validation", time.perf_counter() - stage_start)
+                        logger.error("Article validation failed for %s: %s", team.abbreviation, exc)
+                        self._errors.record(team.abbreviation, exc.stage, exc, retryable=exc.retryable)
+                        result.add_error(FailureDetail(stage=exc.stage, message=str(exc), retryable=exc.retryable))
+                        result.status = "failed"
+                        return result
+                    else:
+                        result.add_stage_duration("article_validation", time.perf_counter() - stage_start)
+                    validation_attempts += 1
+                    result.validation_attempts = validation_attempts
+                    result.validation_decision = validation_report.decision
+                    result.validation_rejection_reasons = list(validation_report.rejection_reasons)
+                    result.validation_review_reasons = list(validation_report.review_reasons)
+                    review_reasons = list(validation_report.review_reasons)
+
+                    if validation_report.decision != "reject":
+                        break
+
+                    rejection_feedback = list(validation_report.rejection_reasons) or [
+                        "Article validation rejected the content without specific reasons."
+                    ]
+                    logger.warning(
+                        "Validation rejected article for %s: %s", team.abbreviation, rejection_feedback
+                    )
+                    if validation_attempts >= self._config.max_validation_attempts:
+                        result.add_error(
+                            FailureDetail(
+                                stage="article_validation",
+                                message="Article rejected by validation after retry",
+                                retryable=False,
+                            )
+                        )
+                        result.status = "failed"
+                        return result
+
+                    previous_article = article
+                    stage_start = time.perf_counter()
+                    try:
+                        article = self._service.generate_article(
+                            team,
+                            summaries,
+                            feedback=rejection_feedback,
+                            previous_article=previous_article,
+                        )
+                    except ServiceInvocationError as exc:
+                        result.add_stage_duration("article_generation", time.perf_counter() - stage_start)
+                        logger.error(
+                            "Article regeneration failed for %s after validation rejection: %s",
+                            team.abbreviation,
+                            exc,
+                        )
+                        self._errors.record(team.abbreviation, exc.stage, exc, retryable=exc.retryable)
+                        result.add_error(
+                            FailureDetail(stage=exc.stage, message=str(exc), retryable=exc.retryable)
+                        )
+                        result.mark_incomplete("Article regeneration failed after validation rejection")
+                        return result
+                    else:
+                        result.add_stage_duration("article_generation", time.perf_counter() - stage_start)
+                    continue
+
+            # Stage 6: Translation - MUST succeed
             translated = None
             stage_start = time.perf_counter()
             try:
@@ -219,7 +297,7 @@ class TeamProcessor:
             else:
                 result.add_stage_duration("translation", time.perf_counter() - stage_start)
 
-            # Stage 6: Image Selection - MUST succeed
+            # Stage 7: Image Selection - MUST succeed
             images: List[SelectedImage] = []
             if self._config.image_count > 0:
                 stage_start = time.perf_counter()
@@ -241,7 +319,7 @@ class TeamProcessor:
                 else:
                     result.add_stage_duration("image_selection", time.perf_counter() - stage_start)
 
-            # Stage 7: Persistence
+            # Stage 8: Persistence
             stage_start = time.perf_counter()
             try:
                 article_records = self._persist_outputs(
@@ -255,6 +333,7 @@ class TeamProcessor:
                         for entry in urls
                         if (entry.get("url") if isinstance(entry, dict) else entry)
                     ],
+                    review_reasons=review_reasons,
                 )
             finally:
                 result.add_stage_duration("persistence", time.perf_counter() - stage_start)
@@ -327,6 +406,7 @@ class TeamProcessor:
         summaries: Sequence[ArticleSummary],
         images: Sequence[SelectedImage],
         source_urls: Sequence[str],
+        review_reasons: Sequence[str] | None = None,
     ) -> dict:
         if self._config.dry_run:
             return {"en": "dry-run", "de": "dry-run" if translated else None}
@@ -344,6 +424,7 @@ class TeamProcessor:
             metadata={
                 "central_theme": article.central_theme,
                 "summary_urls": [summary.source_url for summary in summaries],
+                "review_reasons": list(review_reasons or []),
             },
         )
         article_id_en = article_record.get("id") if isinstance(article_record, dict) else None

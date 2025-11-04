@@ -75,6 +75,7 @@ class ServiceCoordinatorConfig(BaseModel):
     content_extraction: Optional[ServiceEndpointConfig] = None
     summarization: Optional[ServiceEndpointConfig] = None
     article_generation: Optional[ServiceEndpointConfig] = None
+    article_validation: Optional[ServiceEndpointConfig] = None
     translation: Optional[ServiceEndpointConfig] = None
     image_selection: Optional[ServiceEndpointConfig] = None
     max_parallel_requests: int = Field(default=4, ge=1, le=16)

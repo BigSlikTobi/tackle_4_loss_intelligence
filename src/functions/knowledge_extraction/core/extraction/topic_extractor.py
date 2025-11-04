@@ -251,7 +251,16 @@ class TopicExtractor:
             data = json.loads(response_text)
             topics = []
             
-            for topic_dict in data.get("topics", []):
+            # Handle both formats: {"topics": [...]} or [...]
+            if isinstance(data, list):
+                topic_list = data
+            elif isinstance(data, dict):
+                topic_list = data.get("topics", [])
+            else:
+                logger.error(f"Unexpected response format: {type(data)}")
+                return []
+            
+            for topic_dict in topic_list:
                 raw_topic = topic_dict.get("topic", "")
                 topic_text = raw_topic.strip()
                 

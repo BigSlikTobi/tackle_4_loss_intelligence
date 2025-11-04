@@ -103,6 +103,7 @@ def build_service_config(overrides: Optional[Dict[str, object]] = None) -> Servi
         content_extraction=_build_endpoint("CONTENT_EXTRACTION", overrides.get("content_extraction")),
         summarization=_build_endpoint("SUMMARIZATION", overrides.get("summarization")),
         article_generation=_build_endpoint("ARTICLE_GENERATION", overrides.get("article_generation")),
+        article_validation=_build_endpoint("ARTICLE_VALIDATION", overrides.get("article_validation")),
         translation=_build_endpoint("TRANSLATION", overrides.get("translation")),
         image_selection=_build_endpoint("IMAGE_SELECTION", overrides.get("image_selection")),
         max_parallel_requests=int_from_env("SERVICE_MAX_PARALLEL_REQUESTS", 4),
