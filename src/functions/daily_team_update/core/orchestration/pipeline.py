@@ -161,6 +161,11 @@ class Pipeline:
             if r.status == "incomplete"
         ]
         
+        failed_results = [
+            r for r in pipeline_result.results
+            if r.status == "failed"
+        ]
+
         if still_incomplete:
             logger.error(
                 "PIPELINE INCOMPLETE: %d teams still incomplete after %d retry attempts: %s",
@@ -174,6 +179,19 @@ class Pipeline:
                     incomplete.team_abbr,
                     "; ".join(e.message for e in incomplete.errors[-3:])  # Last 3 errors
                 )
+        elif failed_results:
+            logger.error(
+                "PIPELINE FAILED: %d teams failed processing: %s",
+                len(failed_results),
+                ", ".join(r.team_abbr for r in failed_results)
+            )
+            for failed in failed_results:
+                if failed.errors:
+                    logger.error(
+                        "  - %s: %s",
+                        failed.team_abbr,
+                        "; ".join(e.message for e in failed.errors[-3:])
+                    )
         else:
             logger.info("✅ All teams processed successfully")
 

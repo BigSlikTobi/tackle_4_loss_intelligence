@@ -9,13 +9,17 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple
 
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.shared.db import SupabaseConfig as SharedSupabaseConfig
 from src.shared.db import get_supabase_client
 from src.shared.utils.env import get_env, load_env
 from src.shared.utils.logging import get_logger, setup_logging
 
-from ..core.factory import request_from_payload
-from ..core.service import ArticleValidationService
+from src.functions.article_validation.core.factory import request_from_payload
+from src.functions.article_validation.core.service import ArticleValidationService
 
 LOGGER = get_logger(__name__)
 

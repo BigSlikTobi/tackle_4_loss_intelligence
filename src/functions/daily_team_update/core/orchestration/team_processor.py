@@ -225,7 +225,7 @@ class TeamProcessor:
                         logger.error("Article validation failed for %s: %s", team.abbreviation, exc)
                         self._errors.record(team.abbreviation, exc.stage, exc, retryable=exc.retryable)
                         result.add_error(FailureDetail(stage=exc.stage, message=str(exc), retryable=exc.retryable))
-                        result.mark_incomplete("Article validation failed")
+                        result.status = "failed"
                         return result
                     else:
                         result.add_stage_duration("article_validation", time.perf_counter() - stage_start)

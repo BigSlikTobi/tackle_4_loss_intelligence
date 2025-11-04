@@ -24,8 +24,8 @@ _MAX_CONTEXT_CHARS = 12000
 _JSON_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 _RETRY_DELAY_PATTERN = re.compile(r"retry in ([0-9.]+)s", re.IGNORECASE)
 _DEFAULT_TEMPERATURE = 0.1
-_MAX_OUTPUT_TOKENS = 4096  # Increased from 2048 to handle batch fact-checking with 10 claims
-_MAX_CLAIMS_PER_BATCH = 5  # Limit batch size to avoid MAX_TOKENS; each claim ~300-500 output tokens
+_MAX_OUTPUT_TOKENS = 4096
+_MAX_CLAIMS_PER_BATCH = 5
 _SUPPORTED_MODELS = frozenset()
 
 
@@ -101,8 +101,6 @@ class GeminiClient:
         context: Optional[str] = None,
         source_summaries: Optional[Sequence[str]] = None,
     ) -> ClaimVerificationResult:
-        """Verify a single factual claim using the batch helper."""
-
         results = await self.verify_claims_batch(
             [
                 {
@@ -125,8 +123,6 @@ class GeminiClient:
         shared_context: Optional[str] = None,
         source_summaries: Optional[Sequence[str]] = None,
     ) -> List[ClaimVerificationResult]:
-        """Verify multiple claims, splitting into smaller batches if needed."""
-
         if not claims:
             return []
 
@@ -135,7 +131,6 @@ class GeminiClient:
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("Each claim must include non-empty `text`.")
 
-        # If claims exceed max batch size, split into chunks
         if len(claims) > _MAX_CLAIMS_PER_BATCH:
             self._logger.info(f"Splitting {len(claims)} claims into batches of {_MAX_CLAIMS_PER_BATCH}")
             all_results = []
@@ -145,8 +140,7 @@ class GeminiClient:
                 batch_results = await self._verify_single_batch(batch, shared_context, source_summaries)
                 all_results.extend(batch_results)
             return all_results
-        
-        # Single batch processing
+
         return await self._verify_single_batch(claims, shared_context, source_summaries)
 
     async def _verify_single_batch(
@@ -155,13 +149,9 @@ class GeminiClient:
         shared_context: Optional[str],
         source_summaries: Optional[Sequence[str]],
     ) -> List[ClaimVerificationResult]:
-        """Verify a single batch of claims (internal helper)."""
         prompt = self._build_claims_batch_prompt(claims, shared_context, source_summaries)
-        # Temporarily disable web search for batch claims due to empty responses
-        response_text = await self._invoke_model(prompt, allow_web_search=False)
-        
+        response_text = await self._invoke_model(prompt, allow_web_search=True)
         self._logger.debug(f"Received response for batch of {len(claims)} claims, length: {len(response_text)}")
-        
         return self._parse_claims_batch_response(claims, response_text)
 
     async def evaluate_quality_rule(
@@ -169,16 +159,12 @@ class GeminiClient:
         article_text: str,
         rule: Mapping[str, Any] | Any,
     ) -> QualityRuleEvaluation:
-        """Evaluate a quality rule against the article content."""
-
         rule_payload = self._normalise_rule(rule)
         prompt = self._build_quality_prompt(article_text, rule_payload)
-        response_text = await self._invoke_model(prompt, allow_web_search=False)
+        response_text = await self._invoke_model(prompt, allow_web_search=True)
         return self._parse_quality_response(rule_payload, response_text)
 
     async def aclose(self) -> None:
-        """Compatibility method; Gemini SDK is stateless."""
-
         return None
 
     async def run_prompt(
@@ -187,8 +173,6 @@ class GeminiClient:
         *,
         allow_web_search: Optional[bool] = False,
     ) -> str:
-        """Execute an arbitrary prompt and return the text response."""
-
         return await self._invoke_model(prompt, allow_web_search=allow_web_search)
 
     # ------------------------------------------------------------------
@@ -208,15 +192,12 @@ class GeminiClient:
 
         grounding_tool = None
         if use_web_search:
-            grounding_tool = types.Tool(
-                google_search=types.GoogleSearch()
-            )
+            grounding_tool = types.Tool(google_search=types.GoogleSearch())
 
         generation_config = types.GenerateContentConfig(
             temperature=_DEFAULT_TEMPERATURE,
             max_output_tokens=_MAX_OUTPUT_TOKENS,
         )
-        
         if grounding_tool:
             generation_config.tools = [grounding_tool]
 
@@ -235,9 +216,7 @@ class GeminiClient:
             try:
                 await self._rate_limiter.acquire(timeout=self._request_timeout)
             except RateLimitExceeded as exc:
-                self._logger.warning(
-                    "Local rate limiter timed out waiting for available quota"
-                )
+                self._logger.warning("Local rate limiter timed out waiting for available quota")
                 raise GeminiClientError("Local rate limiter exhausted") from exc
 
             try:
@@ -251,31 +230,29 @@ class GeminiClient:
                     timeout=self._request_timeout,
                 )
 
-                # Debug response structure for troubleshooting
                 if hasattr(response, 'candidates') and response.candidates:
                     first_candidate = response.candidates[0]
                     if hasattr(first_candidate, 'finish_reason'):
                         self._logger.debug(f"Finish reason: {first_candidate.finish_reason}")
-                
-                # Extract text, handling potential exceptions
+
                 text = ""
                 try:
                     if hasattr(response, 'text'):
                         text = response.text or ""
                 except Exception as e:
                     self._logger.warning(f"Error accessing response.text: {e}")
-                    # Try to extract from candidates directly
                     if hasattr(response, 'candidates') and response.candidates:
                         first_candidate = response.candidates[0]
                         if hasattr(first_candidate, 'content') and hasattr(first_candidate.content, 'parts'):
                             parts = first_candidate.content.parts
                             if parts and hasattr(parts[0], 'text'):
                                 text = parts[0].text or ""
-                
+
                 if not text:
-                    self._logger.debug(f"Empty response (finish_reason may indicate why)")
-                
+                    self._logger.debug("Empty response (finish_reason may indicate why)")
+
                 return text
+
             except ResourceExhausted as exc:
                 self._logger.warning("Gemini rate limit reached: %s", exc)
                 self._rate_limiter.release()
@@ -289,12 +266,10 @@ class GeminiClient:
                 self._rate_limiter.release()
                 raise GeminiClientError("Gemini API error") from exc
             except asyncio.TimeoutError as exc:
-                self._logger.warning(
-                    "Gemini request timed out after %.1fs", self._request_timeout
-                )
+                self._logger.warning("Gemini request timed out after %.1fs", self._request_timeout)
                 self._rate_limiter.release()
                 raise GeminiClientError("Gemini request timed out") from exc
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:  # pragma: no cover
                 self._logger.exception("Unexpected Gemini failure")
                 self._rate_limiter.release()
                 raise GeminiClientError("Unexpected Gemini failure") from exc
@@ -347,74 +322,67 @@ class GeminiClient:
         instructions = dedent(
             """
             Review these NFL claims and attempt to FALSIFY them using your knowledge.
-            
+
             ⚠️  YOUR TRAINING DATA HAS A CUTOFF DATE - YOU DON'T KNOW RECENT NEWS!
             Any contract extensions, trades, or signings from recent months are NOT in your knowledge.
             If you can't find information, that means YOUR DATA IS OUTDATED, not that it's false!
-            
+
             🔴 CRITICAL RULE: "contradicted" ONLY if you have PROOF it's FALSE
-            
+
             You MUST have CONTRADICTORY EVIDENCE to mark "contradicted":
               ✅ "Player X plays for Team A" when you KNOW they're on Team B → "contradicted"
               ✅ "QB Tom Brady is active" when you KNOW he retired → "contradicted"
               ✅ "This game happened on Sunday" when you KNOW it was Monday → "contradicted"
-            
+
             You MUST mark "uncertain" if you just can't find information:
               ❌ "I don't see this contract in my data" → "uncertain" (NOT "contradicted")
               ❌ "I can't find this extension reported" → "uncertain" (NOT "contradicted")
               ❌ "No news sources mention this" → "uncertain" (NOT "contradicted")
               ❌ "This wasn't reported" → "uncertain" (NOT "contradicted")
-            
-            � THESE PHRASES MEAN YOU SHOULD USE "uncertain":
+
+            THESE PHRASES MEAN YOU SHOULD USE "uncertain":
               - "has not signed" (when you just can't find it)
               - "has not been reported"
               - "no credible sources"
               - "I don't have information about"
               - "not found in my knowledge"
               - "no evidence of"
-              
-            Remember: "I can't find it" ≠ "It's false". Mark these as "uncertain"!
-            
+
             EXAMPLE 1 - Recent News (Contract):
               Claim: "Wide receiver signed a 3-year extension last month"
-              
-              ❌ WRONG: "contradicted" - "No reports of this signing exist"
               ✅ RIGHT: "uncertain" - "Recent contract news may be outside training data"
-              
-              Why? Just because you don't see it doesn't mean it didn't happen!
-            
+
             EXAMPLE 2 - Game-by-Game Details:
               Claim: "Team was 6-2 entering their bye week"
-              
-              ❌ WRONG: "contradicted" - "I don't have records showing this exact record at bye week"
               ✅ RIGHT: "uncertain" - "Cannot verify specific week-by-week record progression"
-              
-              Why? You may not have granular weekly data for every team's season!
-            
+
             EXAMPLE 3 - Performance Assessment:
               Claim: "Linebacker has been a crucial part of the defense this season"
-              
-              ❌ WRONG: "contradicted" - "Player stats don't show 'crucial' impact"
               ✅ RIGHT: "verified" - "This is a subjective assessment, not a falsifiable claim"
-              
-              Why? Opinions and assessments are NEVER falsifiable!
-            
+
             ⚠️  BE HUMBLE ABOUT YOUR KNOWLEDGE GAPS:
               - You don't have complete week-by-week records for all teams
               - You don't know recent news (contracts, trades, injuries)
               - You don't have perfect recall of every mid-season statistic
               - When uncertain, default to "uncertain" (NOT "contradicted")
-            
+
             VERDICT DECISION TREE:
-            
-            1. Is this provably, objectively FALSE with contradictory evidence?
-               → "contradicted" (Example: "Retired player is currently active")
-            
-            2. Can you confirm it's TRUE or is it a reasonable opinion/assessment?
-               → "verified" (Example: "Team has talented roster")
-            
-            3. Everything else (can't verify, incomplete data, recent news)?
-               → "uncertain" (DEFAULT - use this when in doubt!)
+              1) Provably false with contradictory evidence? → "contradicted"
+              2) Confirmable true OR subjective/non-falsifiable? → "verified"
+              3) Everything else / incomplete data → "uncertain" (DEFAULT)
+
+            ENTITY CONTEXT POLICY:
+              - Mentions of non-focus teams do not imply a claim is false if they appear as:
+                trade/transaction counterparties (“acquired from”, “traded to”, “waived by”, “claimed from”),
+                opponents (vs/at/beat/lost to),
+                past affiliations (“formerly with”, “previously played for”),
+                or locations/divisions/stadiums.
+              - Do NOT mark “contradicted” solely due to such mentions.
+
+            TRANSACTION & TENSE:
+              - If the claim describes a transaction (“acquired/traded/signed from Team B”), treat Team B as a counterparty.
+              - Only mark “contradicted” for a present-tense roster assertion (“X is on Team A”) when you have contradictory evidence
+                for the stated time window; otherwise default to “uncertain”.
 
             Return JSON: {"claims": [{"index": 0, "verdict": "uncertain", "confidence": 0.5, "reasoning": "brief explanation", "sources": []}]}
 
@@ -422,31 +390,21 @@ class GeminiClient:
             """
         ).strip()
 
-        payload = {
-            "claims": claims_payload,
-            "shared_context": context_text,
-            "supporting_summaries": summary_text if summary_text else "(none provided)",
-        }
+        claims_list = "\n".join([f"{i}. {claim['text']}" for i, claim in enumerate(claims_payload)])
+        focus_hint = "Focus Team (if present in context) refers to the subject team. Other team names may appear in non-focus roles."
+        user_content = f"{instructions}\n\n{focus_hint}\n\n{claims_list}\n\nContext: {context_text}"
 
-        # Format claims as a simple numbered list instead of nested JSON
-        claims_list = "\n".join([
-            f"{i}. {claim['text']}"
-            for i, claim in enumerate(claims_payload)
-        ])
-        
-        user_content = f"{instructions}\n\n{claims_list}\n\nContext: {context_text}"
-        
         self._logger.debug("Claims prompt preview: %s", user_content[:500])
 
         return [
             {
                 "role": "system",
-                "content": "You are an NFL fact-checker. Only flag FACTUAL ERRORS (wrong names, teams, stats). Do NOT flag opinions or subjective assessments.",
+                "content": (
+                    "You are an NFL fact-checker. Only flag FACTUAL ERRORS (wrong names, teams, stats). "
+                    "Do NOT flag opinions or subjective assessments. Apply the Entity Context Policy."
+                ),
             },
-            {
-                "role": "user",
-                "content": user_content,
-            },
+            {"role": "user", "content": user_content},
         ]
 
     @staticmethod
@@ -454,30 +412,72 @@ class GeminiClient:
         article_text: str,
         rule: Mapping[str, Any],
     ) -> List[Dict[str, Any]]:
+        """
+        Quality validator with strengthened Entity Context Policy:
+        - Outbound transactions (departures) are valid focus for the source team.
+        - Inbound transactions (acquisitions) are valid focus for the acquiring team.
+        - Opponent/fixture, past-team, and location mentions are non-focus roles (not penalized).
+        - Tight 'JSON ONLY' guard to reduce 'not valid JSON' failures.
+        """
         description = rule.get("description", "")
         identifier = rule.get("identifier", "quality_rule")
         severity = rule.get("severity", "warning")
         prompt_override = rule.get("prompt")
 
         guidance = prompt_override or "Assess compliance with the rule using the article content."
+        metadata = rule.get("metadata") or {}
+        focus_team = metadata.get("focus_team")
+        focus_line = f"Focus Team: {focus_team}" if focus_team else "Focus Team: (not provided)"
+
         truncated_article = _truncate(article_text, _MAX_CONTEXT_CHARS)
 
         payload = dedent(
             f"""
             You evaluate generated sports journalism for quality.
-            Analyse whether the article complies with the rule below and cite
-            relevant passages or external sources.
+
+            >>> OUTPUT REQUIREMENT: Respond with **ONLY** a single JSON object. No preamble, no explanation outside JSON.
+
+            ## Task
+            Decide if the article complies with the rule below, applying the **Entity Context Policy** and **Focus Validity Matrix**.
+
+            **Entity Context Policy**
+            - The **focus team** is the team under evaluation (e.g., if rule is for NYJ, the focus team is the New York Jets).
+            - Mentions of other teams/entities are acceptable in **non-focus roles**:
+              • Trade/transaction counterparties: “acquired X **from** Team B”, “traded X **to** Team B”, “claimed from waivers”.
+              • Opponents/fixtures: “vs Team B”, “at Team B”, “beat/lost to Team B”.
+              • Past affiliations: “formerly with Team B”, “previously played for Team B”, “waived by Team B”.
+              • Locations/venues/divisions: cities, stadiums, conferences, divisions.
+
+            **Focus Validity Matrix (CRITICAL)**
+              - “Team A acquired Player X **from** Team B”  → Valid focus for **Team A** (inbound); Team B is counterparty (non-focus).
+              - “Team A traded/sent Player X **to** Team B” → Valid focus for **Team A** (outbound); Team B is counterparty (non-focus).
+              - “Team A waived/released Player X”          → Valid focus for **Team A** (outbound).
+              - “Team A vs/at Team B”                      → Valid focus for **Team A** (opponent mention allowed).
+              - “Player X formerly with Team B”            → Valid focus for current subject team; Team B is past_team (non-focus).
+
+            **Tense & Time Heuristic**
+              - Present-tense roster assertions (“X **is** a <Team> player”) must be judged in the timeframe **stated or implied**.
+              - Transaction events are **point-in-time**; past-team mentions do not switch focus.
+              - When news may be recent/contested and you cannot verify definitively, do **not** infer contradiction solely from absence; prefer **uncertain**.
+
+            **Rumor/Correction Handling**
+              - If the article clearly frames a *report/rumor* or *subsequent correction* (“reportedly”, “per”, “initially reported”, “later corrected”),
+                judge focus by the **story’s subject (the focus team’s action/impact)**, not by the destination team’s identity.
+              - Conflicting reports ≠ focus error. Only fail focus if the piece is actually about another team.
+
+            What to return (STRICT JSON):
+              {{
+                "passed": <bool>,
+                "confidence": <float 0..1>,
+                "rationale": "<one or two sentences referencing the article and the policy>",
+                "citations": ["<short quote from article>", "<URL or bullet if applicable>"]
+              }}
 
             Rule ID: {identifier}
             Rule Description: {description}
             Rule Severity: {severity}
             Additional Guidance: {guidance}
-
-            Respond strictly in JSON with keys:
-              - passed: boolean
-              - confidence: float between 0 and 1 inclusive
-              - rationale: short explanation referencing the article content
-              - citations: list of quotations, bullet points, or URLs supporting the decision
+            {focus_line}
 
             Article Content:
             {truncated_article}
@@ -485,7 +485,7 @@ class GeminiClient:
         ).strip()
 
         return [
-            {"role": "system", "content": "You are a rigorous editorial quality reviewer."},
+            {"role": "system", "content": "You are a rigorous editorial quality reviewer. Output must be JSON only."},
             {"role": "user", "content": payload},
         ]
 
@@ -572,11 +572,7 @@ class GeminiClient:
             reasoning = str(entry.get("reasoning", "")).strip()
 
             raw_sources = self._normalise_sources(entry.get("sources"))
-            sources = [
-                source
-                for source in raw_sources
-                if _is_allowed_source(source)
-            ]
+            sources = [source for source in raw_sources if _is_allowed_source(source)]
 
             if verdict == "verified" and not sources:
                 verdict = "uncertain"
@@ -650,20 +646,20 @@ class GeminiClient:
         if not raw_text:
             return {}
         raw_text = raw_text.strip()
-        
+
         # Remove markdown code blocks if present
         if raw_text.startswith("```json"):
-            raw_text = raw_text[7:].lstrip()  # Remove ```json and any following whitespace
+            raw_text = raw_text[7:].lstrip()
         elif raw_text.startswith("```"):
-            raw_text = raw_text[3:].lstrip()  # Remove ``` and any following whitespace
+            raw_text = raw_text[3:].lstrip()
         if raw_text.endswith("```"):
-            raw_text = raw_text[:-3].rstrip()  # Remove closing ``` and preceding whitespace
+            raw_text = raw_text[:-3].rstrip()
         raw_text = raw_text.strip()
-        
+
         if not raw_text:
             self._logger.debug("After stripping markdown, no JSON content remained")
             return {}
-        
+
         try:
             return json.loads(raw_text)
         except json.JSONDecodeError as e:

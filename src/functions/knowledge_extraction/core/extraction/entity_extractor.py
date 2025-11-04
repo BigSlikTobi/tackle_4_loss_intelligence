@@ -223,12 +223,32 @@ class EntityExtractor:
             data = json.loads(response_text)
             entities = []
             
-            for entity_dict in data.get("entities", []):
-                entity_type = entity_dict.get("entity_type", "").lower()
+            # Handle both formats: {"entities": [...]} or [...]
+            if isinstance(data, list):
+                entity_list = data
+            elif isinstance(data, dict):
+                entity_list = data.get("entities", [])
+            else:
+                logger.error(f"Unexpected response format: {type(data)}")
+                return []
+            
+            for entity_dict in entity_list:
+                # Handle both "entity_type" and "type" field names
+                entity_type = entity_dict.get("entity_type") or entity_dict.get("type", "")
+                entity_type = entity_type.lower() if entity_type else ""
+                
                 mention_text = entity_dict.get("mention_text", "")
                 position = entity_dict.get("position")
+                
+                # Handle team_abbr as either string or array (take first element if array)
                 team_abbr = entity_dict.get("team_abbr")
+                if isinstance(team_abbr, list) and len(team_abbr) > 0:
+                    team_abbr = team_abbr[0]
+                
+                # Handle team_name as either string or array (take first element if array)
                 team_name = entity_dict.get("team_name")
+                if isinstance(team_name, list) and len(team_name) > 0:
+                    team_name = team_name[0]
                 
                 # Validate entity type
                 if entity_type not in ("player", "team", "game"):
