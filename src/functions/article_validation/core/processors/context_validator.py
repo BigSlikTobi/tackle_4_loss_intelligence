@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from statistics import mean
 from textwrap import dedent
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 from src.shared.utils.logging import get_logger
 
@@ -147,6 +147,7 @@ class ContextValidator:
         scores: List[float] = []
         mismatches = 0
         errors = 0
+        transaction_overrides: List[str] = []
 
         for entity, result in zip(entities, results):
             if isinstance(result, Exception):
@@ -160,15 +161,41 @@ class ContextValidator:
                 )
                 continue
 
-            match_score = float(result.get("match_score", 0.0))
+            parsed_result = dict(result)
+            if not parsed_result.get("is_match", False) and self._should_accept_transaction(
+                entity,
+                parsed_result,
+                team_context,
+            ):
+                parsed_result["is_match"] = True
+                parsed_result["match_score"] = max(
+                    float(parsed_result.get("match_score", 0.0)),
+                    0.75,
+                )
+                message = str(parsed_result.get("message", ""))
+                parsed_result["message"] = (
+                    f"{message} (accepted due to transaction context)"
+                    if message
+                    else "Accepted due to transaction context."
+                )
+                transaction_overrides.append(entity.name)
+                self._logger.debug(
+                    "Accepted entity %%s due to detected transaction context.",
+                    entity.name,
+                )
+
+            match_score = float(parsed_result.get("match_score", 0.0))
             scores.append(match_score)
-            if not result.get("is_match", False):
+            if not parsed_result.get("is_match", False):
                 mismatches += 1
                 issues.append(
                     ValidationIssue(
                         severity="critical" if entity.category == "team" else "warning",
                         category="contextual",
-                        message=result.get("message", f"Entity does not align with focus team: {entity.name}"),
+                        message=parsed_result.get(
+                            "message",
+                            f"Entity does not align with focus team: {entity.name}",
+                        ),
                         suggestion="Adjust article to focus on the specified team or correct the entity reference.",
                     )
                 )
@@ -184,6 +211,8 @@ class ContextValidator:
             "mismatches": mismatches,
             "errors": errors,
         }
+        if transaction_overrides:
+            details["transaction_overrides"] = transaction_overrides
 
         return ValidationDimension(
             enabled=True,
@@ -366,3 +395,87 @@ class ContextValidator:
             "match_score": match_score,
             "message": message,
         }
+
+    def _should_accept_transaction(
+        self,
+        entity: ContextualEntity,
+        result: Mapping[str, object],
+        team_context: Mapping[str, object],
+    ) -> bool:
+        if entity.category not in {"player", "team", "coach"}:
+            return False
+
+        combined_text_parts = [
+            str(result.get("message", "")),
+            str(entity.evidence or ""),
+        ]
+        combined_text = " ".join(part for part in combined_text_parts if part).lower()
+        if not combined_text:
+            return False
+
+        if not any(keyword in combined_text for keyword in _TRANSACTION_KEYWORDS):
+            return False
+
+        team_tokens = _team_tokens(team_context)
+        if team_tokens and not any(token in combined_text for token in team_tokens):
+            return False
+
+        return True
+
+
+def _team_tokens(team_context: Mapping[str, object]) -> List[str]:
+    tokens: List[str] = []
+    candidate_keys = (
+        "team",
+        "team_name",
+        "name",
+        "nickname",
+        "team_id",
+        "abbreviation",
+    )
+
+    for key in candidate_keys:
+        value = team_context.get(key)
+        if isinstance(value, str) and value.strip():
+            tokens.append(value.strip().lower())
+
+    aliases = team_context.get("aliases")
+    if isinstance(aliases, Mapping):
+        alias_values = aliases.values()
+    else:
+        alias_values = aliases
+
+    if isinstance(alias_values, Iterable) and not isinstance(alias_values, (str, bytes, bytearray)):
+        for alias in alias_values:
+            if isinstance(alias, str) and alias.strip():
+                tokens.append(alias.strip().lower())
+
+    return list(dict.fromkeys(tokens))
+
+
+_TRANSACTION_KEYWORDS = {
+    "trade",
+    "traded",
+    "acquired",
+    "acquire",
+    "acquisition",
+    "deal",
+    "dealt",
+    "package",
+    "sent",
+    "sending",
+    "receive",
+    "received",
+    "swap",
+    "exchanged",
+    "exchange",
+    "sign",
+    "signed",
+    "signing",
+    "waive",
+    "waived",
+    "waiving",
+    "release",
+    "released",
+    "releasing",
+}
