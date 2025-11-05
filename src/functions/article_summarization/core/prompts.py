@@ -5,12 +5,16 @@ from __future__ import annotations
 from .contracts.summary import SummarizationOptions, SummarizationRequest
 
 SUMMARIZATION_PROMPT_TEMPLATE = (
-    "You are an NFL beat reporter summarizing a news article for internal editors. "
-    "Remove boilerplate, advertisements, video transcripts, promotional copy, and unrelated paragraphs. "
-    "{team_clause} "
-    "Preserve key facts, quotes, and meaningful context without speculation. "
-    "Do not add analysis or commentary. Output a concise paragraph (120-180 words). "
-    "Never include phrases related to: {removal_clause}.\n\n"
+    "Summarize the article below into a clean, factual digest for downstream automation.\n"
+    "Guidelines:\n"
+    "1. Use only information explicitly present in the article. Do not speculate or add outside context.\n"
+    "2. Preserve chronology, quoted language, and transaction direction exactly as written. "
+    "When trades or acquisitions are described, state who acquires whom and what is exchanged without reversing parties.\n"
+    "3. Strip advertisements, navigation copy, social media prompts, and unrelated sidebars.\n"
+    "4. Keep the tone neutral and reportorial; do not add opinion or hype.\n"
+    "5. Produce a single cohesive paragraph.\n"
+    "{team_clause}\n"
+    "Avoid including phrases related to: {removal_clause}.\n\n"
     "Article Content:\n"
     "{article_content}"
 )
@@ -22,14 +26,17 @@ def build_summarization_prompt(
 ) -> str:
     """Construct the prompt used for Gemini summarization."""
 
-    team_clause = (
-        f"Focus on insights about the {request.team_name}."
-        if request.team_name
-        else "Focus only on the team mentioned in the article."
-    )
+    team_clause = ""
+    if request.team_name:
+        team_clause = (
+            f"\n7. When referencing the {request.team_name}, mirror the article's wording precisely "
+            "and do not infer motivations or extra context."
+        )
     removal_clause = ", ".join(options.remove_patterns)
+    # Escape braces in article content to prevent .format() from treating them as placeholders
+    escaped_content = request.content.replace("{", "{{").replace("}", "}}")
     return SUMMARIZATION_PROMPT_TEMPLATE.format(
         team_clause=team_clause,
         removal_clause=removal_clause,
-        article_content=request.content,
+        article_content=escaped_content,
     )

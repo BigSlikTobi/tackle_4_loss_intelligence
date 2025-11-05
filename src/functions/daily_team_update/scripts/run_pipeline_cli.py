@@ -44,6 +44,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true", help="Skip database writes")
     parser.add_argument("--image-count", type=int, help="Override number of images to request per team")
+    parser.add_argument(
+        "--max-validation-attempts",
+        type=int,
+        help="Maximum validation attempts before failing an article (default: env or 2)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--output",
@@ -67,6 +72,7 @@ def run(argv: Optional[List[str]] = None) -> int:
                 "continue_on_error": False if args.no_continue_on_error else None,
                 "dry_run": True if args.dry_run else None,
                 "image_count": args.image_count,
+                "max_validation_attempts": args.max_validation_attempts,
             }
         )
         service_config = build_service_config()

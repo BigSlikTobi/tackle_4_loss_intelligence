@@ -11,7 +11,7 @@ class SummarizationOptions(BaseModel):
     """Tunable parameters controlling Gemini summarization."""
 
     model: str = Field(default="gemma-3n-e4b-it", description="Gemini model identifier")
-    temperature: float = Field(default=0.2, ge=0.0, le=1.0)
+    temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     max_output_tokens: int = Field(default=512, gt=0, le=2048)
     remove_patterns: list[str] = Field(

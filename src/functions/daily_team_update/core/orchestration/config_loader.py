@@ -48,6 +48,11 @@ def build_pipeline_config(overrides: Optional[Dict[str, object]] = None) -> Pipe
     max_workers = overrides.get("max_workers")
     if max_workers is None:
         max_workers = int_from_env("PIPELINE_MAX_WORKERS", 4)
+    max_validation_attempts_override = overrides.get("max_validation_attempts")
+    if max_validation_attempts_override is None:
+        max_validation_attempts = int_from_env("PIPELINE_MAX_VALIDATION_ATTEMPTS", 2)
+    else:
+        max_validation_attempts = int(max_validation_attempts_override)
     continue_on_error_override = overrides.get("continue_on_error")
     if continue_on_error_override is None:
         continue_on_error = bool_from_env("PIPELINE_CONTINUE_ON_ERROR", True)
@@ -88,6 +93,7 @@ def build_pipeline_config(overrides: Optional[Dict[str, object]] = None) -> Pipe
     return PipelineConfig(
         run_parallel=bool(run_parallel),
         max_workers=int(max_workers),
+        max_validation_attempts=int(max_validation_attempts),
         continue_on_error=bool(continue_on_error),
         dry_run=dry_run,
         image_count=int(image_count),
