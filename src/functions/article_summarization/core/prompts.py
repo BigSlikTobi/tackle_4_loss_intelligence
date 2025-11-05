@@ -13,7 +13,6 @@ SUMMARIZATION_PROMPT_TEMPLATE = (
     "3. Strip advertisements, navigation copy, social media prompts, and unrelated sidebars.\n"
     "4. Keep the tone neutral and reportorial; do not add opinion or hype.\n"
     "5. Produce a single cohesive paragraph.\n"
-    "6. If the source content cannot be accessed, respond with 'Source content unavailable.'"
     "{team_clause}\n"
     "Avoid including phrases related to: {removal_clause}.\n\n"
     "Article Content:\n"
