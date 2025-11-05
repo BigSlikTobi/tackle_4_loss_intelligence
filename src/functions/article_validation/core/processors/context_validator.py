@@ -180,7 +180,7 @@ class ContextValidator:
                 )
                 transaction_overrides.append(entity.name)
                 self._logger.debug(
-                    "Accepted entity %%s due to detected transaction context.",
+                    "Accepted entity %s due to detected transaction context.",
                     entity.name,
                 )
 
