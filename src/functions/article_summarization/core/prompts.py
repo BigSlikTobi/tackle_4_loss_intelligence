@@ -34,8 +34,10 @@ def build_summarization_prompt(
             "and do not infer motivations or extra context."
         )
     removal_clause = ", ".join(options.remove_patterns)
+    # Escape braces in article content to prevent .format() from treating them as placeholders
+    escaped_content = request.content.replace("{", "{{").replace("}", "}}")
     return SUMMARIZATION_PROMPT_TEMPLATE.format(
         team_clause=team_clause,
         removal_clause=removal_clause,
-        article_content=request.content,
+        article_content=escaped_content,
     )
