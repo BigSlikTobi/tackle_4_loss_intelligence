@@ -95,6 +95,12 @@ class PipelineConfig(BaseModel):
 
     run_parallel: bool = Field(default=False)
     max_workers: int = Field(default=4, ge=1, le=16)
+    max_validation_attempts: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="Maximum number of validation attempts before failing the team",
+    )
     continue_on_error: bool = Field(default=True)
     dry_run: bool = Field(default=False)
     image_count: int = Field(default=2, ge=0, le=6)
