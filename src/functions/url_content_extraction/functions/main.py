@@ -15,6 +15,7 @@ from src.functions.url_content_extraction.core.contracts.extracted_content impor
 from src.functions.url_content_extraction.core.extractors.extractor_factory import (
     get_extractor,
 )
+from src.functions.url_content_extraction.core.utils import amp_detector
 
 load_env()
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -55,22 +56,43 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
             DEFAULT_TIMEOUT_SECONDS,
         )
 
+        target_url = url
+        amp_used = False
+        if not options.get("force_playwright", False):
+            target_url, amp_used = _prefer_amp_variant(url, logger=logger)
+            if amp_used:
+                options["prefer_lightweight"] = True
+                metadata.setdefault("amp_url", target_url)
+                metadata["used_amp"] = True
+
         try:
             extractor = get_extractor(
-                url,
+                target_url,
                 force_playwright=options.get("force_playwright", False),
                 prefer_lightweight=options.get("prefer_lightweight", False),
                 logger=logger,
             )
-            extracted = extractor.extract(url, timeout=timeout_seconds, options=options)
+            extracted = extractor.extract(
+                target_url,
+                timeout=timeout_seconds,
+                options=options,
+            )
         except Exception as exc:  # noqa: BLE001 - propagate extraction failure
             logger.warning("Extraction failed for %s: %s", url, exc)
             failure = {"url": url, "error": str(exc)}
+            if amp_used:
+                failure["amp_url"] = target_url
+                failure["used_amp"] = True
             failure.update({k: v for k, v in metadata.items() if k not in failure})
             articles.append(failure)
             continue
 
         payload = _serialise_content(extracted)
+        if amp_used:
+            payload["url"] = url
+            payload["amp_url"] = target_url
+            payload["used_amp"] = True
+            payload.setdefault("original_url", url)
         if not extracted.is_valid():
             payload["error"] = extracted.error or "Insufficient content extracted"
             logger.debug("Extractor returned invalid content for %s", url)
@@ -190,4 +212,16 @@ def _serialise_content(content: ExtractedContent) -> Dict[str, Any]:
 
 def _isoformat(value: datetime) -> str:
     return value.isoformat(timespec="seconds")
+
+
+def _prefer_amp_variant(
+    url: str,
+    *,
+    logger: logging.Logger,
+) -> tuple[str, bool]:
+    try:
+        return amp_detector.probe_for_amp(url, logger=logger)
+    except Exception as exc:  # pragma: no cover - defensive safety
+        logger.debug("AMP probe raised for %s: %s", url, exc)
+        return url, False
 
