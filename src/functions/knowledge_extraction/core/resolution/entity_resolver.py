@@ -85,9 +85,23 @@ class EntityResolver:
         
         Maps both full names and variations to standard NFL position codes.
         
+        Supported output abbreviations include:
+            QB, RB, WR, TE, FB, OT, OG, C, T, G, DT, DE, LB, OLB, ILB, CB, S, SS, FS, K, P, LS, EDGE, DL, DB, OL, DL, ST, KR, PR
+        
+        Examples:
+            "Defensive Tackle" -> "DT"
+            "DT" -> "DT"
+            "TACKLE" -> "OT"  # Note: "TACKLE" defaults to "OT" (Offensive Tackle)
+            "Cornerback" -> "CB"
+            "Wide Receiver" -> "WR"
+        
+        Note:
+            Ambiguous cases such as "TACKLE" will default to "OT" (Offensive Tackle).
+            If the input is not recognized, the original string (uppercased) is returned.
+        
         Args:
             position: Position string from LLM (e.g., "Defensive Tackle", "DT", "defensive tackle")
-            
+        
         Returns:
             Normalized position abbreviation (e.g., "DT")
         """
