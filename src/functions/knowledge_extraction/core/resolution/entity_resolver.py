@@ -130,7 +130,6 @@ class EntityResolver:
             "OFFENSIVETACKLE": "OT",
             "LEFT TACKLE": "OT",
             "RIGHT TACKLE": "OT",
-            "TACKLE": "OT",
             "GUARD": "G",
             "OFFENSIVE GUARD": "G",
             "LEFT GUARD": "G",
