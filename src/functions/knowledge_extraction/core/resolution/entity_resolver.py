@@ -79,6 +79,138 @@ class EntityResolver:
         
         logger.info(f"Initialized EntityResolver with threshold={confidence_threshold}")
     
+    def _normalize_position(self, position: str) -> str:
+        """
+        Normalize position strings to standard abbreviations.
+        
+        Maps both full names and variations to standard NFL position codes.
+        
+        Args:
+            position: Position string from LLM (e.g., "Defensive Tackle", "DT", "defensive tackle")
+            
+        Returns:
+            Normalized position abbreviation (e.g., "DT")
+        """
+        if not position:
+            return ""
+        
+        # Convert to uppercase and strip whitespace
+        pos = position.upper().strip()
+        
+        # Position mapping dictionary
+        position_map = {
+            # Quarterback
+            "QUARTERBACK": "QB",
+            "QB": "QB",
+            
+            # Running Back
+            "RUNNING BACK": "RB",
+            "RUNNINGBACK": "RB",
+            "HALFBACK": "RB",
+            "HALF BACK": "RB",
+            "RB": "RB",
+            "HB": "RB",
+            
+            # Wide Receiver
+            "WIDE RECEIVER": "WR",
+            "WIDERECEIVER": "WR",
+            "RECEIVER": "WR",
+            "WR": "WR",
+            
+            # Tight End
+            "TIGHT END": "TE",
+            "TIGHTEND": "TE",
+            "TE": "TE",
+            
+            # Offensive Line
+            "OFFENSIVE LINEMAN": "OL",
+            "OFFENSIVE LINE": "OL",
+            "OFFENSIVELINEMAN": "OL",
+            "OFFENSIVE TACKLE": "OT",
+            "OFFENSIVETACKLE": "OT",
+            "LEFT TACKLE": "OT",
+            "RIGHT TACKLE": "OT",
+            "TACKLE": "OT",
+            "GUARD": "G",
+            "OFFENSIVE GUARD": "G",
+            "LEFT GUARD": "G",
+            "RIGHT GUARD": "G",
+            "CENTER": "C",
+            "OT": "OT",
+            "OG": "G",
+            "OL": "OL",
+            "G": "G",
+            "C": "C",
+            
+            # Defensive Line
+            "DEFENSIVE LINEMAN": "DL",
+            "DEFENSIVE LINE": "DL",
+            "DEFENSIVELINEMAN": "DL",
+            "DEFENSIVE END": "DE",
+            "DEFENSIVEEND": "DE",
+            "DEFENSIVE TACKLE": "DT",
+            "DEFENSIVETACKLE": "DT",
+            "NOSE TACKLE": "NT",
+            "NOSETACKLE": "NT",
+            "EDGE": "EDGE",
+            "EDGE RUSHER": "EDGE",
+            "DL": "DL",
+            "DE": "DE",
+            "DT": "DT",
+            "NT": "NT",
+            
+            # Linebacker
+            "LINEBACKER": "LB",
+            "INSIDE LINEBACKER": "LB",
+            "OUTSIDE LINEBACKER": "LB",
+            "MIDDLE LINEBACKER": "LB",
+            "LB": "LB",
+            "ILB": "LB",
+            "OLB": "LB",
+            "MLB": "LB",
+            
+            # Defensive Back
+            "CORNERBACK": "CB",
+            "CORNER BACK": "CB",
+            "CORNER": "CB",
+            "SAFETY": "S",
+            "FREE SAFETY": "S",
+            "STRONG SAFETY": "S",
+            "DEFENSIVE BACK": "DB",
+            "CB": "CB",
+            "S": "S",
+            "FS": "S",
+            "SS": "S",
+            "DB": "DB",
+            
+            # Special Teams
+            "KICKER": "K",
+            "PLACEKICKER": "K",
+            "PUNTER": "P",
+            "LONG SNAPPER": "LS",
+            "LONGSNAPPER": "LS",
+            "KICK RETURNER": "KR",
+            "PUNT RETURNER": "PR",
+            "K": "K",
+            "P": "P",
+            "LS": "LS",
+            "KR": "KR",
+            "PR": "PR",
+        }
+        
+        # Return mapped position or original if not found
+        return position_map.get(pos, pos)
+    
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for matching (lowercase, remove punctuation)."""
+        # Convert to lowercase
+        text = text.lower()
+        # Remove possessives
+        text = text.replace("'s", "").replace("'", "")
+        # Remove extra whitespace
+        text = " ".join(text.split())
+        return text.strip()
+    
     def resolve_player(
         self,
         mention_text: str,
@@ -142,14 +274,17 @@ class EntityResolver:
                 
                 # Check position match - ONLY if BOTH provided AND player has position in DB
                 if position:
-                    player_position = player.get("position", "").upper().strip()
-                    provided_position = position.upper().strip()
+                    player_position_raw = player.get("position", "").strip()
                     
                     # Only filter if player has position data in DB
-                    if player_position:
+                    if player_position_raw:
+                        # Normalize both positions to standard abbreviations
+                        player_position = self._normalize_position(player_position_raw)
+                        provided_position = self._normalize_position(position)
+                        
                         if player_position != provided_position:
                             should_keep = False
-                            mismatch_reasons.append(f"position mismatch: player={player_position} vs provided={provided_position}")
+                            mismatch_reasons.append(f"position mismatch: player={player_position} (from {player_position_raw}) vs provided={provided_position} (from {position})")
                     else:
                         # Player has no position in database - can't validate, so allow it
                         logger.debug(f"Player {player.get('display_name')} has no position in DB, skipping position check")

@@ -296,20 +296,50 @@ class BatchResultProcessor:
         """Parse entity extraction response from LLM."""
         try:
             # Try to extract JSON from response
-            start_idx = output_text.find("{")
-            end_idx = output_text.rfind("}") + 1
+            # Check for both object format and array format
+            start_obj = output_text.find("{")
+            start_arr = output_text.find("[")
             
-            if start_idx == -1 or end_idx == 0:
+            # Determine which comes first
+            if start_obj == -1 and start_arr == -1:
                 logger.warning(f"No JSON found in entity response for {custom_id}")
                 return []
             
-            json_str = output_text[start_idx:end_idx]
-            data = json.loads(json_str)
+            # Try array format first if it appears before object
+            if start_arr != -1 and (start_obj == -1 or start_arr < start_obj):
+                end_idx = output_text.rfind("]") + 1
+                if end_idx > 0:
+                    json_str = output_text[start_arr:end_idx]
+                    data = json.loads(json_str)
+                    # If it's already an array, use it directly
+                    if isinstance(data, list):
+                        entity_list = data
+                    else:
+                        entity_list = data.get("entities", [])
+                else:
+                    logger.warning(f"Invalid array JSON in entity response for {custom_id}")
+                    return []
+            else:
+                # Try object format
+                end_idx = output_text.rfind("}") + 1
+                if end_idx > 0:
+                    json_str = output_text[start_obj:end_idx]
+                    data = json.loads(json_str)
+                    # Handle both {"entities": [...]} and direct array
+                    if isinstance(data, list):
+                        entity_list = data
+                    else:
+                        entity_list = data.get("entities", [])
+                else:
+                    logger.warning(f"Invalid object JSON in entity response for {custom_id}")
+                    return []
             
             entities = []
-            for entity_data in data.get("entities", []):
+            for entity_data in entity_list:
+                # Handle both "entity_type" and "type" fields
+                entity_type = entity_data.get("entity_type") or entity_data.get("type", "")
                 entity = ExtractedEntity(
-                    entity_type=entity_data.get("entity_type", "").lower(),
+                    entity_type=entity_type.lower(),
                     mention_text=entity_data.get("mention_text", "").strip(),
                     context=entity_data.get("context"),
                     confidence=entity_data.get("confidence"),
