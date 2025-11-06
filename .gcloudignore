@@ -90,3 +90,6 @@ functions/.gcloudignore
 
 # Playwright browsers
 !.playwright/**
+
+# Mock Content
+src/functions/knowledge_extraction/scripts/test_content

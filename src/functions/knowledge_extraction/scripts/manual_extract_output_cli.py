@@ -1,13 +1,12 @@
-"""CLI tool to run knowledge extraction on manual text payloads."""
+"""CLI tool to run the full knowledge extraction pipeline on manual payloads."""
 
 import argparse
 import json
 import logging
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 # Bootstrap project root to allow absolute imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
@@ -15,31 +14,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
 from src.functions.knowledge_extraction.core.extraction.entity_extractor import (
-    EntityExtractor,
     ExtractedEntity,
 )
 from src.functions.knowledge_extraction.core.extraction.topic_extractor import (
-    TopicExtractor,
     ExtractedTopic,
+)
+from src.functions.knowledge_extraction.core.resolution.entity_resolver import (
+    ResolvedEntity,
+)
+from src.functions.knowledge_extraction.scripts.extract_knowledge_cli import (
+    ManualExtractionResult,
+    run_manual_extraction,
 )
 
 logger = logging.getLogger(__name__)
-
-
-class MockEntity(ExtractedEntity):
-    """Simple mock entity for offline demonstrations."""
-
-
-class MockTopic(ExtractedTopic):
-    """Simple mock topic for offline demonstrations."""
 
 
 def parse_args() -> argparse.Namespace:
     """Set up CLI arguments."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run the knowledge extraction models against a manual payload and "
-            "display the resulting topics and entities."
+            "Execute the knowledge extraction pipeline against a manual payload and "
+            "display the resulting topics, entities, and resolved entities."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -79,6 +75,11 @@ def parse_args() -> argparse.Namespace:
             "Use deterministic mock results instead of calling the OpenAI API. "
             "Useful for demonstrations without credentials."
         ),
+    )
+    parser.add_argument(
+        "--no-resolve",
+        action="store_true",
+        help="Skip entity resolution (avoids Supabase lookups).",
     )
     parser.add_argument(
         "--log-level",
@@ -156,54 +157,36 @@ def _format_entities(entities: List[ExtractedEntity]) -> str:
     return "\n".join(lines)
 
 
-def _mock_results(text: str) -> Dict[str, List[Any]]:
-    """Generate deterministic mock topics/entities for offline use."""
-    _ = text  # The mock does not depend on content beyond logging.
-    topics = [
-        MockTopic(topic="team performance & trends", confidence=0.88, rank=1),
-        MockTopic(topic="player profiles & interviews", confidence=0.64, rank=2),
-    ]
-    entities = [
-        MockEntity(
-            entity_type="team",
-            mention_text="Buffalo Bills",
-            team_abbr="BUF",
-            rank=1,
-        ),
-        MockEntity(
-            entity_type="player",
-            mention_text="Josh Allen",
-            position="QB",
-            team_abbr="BUF",
-            rank=2,
-        ),
-    ]
-    return {"topics": topics, "entities": entities}
+def _format_resolved_entities(
+    entities: List[ResolvedEntity],
+    resolution_requested: bool,
+) -> str:
+    """Pretty print resolved entities for console output."""
+    if entities:
+        lines: List[str] = []
+        for entity in entities:
+            bits = [
+                f"[{entity.entity_type}] {entity.matched_name}",
+                f"id={entity.entity_id}",
+            ]
+            if entity.confidence is not None:
+                bits.append(f"confidence {entity.confidence:.2f}")
+            if entity.rank is not None:
+                bits.append(f"rank {entity.rank}")
+            if entity.mention_text and entity.mention_text != entity.matched_name:
+                bits.append(f"mention: {entity.mention_text}")
+            if entity.position:
+                bits.append(entity.position)
+            if entity.team_abbr:
+                bits.append(entity.team_abbr)
+            if entity.team_name:
+                bits.append(entity.team_name)
+            lines.append("  " + " | ".join(bits))
+        return "\n".join(lines)
 
-
-def _run_extraction(
-    text: str,
-    max_topics: Optional[int],
-    max_entities: Optional[int],
-    use_mock: bool,
-) -> Dict[str, List[Any]]:
-    """Run topic/entity extraction using either real or mock models."""
-    if use_mock:
-        logger.warning("Using mock extraction results (no API calls will be made).")
-        return _mock_results(text)
-
-    entity_extractor = EntityExtractor()
-    topic_extractor = TopicExtractor()
-
-    if max_topics is None:
-        max_topics = int(os.getenv("MAX_TOPICS_PER_GROUP", "10"))
-    if max_entities is None:
-        max_entities = int(os.getenv("MAX_ENTITIES_PER_GROUP", "20"))
-
-    topics = topic_extractor.extract(text, max_topics=max_topics)
-    entities = entity_extractor.extract(text, max_entities=max_entities)
-
-    return {"topics": topics, "entities": entities}
+    if not resolution_requested:
+        return "  (resolution skipped)"
+    return "  (no entities resolved)"
 
 
 def _serialize_topics(topics: List[ExtractedTopic]) -> List[Dict[str, Any]]:
@@ -240,6 +223,64 @@ def _serialize_entities(entities: List[ExtractedEntity]) -> List[Dict[str, Any]]
     return serialised
 
 
+def _serialize_resolved_entities(
+    entities: List[ResolvedEntity],
+) -> List[Dict[str, Any]]:
+    """Convert resolved entity dataclasses into JSON-serialisable dicts."""
+    serialised: List[Dict[str, Any]] = []
+    for entity in entities:
+        serialised.append(
+            {
+                "entity_type": entity.entity_type,
+                "entity_id": entity.entity_id,
+                "matched_name": entity.matched_name,
+                "mention_text": entity.mention_text,
+                "confidence": entity.confidence,
+                "is_primary": entity.is_primary,
+                "rank": entity.rank,
+                "position": entity.position,
+                "team_abbr": entity.team_abbr,
+                "team_name": entity.team_name,
+            }
+        )
+    return serialised
+
+
+def _print_results(
+    payload: Dict[str, Any],
+    result: ManualExtractionResult,
+    resolution_requested: bool,
+) -> None:
+    """Output the extraction results to stdout."""
+    print("\n" + "=" * 70)
+    print("KNOWLEDGE EXTRACTION RESULTS")
+    print("=" * 70)
+    print(f"Input type: {result.input_type or 'unknown'}")
+    if result.title:
+        print(f"Title: {result.title}")
+    print(f"Characters analysed: {result.text_length}")
+    if payload.get("metadata"):
+        print(f"Metadata: {json.dumps(payload['metadata'], ensure_ascii=False)}")
+
+    print("\nTopics:")
+    print(_format_topics(result.topics))
+
+    print("\nEntities:")
+    print(_format_entities(result.entities))
+
+    print("\nResolved Entities:")
+    print(_format_resolved_entities(result.resolved_entities, resolution_requested))
+
+    summary = result.summary()
+    print("\nSummary:")
+    print(
+        f"  topics: {summary['topics_extracted']}, "
+        f"entities: {summary['entities_extracted']}, "
+        f"resolved: {summary['resolved_entities']}"
+    )
+    print("=" * 70 + "\n")
+
+
 def main() -> None:
     args = parse_args()
     setup_logging(level=args.log_level)
@@ -247,49 +288,38 @@ def main() -> None:
 
     try:
         payload = _load_payload(Path(args.input).resolve(), args.index)
-        text = payload.get("text", "").strip()
-        if not text:
-            raise ValueError("The payload does not contain text to analyse.")
-
-        extraction = _run_extraction(
-            text=text,
+        result = run_manual_extraction(
+            payload=payload,
             max_topics=args.max_topics,
             max_entities=args.max_entities,
             use_mock=args.mock,
+            resolve_entities=not args.no_resolve,
         )
-        topics = extraction["topics"]
-        entities = extraction["entities"]
-
     except Exception as exc:
         logger.error(str(exc))
         sys.exit(1)
 
-    print("\n" + "=" * 70)
-    print("KNOWLEDGE EXTRACTION RESULTS")
-    print("=" * 70)
-    print(f"Input type: {payload.get('input_type', 'unknown')}")
-    if payload.get("title"):
-        print(f"Title: {payload['title']}")
-    print(f"Characters analysed: {len(text)}")
-    print("\nTopics:")
-    print(_format_topics(topics))
-    print("\nEntities:")
-    print(_format_entities(entities))
-    print("=" * 70 + "\n")
+    _print_results(payload, result, resolution_requested=not args.no_resolve)
 
     if args.output:
         output_path = Path(args.output).resolve()
-        result = {
+        output_payload = {
             "generated_at": datetime.utcnow().isoformat() + "Z",
             "input": {
-                "input_type": payload.get("input_type"),
-                "title": payload.get("title"),
+                "input_type": result.input_type,
+                "title": result.title,
+                "characters": result.text_length,
             },
-            "topics": _serialize_topics(topics),
-            "entities": _serialize_entities(entities),
+            "summary": result.summary(),
+            "topics": _serialize_topics(result.topics),
+            "entities": _serialize_entities(result.entities),
+            "resolved_entities": _serialize_resolved_entities(result.resolved_entities),
+            "metadata": result.metadata,
+            "mock_run": args.mock,
+            "resolution_requested": not args.no_resolve,
         }
         output_path.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2),
+            json.dumps(output_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         logger.info("Extraction results saved to %s", output_path)
