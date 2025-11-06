@@ -479,8 +479,8 @@ class GroupWriter:
             ).execute()
             count = count_response.count or 0
             
-            # Delete all
-            self.client.table("story_groups").delete().neq("id", "").execute()
+            # Delete all - use '.not_.is_()' filter to match all records (id not null)
+            self.client.table("story_groups").delete().not_.is_("id", "null").execute()
             
             logger.info(f"Deleted {count} groups")
             return count
@@ -650,8 +650,8 @@ class GroupMemberWriter:
             ).execute()
             count = count_response.count or 0
             
-            # Delete all
-            self.client.table("story_group_members").delete().neq("id", "").execute()
+            # Delete all - use 'not_.is_()' filter to match all records with non-null id
+            self.client.table("story_group_members").delete().not_.is_("id", "null").execute()
             
             logger.info(f"Deleted {count} memberships")
             return count

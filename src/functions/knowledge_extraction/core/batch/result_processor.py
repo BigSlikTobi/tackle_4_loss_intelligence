@@ -296,20 +296,61 @@ class BatchResultProcessor:
         """Parse entity extraction response from LLM."""
         try:
             # Try to extract JSON from response
-            start_idx = output_text.find("{")
-            end_idx = output_text.rfind("}") + 1
+            # Check for both object format and array format
+            start_obj = output_text.find("{")
+            start_arr = output_text.find("[")
             
-            if start_idx == -1 or end_idx == 0:
+            # Determine which comes first
+            if start_obj == -1 and start_arr == -1:
                 logger.warning(f"No JSON found in entity response for {custom_id}")
                 return []
             
-            json_str = output_text[start_idx:end_idx]
-            data = json.loads(json_str)
+            entity_list = None
+            
+            # Try object format first (most common and robust)
+            # This avoids issues with stray brackets like [INFO] or [1] in LLM output
+            if start_obj != -1:
+                end_idx = output_text.rfind("}") + 1
+                if end_idx > 0:
+                    json_str = output_text[start_obj:end_idx]
+                    try:
+                        data = json.loads(json_str)
+                        # Handle both {"entities": [...]} and direct array
+                        if isinstance(data, list):
+                            entity_list = data
+                        else:
+                            entity_list = data.get("entities", [])
+                    except json.JSONDecodeError:
+                        # Object parsing failed, will try array format below
+                        logger.debug(f"Object format parsing failed for {custom_id}, trying array format")
+            
+            # Fall back to array format if object parsing didn't work
+            if entity_list is None and start_arr != -1:
+                end_idx = output_text.rfind("]") + 1
+                if end_idx > 0:
+                    json_str = output_text[start_arr:end_idx]
+                    try:
+                        data = json.loads(json_str)
+                        # If it's already an array, use it directly
+                        if isinstance(data, list):
+                            entity_list = data
+                        else:
+                            entity_list = data.get("entities", [])
+                    except json.JSONDecodeError:
+                        logger.warning(f"Both object and array parsing failed for {custom_id}")
+                        return []
+            
+            # If we still don't have a valid entity list, return empty
+            if entity_list is None:
+                logger.warning(f"Could not parse entity response for {custom_id}")
+                return []
             
             entities = []
-            for entity_data in data.get("entities", []):
+            for entity_data in entity_list:
+                # Handle both "entity_type" and "type" fields
+                entity_type = entity_data.get("entity_type") or entity_data.get("type", "")
                 entity = ExtractedEntity(
-                    entity_type=entity_data.get("entity_type", "").lower(),
+                    entity_type=entity_type.lower(),
                     mention_text=entity_data.get("mention_text", "").strip(),
                     context=entity_data.get("context"),
                     confidence=entity_data.get("confidence"),
