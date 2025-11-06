@@ -138,14 +138,14 @@ ENTITY_EXTRACTION_PROMPT_TEMPLATE = dedent(
     - context: Brief note about the player's role, accolades, or relevance (optional but helpful)
     - confidence: 0.90-1.0 with position+team, 0.75-0.90 with position OR team, 0.70-0.80 name only
     - rank: Importance ranking (1=primary/main subject, 2=important mention, 3+=minor mention)
+    - Only extract actual players as type "player". For coaches, general managers, and other non-player personnel, use type "staff".
     
     **Examples:**
     ✅ "cornerback Sauce Gardner" → {{"type": "player", "mention_text": "Sauce Gardner", "position": "CB", "team_name": "New York Jets", "team_abbr": "NYJ", "context": "two-time All-Pro", "confidence": 0.95}}
     ✅ "defensive tackle Quinnen Williams" → {{"type": "player", "mention_text": "Quinnen Williams", "position": "DT", "team_name": "New York Jets", "team_abbr": "NYJ", "context": "2022 All-Pro", "confidence": 0.95}}
     ✅ "receiver Adonai Mitchell" → {{"type": "player", "mention_text": "Adonai Mitchell", "position": "WR", "confidence": 0.85}}
     ✅ "Breece Hall" (mentioned as important player) → {{"type": "player", "mention_text": "Breece Hall", "team_name": "New York Jets", "team_abbr": "NYJ", "confidence": 0.80}}
-    ✅ "General Manager Darren Mougey" → {{"type": "player", "mention_text": "Darren Mougey", "context": "General Manager", "team_name": "New York Jets", "team_abbr": "NYJ", "confidence": 0.85}}
-    
+    ✅ "General Manager Darren Mougey" → {{"type": "staff", "mention_text": "Darren Mougey", "role": "General Manager", "team_name": "New York Jets", "team_abbr": "NYJ", "confidence": 0.85}}
     **Why we extract with partial information:**
     - "Quinnen Williams" appears with "defensive tackle" → We have name + position, extract it!
     - Context mentions "Jets" earlier → We can infer team association
