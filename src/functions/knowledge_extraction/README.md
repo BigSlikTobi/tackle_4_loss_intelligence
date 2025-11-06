@@ -124,6 +124,26 @@ python scripts/extract_knowledge_cli.py --limit 100 --verbose
 python scripts/extract_knowledge_cli.py --retry-failed
 ```
 
+#### Option C: Manual Article/Summary Testing
+
+**🧪 Local experimentation | ✍️ Provide your own text | 🖥️ Console output**
+
+```bash
+# 1. Capture an article or summary into a JSON payload
+python scripts/manual_extract_input_cli.py --file path/to/article.txt --title "Week 5 recap"
+
+# 2. Run extraction on that payload (use --mock for offline demo output)
+python scripts/manual_extract_output_cli.py --mock
+
+# Optional: save the extraction results
+python scripts/manual_extract_output_cli.py --output results.json
+```
+
+Use the `--stdin` or `--text` flags on the input CLI for quick experiments.
+The output CLI prints entities/topics to the console and can write structured
+JSON for further analysis. Pass `--max-topics` or `--max-entities` to control
+model limits.
+
 **When to use synchronous processing:**
 - ✅ Small volumes (<100 groups) where cost difference is minimal
 - ✅ Urgent/time-sensitive extraction needs
