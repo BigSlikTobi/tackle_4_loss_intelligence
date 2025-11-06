@@ -650,7 +650,7 @@ class GroupMemberWriter:
             ).execute()
             count = count_response.count or 0
             
-            # Delete all - use 'not.is.null' filter which matches all records
+            # Delete all - use 'not_.is_()' filter to match all records with non-null id
             self.client.table("story_group_members").delete().not_.is_("id", "null").execute()
             
             logger.info(f"Deleted {count} memberships")
