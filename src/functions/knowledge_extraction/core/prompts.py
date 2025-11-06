@@ -97,19 +97,20 @@ ENTITY_EXTRACTION_PROMPT_TEMPLATE = dedent(
     - City/location only: "New York", "Indianapolis" (when clearly referring to the team)
     - Nickname only: "Jets", "Chiefs", "Colts"
     - Possessive: "Jets'", "Chiefs'", "team's"
-    - Contextual: "the team", "the organization" (when context makes it clear which team)
+    - Contextual: "the team", "the organization" (extract ONLY when the context is unambiguous, e.g., the article is solely about one team)
     
     **How to extract:**
     - mention_text: Use the exact text from the summary (e.g., "New York Jets", "Jets", "Indianapolis")
     - team_name: Full team name (e.g., "New York Jets", "Indianapolis Colts")
     - team_abbr: Standard NFL abbreviation if known (e.g., "NYJ", "IND", "KC")
     - confidence: 0.95-1.0 for explicit mentions, 0.7-0.9 for contextual references
-    
+    - For generic references ("the team", "the organization"), extract ONLY if the context makes it unambiguous which team is being referred to (e.g., the summary/article is solely about one team).
+
     **Examples:**
     ✅ "New York Jets General Manager..." → {{"type": "team", "mention_text": "New York Jets", "team_name": "New York Jets", "team_abbr": "NYJ", "confidence": 1.0}}
     ✅ "...the Jets received..." → {{"type": "team", "mention_text": "Jets", "team_name": "New York Jets", "team_abbr": "NYJ", "confidence": 0.95}}
     ✅ "...sending them to Indianapolis" → {{"type": "team", "mention_text": "Indianapolis", "team_name": "Indianapolis Colts", "team_abbr": "IND", "confidence": 0.90}}
-    ✅ "the team's long-term success" → {{"type": "team", "mention_text": "the team", "team_name": "New York Jets", "team_abbr": "NYJ", "confidence": 0.85}}
+    ✅ "the team's long-term success" (assuming the article is solely about the New York Jets) → {{"type": "team", "mention_text": "the team", "team_name": "New York Jets", "team_abbr": "NYJ", "confidence": 0.85}}
 
     ═══════════════════════════════════════════════════════════════════════════════
 
