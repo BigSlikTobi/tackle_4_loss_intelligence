@@ -305,34 +305,45 @@ class BatchResultProcessor:
                 logger.warning(f"No JSON found in entity response for {custom_id}")
                 return []
             
-            # Try array format first if it appears before object
-            if start_arr != -1 and (start_obj == -1 or start_arr < start_obj):
-                end_idx = output_text.rfind("]") + 1
-                if end_idx > 0:
-                    json_str = output_text[start_arr:end_idx]
-                    data = json.loads(json_str)
-                    # If it's already an array, use it directly
-                    if isinstance(data, list):
-                        entity_list = data
-                    else:
-                        entity_list = data.get("entities", [])
-                else:
-                    logger.warning(f"Invalid array JSON in entity response for {custom_id}")
-                    return []
-            else:
-                # Try object format
+            entity_list = None
+            
+            # Try object format first (most common and robust)
+            # This avoids issues with stray brackets like [INFO] or [1] in LLM output
+            if start_obj != -1:
                 end_idx = output_text.rfind("}") + 1
                 if end_idx > 0:
                     json_str = output_text[start_obj:end_idx]
-                    data = json.loads(json_str)
-                    # Handle both {"entities": [...]} and direct array
-                    if isinstance(data, list):
-                        entity_list = data
-                    else:
-                        entity_list = data.get("entities", [])
-                else:
-                    logger.warning(f"Invalid object JSON in entity response for {custom_id}")
-                    return []
+                    try:
+                        data = json.loads(json_str)
+                        # Handle both {"entities": [...]} and direct array
+                        if isinstance(data, list):
+                            entity_list = data
+                        else:
+                            entity_list = data.get("entities", [])
+                    except json.JSONDecodeError:
+                        # Object parsing failed, will try array format below
+                        logger.debug(f"Object format parsing failed for {custom_id}, trying array format")
+            
+            # Fall back to array format if object parsing didn't work
+            if entity_list is None and start_arr != -1:
+                end_idx = output_text.rfind("]") + 1
+                if end_idx > 0:
+                    json_str = output_text[start_arr:end_idx]
+                    try:
+                        data = json.loads(json_str)
+                        # If it's already an array, use it directly
+                        if isinstance(data, list):
+                            entity_list = data
+                        else:
+                            entity_list = data.get("entities", [])
+                    except json.JSONDecodeError:
+                        logger.warning(f"Both object and array parsing failed for {custom_id}")
+                        return []
+            
+            # If we still don't have a valid entity list, return empty
+            if entity_list is None:
+                logger.warning(f"Could not parse entity response for {custom_id}")
+                return []
             
             entities = []
             for entity_data in entity_list:

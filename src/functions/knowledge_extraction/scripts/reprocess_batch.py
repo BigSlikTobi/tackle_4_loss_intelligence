@@ -11,8 +11,11 @@ from src.functions.knowledge_extraction.core.batch.result_processor import Batch
 # Load environment variables
 load_env()
 
-# Find the batch output file
-output_file = Path(__file__).parent.parent / 'batch_690b4856dacc8190ad2d2d90e7c300d7_output.jsonl'
+# Get batch output file from command-line argument or use default
+if len(sys.argv) > 1:
+    output_file = Path(sys.argv[1])
+else:
+    output_file = Path(__file__).parent.parent / 'batch_690b4856dacc8190ad2d2d90e7c300d7_output.jsonl'
 
 if not output_file.exists():
     print(f'File not found: {output_file.absolute()}')
