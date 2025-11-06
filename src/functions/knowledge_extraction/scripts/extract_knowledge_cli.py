@@ -2,12 +2,16 @@
 Command-line interface for knowledge extraction.
 
 Extracts topics and entities from story groups and saves to database.
+Provides utilities for manual payload testing used by other CLI helpers.
 """
 
 import argparse
 import logging
+import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 # Bootstrap to add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
@@ -21,8 +25,206 @@ from src.functions.knowledge_extraction.core.pipelines.batch_pipeline import (
     BatchPipeline,
 )
 from src.functions.knowledge_extraction.core.db.story_reader import StoryGroupReader
+from src.functions.knowledge_extraction.core.extraction.entity_extractor import (
+    EntityExtractor,
+    ExtractedEntity,
+)
+from src.functions.knowledge_extraction.core.extraction.topic_extractor import (
+    TopicExtractor,
+    ExtractedTopic,
+)
+from src.functions.knowledge_extraction.core.resolution.entity_resolver import (
+    EntityResolver,
+    ResolvedEntity,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ManualExtractionResult:
+    """Container for manual extraction runs."""
+
+    input_type: Optional[str]
+    title: Optional[str]
+    text_length: int
+    topics: List[ExtractedTopic]
+    entities: List[ExtractedEntity]
+    resolved_entities: List[ResolvedEntity]
+    metadata: Dict[str, Any]
+
+    def summary(self) -> Dict[str, int]:
+        """Return high-level counts similar to the pipeline summary."""
+        return {
+            "topics_extracted": len(self.topics),
+            "entities_extracted": len(self.entities),
+            "resolved_entities": len(self.resolved_entities),
+        }
+
+
+def _mock_manual_extraction(
+    input_type: Optional[str],
+    title: Optional[str],
+    metadata: Dict[str, Any],
+    text_length: int,
+) -> ManualExtractionResult:
+    """Return deterministic mock output for offline demos."""
+    topics = [
+        ExtractedTopic(topic="team performance & trends", confidence=0.88, rank=1),
+        ExtractedTopic(topic="player profiles & interviews", confidence=0.64, rank=2),
+    ]
+    entities = [
+        ExtractedEntity(
+            entity_type="team",
+            mention_text="Buffalo Bills",
+            team_abbr="BUF",
+            confidence=0.86,
+            rank=1,
+        ),
+        ExtractedEntity(
+            entity_type="player",
+            mention_text="Josh Allen",
+            position="QB",
+            team_abbr="BUF",
+            confidence=0.74,
+            rank=2,
+        ),
+    ]
+    resolved_entities = [
+        ResolvedEntity(
+            entity_type="team",
+            entity_id="BUF",
+            mention_text="Buffalo Bills",
+            matched_name="Buffalo Bills",
+            confidence=0.9,
+            rank=1,
+        ),
+        ResolvedEntity(
+            entity_type="player",
+            entity_id="BUF-QB-J.ALLEN",
+            mention_text="Josh Allen",
+            matched_name="Josh Allen",
+            confidence=0.78,
+            rank=2,
+            position="QB",
+            team_abbr="BUF",
+        ),
+    ]
+    return ManualExtractionResult(
+        input_type=input_type,
+        title=title,
+        text_length=text_length,
+        topics=topics,
+        entities=entities,
+        resolved_entities=resolved_entities,
+        metadata=metadata,
+    )
+
+
+def _resolve_manual_entities(
+    entities: List[ExtractedEntity],
+    resolver: EntityResolver,
+) -> List[ResolvedEntity]:
+    """Resolve extracted entities using the same logic as the main pipeline."""
+    resolved: List[ResolvedEntity] = []
+    for entity in entities:
+        try:
+            resolved_entity = None
+            if entity.entity_type == "player":
+                resolved_entity = resolver.resolve_player(
+                    entity.mention_text,
+                    context=entity.context,
+                    position=entity.position,
+                    team_abbr=entity.team_abbr,
+                    team_name=entity.team_name,
+                )
+            elif entity.entity_type == "team":
+                resolved_entity = resolver.resolve_team(
+                    entity.mention_text,
+                    context=entity.context,
+                )
+            elif entity.entity_type == "game":
+                resolved_entity = resolver.resolve_game(
+                    entity.mention_text,
+                    context=entity.context,
+                )
+
+            if not resolved_entity:
+                logger.debug("Unable to resolve %s: %s", entity.entity_type, entity.mention_text)
+                continue
+
+            resolved_entity.is_primary = entity.is_primary
+            resolved_entity.rank = entity.rank
+            if entity.entity_type == "player":
+                resolved_entity.position = entity.position
+                resolved_entity.team_abbr = entity.team_abbr
+                resolved_entity.team_name = entity.team_name
+
+            resolved.append(resolved_entity)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Error resolving entity %s: %s", entity.mention_text, exc)
+            continue
+
+    return resolved
+
+
+def run_manual_extraction(
+    payload: Dict[str, Any],
+    *,
+    max_topics: Optional[int] = None,
+    max_entities: Optional[int] = None,
+    use_mock: bool = False,
+    resolve_entities: bool = True,
+) -> ManualExtractionResult:
+    """
+    Run the knowledge extraction workflow on a manual payload.
+
+    This mirrors the production pipeline logic so other CLI helpers can
+    exercise the full extraction flow without touching the database.
+    """
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise ValueError("Manual extraction payload does not contain text to analyse.")
+
+    input_type = payload.get("input_type")
+    title = payload.get("title")
+    metadata = payload.get("metadata") or {}
+
+    text_length = len(text)
+
+    if use_mock:
+        logger.warning("Using mock manual extraction output (no API calls).")
+        return _mock_manual_extraction(input_type, title, metadata, text_length)
+
+    if max_topics is None:
+        max_topics = int(os.getenv("MAX_TOPICS_PER_GROUP", "10"))
+    if max_entities is None:
+        max_entities = int(os.getenv("MAX_ENTITIES_PER_GROUP", "20"))
+
+    topic_extractor = TopicExtractor()
+    entity_extractor = EntityExtractor()
+
+    topics = topic_extractor.extract(text, max_topics=max_topics)
+    entities = entity_extractor.extract(text, max_entities=max_entities)
+
+    resolved_entities: List[ResolvedEntity] = []
+    if resolve_entities:
+        try:
+            resolver = EntityResolver()
+            resolved_entities = _resolve_manual_entities(entities, resolver)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Entity resolution unavailable: %s", exc)
+            resolved_entities = []
+
+    return ManualExtractionResult(
+        input_type=input_type,
+        title=title,
+        text_length=text_length,
+        topics=topics,
+        entities=entities,
+        resolved_entities=resolved_entities,
+        metadata=metadata,
+    )
 
 
 def setup_cli_parser() -> argparse.ArgumentParser:
@@ -413,7 +615,6 @@ def main():
         sys.exit(0 if success else 1)
     
     # Validate OpenAI API key
-    import os
     if not os.getenv("OPENAI_API_KEY"):
         logger.error("OPENAI_API_KEY environment variable not set")
         logger.error("Set it in .env file or export OPENAI_API_KEY=your-key")

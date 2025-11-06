@@ -70,3 +70,6 @@ docs/game-analysis-package/archive
 
 # Playwright files
 .playwright
+
+#mock content
+src/functions/knowledge_extraction/scripts/test_content
