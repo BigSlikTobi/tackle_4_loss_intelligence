@@ -1,16 +1,24 @@
 """Story grouping logic using similarity-based clustering."""
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 import numpy as np
 
-from .similarity import (
-    calculate_cosine_similarity,
-    calculate_centroid,
-    find_most_similar,
-)
+from .similarity import calculate_cosine_similarity, find_most_similar
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AssignmentResult:
+    """Result of assigning a story to a group."""
+
+    group: "StoryGroup"
+    similarity: float
+    created_new_group: bool
+    added_to_group: bool
+    previous_member_count: int
 
 
 class StoryGroup:
@@ -39,6 +47,10 @@ class StoryGroup:
         self._centroid = centroid
         self._existing_member_count = existing_member_count
         self._pending_members: List[Dict] = member_embeddings.copy() if member_embeddings else []
+        self._base_centroid = centroid
+        self._vector_dimension: Optional[int] = (
+            len(centroid) if centroid is not None else None
+        )
 
     @property
     def centroid(self) -> Optional[List[float]]:
@@ -49,11 +61,41 @@ class StoryGroup:
 
     def _calculate_centroid(self) -> List[float]:
         """Calculate centroid from member embeddings."""
-        if not self.members:
+        vectors: List[np.ndarray] = []
+        weights: List[float] = []
+
+        if self._base_centroid is not None and self._existing_member_count > 0:
+            vectors.append(np.array(self._base_centroid, dtype=np.float32))
+            weights.append(float(self._existing_member_count))
+
+        member_vectors = [m["embedding_vector"] for m in self.members]
+
+        if not member_vectors and not vectors:
             raise ValueError("Cannot calculate centroid for empty group")
-        
-        embeddings = [m["embedding_vector"] for m in self.members]
-        return calculate_centroid(embeddings)
+
+        for embedding in member_vectors:
+            vectors.append(np.array(embedding, dtype=np.float32))
+            weights.append(1.0)
+
+        weighted_sum = np.zeros_like(vectors[0], dtype=np.float32)
+        total_weight = 0.0
+
+        for vector, weight in zip(vectors, weights):
+            if self._vector_dimension is None:
+                self._vector_dimension = len(vector)
+            elif len(vector) != self._vector_dimension:
+                raise ValueError("Embedding dimensions must match for centroid calculation")
+
+            weighted_sum += vector * weight
+            total_weight += weight
+
+        centroid = weighted_sum / total_weight
+
+        norm = np.linalg.norm(centroid)
+        if norm > 0:
+            centroid = centroid / norm
+
+        return centroid.tolist()
 
     def add_member(self, news_url_id: str, embedding_vector: List[float]) -> float:
         """
@@ -72,6 +114,11 @@ class StoryGroup:
         else:
             similarity = calculate_cosine_similarity(embedding_vector, self.centroid)
         
+        if self._vector_dimension is None:
+            self._vector_dimension = len(embedding_vector)
+        elif len(embedding_vector) != self._vector_dimension:
+            raise ValueError("Embedding dimensions must match existing centroid")
+
         # Add member
         member = {
             "news_url_id": news_url_id,
@@ -81,10 +128,28 @@ class StoryGroup:
         self.members.append(member)
         self._pending_members.append(member)
         
-        # Recalculate centroid
+        # Recalculate centroid using weighted average of existing + new members
         self._centroid = self._calculate_centroid()
-        
+
         return similarity
+
+    def mark_members_persisted(self, members: List[Dict]) -> None:
+        """Mark members as persisted to the database."""
+        if not members:
+            return
+
+        persisted_ids = {member["news_url_id"] for member in members}
+        removed = [m for m in self.members if m["news_url_id"] in persisted_ids]
+
+        if not removed:
+            return
+
+        self._existing_member_count += len(removed)
+        self.members = [m for m in self.members if m["news_url_id"] not in persisted_ids]
+        self._pending_members = [
+            m for m in self._pending_members if m["news_url_id"] not in persisted_ids
+        ]
+        self._base_centroid = self.centroid
 
     @property
     def member_count(self) -> int:
@@ -98,6 +163,11 @@ class StoryGroup:
         For new groups, this just returns len(self.members).
         """
         return self._existing_member_count + len(self.members)
+
+    @property
+    def existing_member_count(self) -> int:
+        """Return the number of members persisted before the current run."""
+        return self._existing_member_count
 
     def get_member_news_url_ids(self) -> List[str]:
         """Get list of news URL IDs for all members."""
@@ -164,72 +234,102 @@ class StoryGrouper:
         self,
         news_url_id: str,
         embedding_vector: List[float],
-    ) -> Tuple[StoryGroup, float]:
-        """
-        Assign a story to the most similar group or create a new group.
-        
-        Args:
-            news_url_id: ID of the news URL
-            embedding_vector: Embedding vector for the story
-            
-        Returns:
-            Tuple of (group, similarity_score)
-        """
+    ) -> AssignmentResult:
+        """Assign a story to the most similar group or create a new group."""
+
         # If no groups exist, create the first one
         if not self.groups:
             group = StoryGroup()
             similarity = group.add_member(news_url_id, embedding_vector)
             self.groups.append(group)
-            
-            logger.debug(
-                f"Created first group for story {news_url_id}"
+
+            logger.debug("Created first group for story %s", news_url_id)
+            return AssignmentResult(
+                group=group,
+                similarity=similarity,
+                created_new_group=True,
+                added_to_group=True,
+                previous_member_count=0,
             )
-            return (group, similarity)
-        
-        # Find most similar existing group
-        centroids = [g.centroid for g in self.groups if g.centroid is not None]
-        
-        if not centroids:
-            # No valid centroids, create new group
+
+        # Find most similar existing group while keeping original indices
+        candidate_groups = [
+            (idx, group.centroid)
+            for idx, group in enumerate(self.groups)
+            if group.centroid is not None
+        ]
+
+        if not candidate_groups:
             group = StoryGroup()
             similarity = group.add_member(news_url_id, embedding_vector)
             self.groups.append(group)
-            return (group, similarity)
-        
+            return AssignmentResult(
+                group=group,
+                similarity=similarity,
+                created_new_group=True,
+                added_to_group=True,
+                previous_member_count=0,
+            )
+
+        centroid_vectors = [centroid for _, centroid in candidate_groups]
         best_idx, best_similarity = find_most_similar(
             embedding_vector,
-            centroids,
+            centroid_vectors,
             threshold=self.similarity_threshold,
         )
-        
-        # If similarity meets threshold, add to existing group
+
         if best_idx >= 0:
-            group = self.groups[best_idx]
+            group_index = candidate_groups[best_idx][0]
+            group = self.groups[group_index]
 
             if news_url_id in group.get_member_news_url_ids():
                 logger.debug(
-                    f"Story {news_url_id} already pending in group {group.group_id}, skipping duplicate"
+                    "Story %s already pending in group %s, skipping duplicate",
+                    news_url_id,
+                    group.group_id,
                 )
-                return (group, 1.0)
+                return AssignmentResult(
+                    group=group,
+                    similarity=1.0,
+                    created_new_group=False,
+                    added_to_group=False,
+                    previous_member_count=group.member_count,
+                )
 
+            previous_member_count = group.member_count
             similarity = group.add_member(news_url_id, embedding_vector)
 
             logger.debug(
-                f"Added story {news_url_id} to existing group "
-                f"(similarity: {similarity:.4f})"
+                "Added story %s to existing group %s (similarity: %.4f)",
+                news_url_id,
+                group.group_id,
+                similarity,
             )
-            return (group, similarity)
-        
+            return AssignmentResult(
+                group=group,
+                similarity=similarity,
+                created_new_group=False,
+                added_to_group=True,
+                previous_member_count=previous_member_count,
+            )
+
         # Otherwise, create new group
         group = StoryGroup()
         similarity = group.add_member(news_url_id, embedding_vector)
         self.groups.append(group)
-        
+
         logger.debug(
-            f"Created new group for story {news_url_id} "
-            f"(max similarity: {best_similarity:.4f} below threshold)"
+            "Created new group for story %s (max similarity: %.4f below threshold)",
+            news_url_id,
+            best_similarity,
         )
-        return (group, similarity)
+        return AssignmentResult(
+            group=group,
+            similarity=similarity,
+            created_new_group=True,
+            added_to_group=True,
+            previous_member_count=0,
+        )
 
     def group_stories(
         self,
@@ -264,9 +364,9 @@ class StoryGrouper:
                 continue
             
             # Assign to group
-            group, similarity = self.assign_story(news_url_id, embedding_vector)
+            self.assign_story(news_url_id, embedding_vector)
             grouped_count += 1
-            
+
             # Log progress every 100 stories
             if grouped_count % 100 == 0:
                 logger.info(

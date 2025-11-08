@@ -155,11 +155,11 @@ def find_most_similar(
     
     best_idx = -1
     best_similarity = threshold
-    
+
     for idx, candidate in enumerate(candidate_vectors):
         similarity = calculate_cosine_similarity(query_vector, candidate)
-        
-        if similarity > best_similarity:
+
+        if similarity >= best_similarity:
             best_similarity = similarity
             best_idx = idx
     
