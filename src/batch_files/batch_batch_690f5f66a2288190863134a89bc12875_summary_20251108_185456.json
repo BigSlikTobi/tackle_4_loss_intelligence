@@ -1,0 +1,13 @@
+{
+  "batch_id": "batch_690f5f66a2288190863134a89bc12875",
+  "processed_at": "20251108_185456",
+  "output_file_path": "batch_files/batch_batch_690f5f66a2288190863134a89bc12875_output_20251108_185456.jsonl",
+  "dry_run": false,
+  "results": {
+    "groups_processed": 628,
+    "topics_extracted": 3130,
+    "entities_extracted": 4774,
+    "groups_with_errors": 6,
+    "error_count": 0
+  }
+}
