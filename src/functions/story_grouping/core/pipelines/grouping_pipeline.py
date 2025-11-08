@@ -209,7 +209,8 @@ class GroupingPipeline:
                         if not self.continue_on_error:
                             raise
                     else:
-                        # Clear pending members that were written successfully
+                        for group, members in pending_groups:
+                            group.mark_members_persisted(members)
                         pending_groups.clear()
 
             if results["stories_processed"] == 0:

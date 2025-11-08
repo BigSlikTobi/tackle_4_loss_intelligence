@@ -105,6 +105,75 @@ class EmbeddingReader:
         except Exception as e:
             logger.error(f"Error fetching ungrouped embeddings: {e}")
             raise
+
+    def fetch_embeddings_by_news_url_ids(
+        self, news_url_ids: List[str]
+    ) -> List[Dict]:
+        """Fetch embeddings for a specific list of news_url IDs."""
+
+        if not news_url_ids:
+            return []
+
+        logger.info(
+            "Fetching embeddings for %s requested news_url_ids", len(news_url_ids)
+        )
+
+        unique_ids: List[str] = []
+        seen = set()
+        for news_id in news_url_ids:
+            if news_id and news_id not in seen:
+                seen.add(news_id)
+                unique_ids.append(news_id)
+
+        if not unique_ids:
+            return []
+
+        chunk_size = 200
+        embeddings: Dict[str, Dict] = {}
+
+        for start in range(0, len(unique_ids), chunk_size):
+            chunk = unique_ids[start : start + chunk_size]
+            try:
+                response = (
+                    self.client.table("story_embeddings")
+                    .select("id, news_url_id, embedding_vector, created_at")
+                    .in_("news_url_id", chunk)
+                    .execute()
+                )
+
+                for item in response.data or []:
+                    vector = parse_vector(item.get("embedding_vector"))
+                    if vector is not None:
+                        item["embedding_vector"] = vector
+                        embeddings[item["news_url_id"]] = item
+                    else:
+                        logger.warning(
+                            "Embedding vector missing for news_url_id=%s",
+                            item.get("news_url_id"),
+                        )
+
+            except Exception as exc:
+                logger.error(
+                    "Error fetching embeddings for IDs %s-%s: %s",
+                    start,
+                    start + len(chunk) - 1,
+                    exc,
+                )
+                raise
+
+        ordered_results = [
+            embeddings[news_id]
+            for news_id in news_url_ids
+            if news_id in embeddings
+        ]
+
+        logger.info(
+            "Fetched %s/%s embeddings for requested IDs",
+            len(ordered_results),
+            len(unique_ids),
+        )
+
+        return ordered_results
     
     def _iter_ungrouped_fallback_batches(
         self,

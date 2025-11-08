@@ -10,12 +10,14 @@ Usage:
     python group_stories_cli.py --regroup          # Regroup all stories
     python group_stories_cli.py --progress         # Show progress statistics
     python group_stories_cli.py --threshold 0.90   # Use custom threshold
+    python group_stories_cli.py --preview-ids ID1 ID2 ...
 """
 
 import argparse
 import logging
 import sys
 from datetime import datetime
+from typing import Dict, List
 
 # Bootstrap path
 from _bootstrap import *  # noqa
@@ -82,6 +84,12 @@ def main():
         help="Number of days to look back for stories and groups (default: 14)",
     )
 
+    parser.add_argument(
+        "--preview-ids",
+        nargs="+",
+        help="Preview grouping for the provided news_url_id values",
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -103,10 +111,19 @@ def main():
 
     try:
         # Initialize components with date filtering
+        preview_ids: List[str] = []
+        if args.preview_ids:
+            for token in args.preview_ids:
+                preview_ids.extend(
+                    [value.strip() for value in token.split(",") if value.strip()]
+                )
+
+        writers_dry_run = args.dry_run or bool(preview_ids)
+
         embedding_reader = EmbeddingReader(days_lookback=args.days)
-        group_writer = GroupWriter(dry_run=args.dry_run, days_lookback=args.days)
-        member_writer = GroupMemberWriter(dry_run=args.dry_run)
-        
+        group_writer = GroupWriter(dry_run=writers_dry_run, days_lookback=args.days)
+        member_writer = GroupMemberWriter(dry_run=writers_dry_run)
+
         pipeline = GroupingPipeline(
             embedding_reader=embedding_reader,
             group_writer=group_writer,
@@ -114,6 +131,88 @@ def main():
             similarity_threshold=args.threshold,
             continue_on_error=True,
         )
+
+        if preview_ids:
+            logger.info("Running preview mode for %s news_url_ids", len(preview_ids))
+
+            existing_groups = group_writer.get_active_groups()
+            pipeline.grouper.clear_groups()
+            pipeline.grouper.load_existing_groups(existing_groups)
+
+            embeddings = embedding_reader.fetch_embeddings_by_news_url_ids(preview_ids)
+            found_ids = {item["news_url_id"] for item in embeddings}
+            missing_ids = [news_id for news_id in preview_ids if news_id not in found_ids]
+
+            if not embeddings:
+                logger.error("No embeddings found for requested IDs")
+                if missing_ids:
+                    print("\nMissing embeddings for:")
+                    for missing in missing_ids:
+                        print(f"  - {missing}")
+                sys.exit(1)
+
+            preview_rows = []
+            new_group_labels: Dict[int, str] = {}
+            new_group_counter = 0
+
+            for story in embeddings:
+                result = pipeline.grouper.assign_story(
+                    story["news_url_id"], story["embedding_vector"]
+                )
+
+                group_obj = result.group
+                if group_obj.group_id:
+                    group_label = group_obj.group_id
+                    group_status = "existing"
+                else:
+                    group_key = id(group_obj)
+                    if group_key not in new_group_labels:
+                        new_group_counter += 1
+                        new_group_labels[group_key] = f"NEW-{new_group_counter}"
+                    group_label = new_group_labels[group_key]
+                    group_status = "new"
+
+                row = {
+                    "news_url_id": story["news_url_id"],
+                    "group": group_label,
+                    "status": group_status,
+                    "similarity": result.similarity,
+                    "previous_size": result.previous_member_count,
+                    "current_size": group_obj.member_count,
+                    "added": result.added_to_group,
+                }
+                preview_rows.append(row)
+
+            print("\n" + "=" * 80)
+            print("GROUPING PREVIEW RESULTS")
+            print("=" * 80)
+            print(
+                f"Threshold: {pipeline.similarity_threshold:.2f} | IDs processed: {len(preview_rows)}"
+            )
+            print("-" * 80)
+            header = (
+                f"{'news_url_id':<36} {'group':<18} {'status':<9} "
+                f"{'similarity':>11} {'prev_size':>10} {'new_size':>10} {'action':<8}"
+            )
+            print(header)
+            print("-" * 80)
+
+            for row in preview_rows:
+                action = "added" if row["added"] else "skip"
+                print(
+                    f"{row['news_url_id']:<36} {row['group']:<18} {row['status']:<9} "
+                    f"{row['similarity']:>11.4f} {row['previous_size']:>10} "
+                    f"{row['current_size']:>10} {action:<8}"
+                )
+
+            if missing_ids:
+                print("\nMissing embeddings for:")
+                for missing in missing_ids:
+                    print(f"  - {missing}")
+
+            print("=" * 80 + "\n")
+
+            sys.exit(0)
 
         # Handle progress mode
         if args.progress:
