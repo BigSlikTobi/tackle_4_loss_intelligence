@@ -9,8 +9,7 @@ from dataclasses import dataclass, field
 from textwrap import dedent
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 from google.api_core.exceptions import GoogleAPIError, ResourceExhausted
 
 from src.shared.utils.logging import get_logger
@@ -90,7 +89,7 @@ class GeminiClient:
     ) -> None:
         self.config = config
         self._logger = get_logger(__name__)
-        self._client = genai.Client(api_key=config.api_key)
+        genai.configure(api_key=config.api_key)
         self._rate_limiter = rate_limiter or RateLimiter(max_requests_per_minute=100)
         self._request_timeout = config.timeout_seconds
 
@@ -190,16 +189,16 @@ class GeminiClient:
         if not user_text:
             user_text = "(no user content provided)"
 
-        grounding_tool = None
-        if use_web_search:
-            grounding_tool = types.Tool(google_search=types.GoogleSearch())
+        # Build generation config
+        generation_config = {
+            "temperature": _DEFAULT_TEMPERATURE,
+            "max_output_tokens": _MAX_OUTPUT_TOKENS,
+        }
 
-        generation_config = types.GenerateContentConfig(
-            temperature=_DEFAULT_TEMPERATURE,
-            max_output_tokens=_MAX_OUTPUT_TOKENS,
-        )
-        if grounding_tool:
-            generation_config.tools = [grounding_tool]
+        # Build tools for grounding if needed
+        tools = None
+        if use_web_search:
+            tools = [{"google_search_retrieval": {}}]
 
         prompt_text = user_text.strip()
         if system_text:
@@ -220,12 +219,23 @@ class GeminiClient:
                 raise GeminiClientError("Local rate limiter exhausted") from exc
 
             try:
+                model = genai.GenerativeModel(
+                    model_name=self.config.model,
+                    generation_config=generation_config,
+                )
+                
+                # Add tools if grounding is enabled
+                if tools:
+                    model = genai.GenerativeModel(
+                        model_name=self.config.model,
+                        generation_config=generation_config,
+                        tools=tools,
+                    )
+                
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
-                        self._client.models.generate_content,
-                        model=self.config.model,
-                        contents=prompt_text,
-                        config=generation_config,
+                        model.generate_content,
+                        prompt_text,
                     ),
                     timeout=self._request_timeout,
                 )

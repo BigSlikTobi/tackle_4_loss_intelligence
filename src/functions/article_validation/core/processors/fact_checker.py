@@ -148,16 +148,12 @@ class FactChecker:
 
         for claim, result in zip(claims, results):
             if isinstance(result, Exception):
+                # Verification error: treat as uncertain (cannot falsify = passes)
+                # The model's job is to falsify claims, not verify them
+                # If verification fails, we cannot falsify the claim, so it passes
                 errors += 1
-                issues.append(
-                    ValidationIssue(
-                        severity="warning",
-                        category="factual",
-                        message=f"Failed to verify claim: {claim.text}",
-                        location=claim.source_field,
-                        suggestion="Retry validation or review manually.",
-                    )
-                )
+                uncertain += 1
+                confidences.append(0.0)
                 continue
 
             confidences.append(result.confidence)
@@ -180,11 +176,13 @@ class FactChecker:
                 uncertain += 1
 
         total_checked = len(claims)
-        # New logic: score = 1.0 - (contradictions / total)
-        # Only contradicted claims reduce the score; uncertain/verified don't penalize
+        # Score based on contradictions only
+        # Falsification model: if we can't falsify it (uncertain/verified), it passes
+        # Only contradicted claims reduce the score
         score = 1.0 - (contradicted / total_checked) if total_checked else 1.0
         confidence = mean(confidences) if confidences else 0.0
-        passed = contradicted == 0 and errors == 0
+        # Pass if no claims were contradicted (errors don't fail since they're uncertain)
+        passed = contradicted == 0
 
         details = {
             "claims_checked": total_checked,

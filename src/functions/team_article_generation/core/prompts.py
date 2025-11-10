@@ -75,10 +75,10 @@ _team_article_instructions = dedent(
     4. Conclude with the current status, next steps, or anticipation.
 
     **Output Format (Strict JSON Only — No Markdown):**
-    {
-        "headline": string,                  // Clear and timely
-        "sub_header": string,                // One-sentence expansion of angle
-        "introduction_paragraph": string,    // Strong lead framing the story
+    {{
+        "headline": string, 
+        "sub_header": string,
+        "introduction_paragraph": string,
         "content": [
             string,
             string,
@@ -87,7 +87,7 @@ _team_article_instructions = dedent(
             string?,
             string?
         ]
-    }
+    }}
     """
 ).strip()
 

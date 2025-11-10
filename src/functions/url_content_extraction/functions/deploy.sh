@@ -91,6 +91,52 @@ fi
 
 LOCAL_PLAYWRIGHT_DIR="${PROJECT_ROOT}/${PLAYWRIGHT_SUBPATH}"
 
+info "Preparing Playwright browser bundle at ${LOCAL_PLAYWRIGHT_DIR} (runtime: ${RUNTIME_PLAYWRIGHT_PATH})"
+rm -rf "${LOCAL_PLAYWRIGHT_DIR}"
+mkdir -p "${LOCAL_PLAYWRIGHT_DIR}"
+
+if command -v docker >/dev/null 2>&1; then
+  info "Downloading Linux Chromium bundle via Playwright Docker image"
+  docker run --rm --platform linux/amd64 \
+    -v "${PROJECT_ROOT}":/workspace \
+    -w /workspace \
+    mcr.microsoft.com/playwright/python:v1.48.0 \
+    bash -c "pip install --no-cache-dir 'playwright>=1.48,<1.49' >/dev/null 2>&1 && PLAYWRIGHT_BROWSERS_PATH=/workspace/${PLAYWRIGHT_SUBPATH} python -m playwright install --with-deps chromium"
+  
+  info "Creating chromium_headless_shell symlink for Playwright compatibility"
+  cd "${LOCAL_PLAYWRIGHT_DIR}"
+  for chromium_dir in chromium-*/ ; do
+    if [ -d "$chromium_dir" ]; then
+      revision="${chromium_dir#chromium-}"
+      revision="${revision%/}"
+      shell_dir="chromium_headless_shell-${revision}"
+      if [ ! -e "$shell_dir" ]; then
+        ln -s "chromium-${revision}" "$shell_dir"
+        info "Created symlink: $shell_dir -> chromium-${revision}"
+      fi
+    fi
+  done
+  cd "$PROJECT_ROOT"
+else
+  warn "Docker not available; installing local Playwright browsers (may not match Linux runtime)"
+  PLAYWRIGHT_BROWSERS_PATH="${LOCAL_PLAYWRIGHT_DIR}" python3 -m playwright install --with-deps chromium
+  
+  info "Creating chromium_headless_shell symlink for Playwright compatibility"
+  cd "${LOCAL_PLAYWRIGHT_DIR}"
+  for chromium_dir in chromium-*/ ; do
+    if [ -d "$chromium_dir" ]; then
+      revision="${chromium_dir#chromium-}"
+      revision="${revision%/}"
+      shell_dir="chromium_headless_shell-${revision}"
+      if [ ! -e "$shell_dir" ]; then
+        ln -s "chromium-${revision}" "$shell_dir"
+        info "Created symlink: $shell_dir -> chromium-${revision}"
+      fi
+    fi
+  done
+  cd "$PROJECT_ROOT"
+fi
+
 # Create temporary deployment directory
 TEMP_DEPLOY_DIR=$(mktemp -d -t url-content-extraction-deploy.XXXXXX)
 info "Created temporary deployment directory: $TEMP_DEPLOY_DIR"
@@ -107,6 +153,11 @@ trap cleanup EXIT
 # Copy source code to temporary directory
 info "Copying source code to temporary directory"
 cp -r src "$TEMP_DEPLOY_DIR/"
+
+# Copy Playwright browsers to deployment directory
+info "Copying Playwright browsers to deployment directory"
+mkdir -p "${TEMP_DEPLOY_DIR}/${PLAYWRIGHT_SUBPATH}"
+cp -r "${LOCAL_PLAYWRIGHT_DIR}"/* "${TEMP_DEPLOY_DIR}/${PLAYWRIGHT_SUBPATH}/"
 
 info "Generating deployment entry point wrapper"
 cat > "$TEMP_DEPLOY_DIR/main.py" <<'EOF'
@@ -158,52 +209,6 @@ lxml>=5.1
 playwright>=1.48,<1.49
 pydantic>=2.9
 EOF
-
-info "Preparing Playwright browser bundle at ${LOCAL_PLAYWRIGHT_DIR} (runtime: ${RUNTIME_PLAYWRIGHT_PATH})"
-rm -rf "${LOCAL_PLAYWRIGHT_DIR}"
-mkdir -p "${LOCAL_PLAYWRIGHT_DIR}"
-
-if command -v docker >/dev/null 2>&1; then
-  info "Downloading Linux Chromium bundle via Playwright Docker image"
-  docker run --rm --platform linux/amd64 \
-    -v "${PROJECT_ROOT}":/workspace \
-    -w /workspace \
-    mcr.microsoft.com/playwright/python:v1.48.0 \
-    bash -c "pip install --no-cache-dir 'playwright>=1.48,<1.49' >/dev/null 2>&1 && PLAYWRIGHT_BROWSERS_PATH=/workspace/${PLAYWRIGHT_SUBPATH} python -m playwright install --with-deps chromium"
-  
-  info "Creating chromium_headless_shell symlink for Playwright compatibility"
-  cd "${LOCAL_PLAYWRIGHT_DIR}"
-  for chromium_dir in chromium-*/ ; do
-    if [ -d "$chromium_dir" ]; then
-      revision="${chromium_dir#chromium-}"
-      revision="${revision%/}"
-      shell_dir="chromium_headless_shell-${revision}"
-      if [ ! -e "$shell_dir" ]; then
-        ln -s "chromium-${revision}" "$shell_dir"
-        info "Created symlink: $shell_dir -> chromium-${revision}"
-      fi
-    fi
-  done
-  cd "$PROJECT_ROOT"
-else
-  warn "Docker not available; installing local Playwright browsers (may not match Linux runtime)"
-  PLAYWRIGHT_BROWSERS_PATH="${LOCAL_PLAYWRIGHT_DIR}" python3 -m playwright install --with-deps chromium
-  
-  info "Creating chromium_headless_shell symlink for Playwright compatibility"
-  cd "${LOCAL_PLAYWRIGHT_DIR}"
-  for chromium_dir in chromium-*/ ; do
-    if [ -d "$chromium_dir" ]; then
-      revision="${chromium_dir#chromium-}"
-      revision="${revision%/}"
-      shell_dir="chromium_headless_shell-${revision}"
-      if [ ! -e "$shell_dir" ]; then
-        ln -s "chromium-${revision}" "$shell_dir"
-        info "Created symlink: $shell_dir -> chromium-${revision}"
-      fi
-    fi
-  done
-  cd "$PROJECT_ROOT"
-fi
 
 info "Deploying Cloud Function"
 gcloud functions deploy "${FUNCTION_NAME}" \

@@ -363,6 +363,18 @@ class ServiceCoordinator:
         if llm_block:
             payload["llm"] = llm_block
 
+        # Debug: log the payload sent to article validation to help diagnose cases
+        # where the validator reports "No entities detected" or similar issues.
+        try:
+            logger.debug(
+                "Sending article validation payload for %s: %s",
+                team.abbreviation,
+                json.dumps(payload, ensure_ascii=False)[:10000],
+            )
+        except Exception:
+            # If serialization fails for any reason, avoid raising and continue
+            logger.debug("Sending article validation payload (serialization failed for logging)")
+
         response = self._post_json(
             "article_validation",
             endpoint.url,
