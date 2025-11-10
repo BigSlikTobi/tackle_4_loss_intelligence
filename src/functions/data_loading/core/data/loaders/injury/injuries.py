@@ -64,7 +64,7 @@ class InjurySupabaseWriter(SupabaseWriter):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         supabase_client = kwargs.pop("supabase_client", None)
-        conflict_columns = kwargs.pop("conflict_columns", ("season", "week", "season_type", "team_abbr", "player_id"))
+        conflict_columns = kwargs.pop("conflict_columns", None)  # No conflict resolution with versioning
         clear_column = kwargs.pop("clear_column", None)
         clear_guard = kwargs.pop("clear_guard", "")
         super().__init__(

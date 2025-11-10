@@ -38,12 +38,19 @@ def main() -> None:
         type=int,
         help="Season year to fetch when the data source requires it (default: current year).",
     )
+    parser.add_argument(
+        "--week",
+        type=int,
+        help="Week number for depth chart snapshot (default: 0 for season-level depth chart).",
+        default=0,
+    )
     args = parser.parse_args()
     setup_cli_logging(args)
     loader = DepthChartsDataLoader()
     fetch_params = {
         "team": args.team,
         "season": args.season,
+        "week": args.week,
     }
     if maybe_show_columns(loader, args, **fetch_params):
         return True
