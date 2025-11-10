@@ -163,7 +163,7 @@ def _build_style_preset(options: TranslationOptions) -> str:
     if mirror:
         preset_parts.append(
             "Be deliberate about rhythm: vary sentence length, carry momentum across clauses, "
-            "and let punchy details land at sentence ends. Do NOT mechanically mirror syntax."
+            + "and let punchy details land at sentence ends. Do NOT mechanically mirror syntax."
         )
 
     extra_tone = getattr(options, "tone_guidance", "")
