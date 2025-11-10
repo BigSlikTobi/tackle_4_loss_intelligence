@@ -144,11 +144,11 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
         processed_total = len(records)
 
         # Note: clear is not supported for depth_charts table with versioning
-        # Depth charts are automatically versioned per (season, week)
+        # Depth charts are automatically versioned per (season, week, team)
         if clear:
             self.logger.warning(
                 "Clear flag ignored for depth_charts table. "
-                "Records are automatically versioned per (season, week)."
+                "Records are automatically versioned per (season, week, team)."
             )
 
         try:
@@ -263,8 +263,8 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
 
         return prepared, skipped
 
-    def _apply_versioning(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any], int]:
-        """Assign a monotonically increasing version per (season, week)."""
+    def _apply_versioning(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any, Any], int]:
+        """Assign a monotonically increasing version per (season, week, team)."""
 
         if not records:
             return {}
@@ -272,7 +272,7 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
         version_map = self._fetch_next_versions(records)
 
         for record in records:
-            scope = (record["season"], record["week"])
+            scope = (record["season"], record["week"], record["team"])
             record["version"] = version_map[scope]
             record["is_current"] = True
 
@@ -312,21 +312,22 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
             message,
         )
 
-    def _fetch_next_versions(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any], int]:
+    def _fetch_next_versions(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any, Any], int]:
         scopes = {
-            (record["season"], record["week"])
+            (record["season"], record["week"], record["team"])
             for record in records
-            if record.get("season") and record.get("week")
+            if record.get("season") and record.get("week") and record.get("team")
         }
-        version_map: Dict[Tuple[Any, Any], int] = {}
+        version_map: Dict[Tuple[Any, Any, Any], int] = {}
 
-        for season, week in scopes:
+        for season, week, team in scopes:
             try:
                 response = (
                     self.client.table("depth_charts")
                     .select("version")
                     .eq("season", season)
                     .eq("week", week)
+                    .eq("team", team)
                     .order("version", desc=True)
                     .limit(1)
                     .execute()
@@ -339,47 +340,51 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
                         current_version = int(raw_value or 0)
                     except (TypeError, ValueError):
                         self.logger.warning(
-                            "Unexpected version value '%s' for %s/%s; defaulting to 0",
+                            "Unexpected version value '%s' for %s/%s/%s; defaulting to 0",
                             raw_value,
                             season,
                             week,
+                            team,
                         )
                         current_version = 0
-                version_map[(season, week)] = current_version + 1
+                version_map[(season, week, team)] = current_version + 1
             except Exception as exc:  # pragma: no cover - guard Supabase errors
                 self.logger.exception(
-                    "Unable to resolve next version for depth charts %s/%s", season, week
+                    "Unable to resolve next version for depth charts %s/%s/%s", season, week, team
                 )
                 raise RuntimeError("Failed to calculate depth chart version") from exc
 
         return version_map
 
     def _mark_previous_versions_inactive(
-        self, version_map: Dict[Tuple[Any, Any], int]
+        self, version_map: Dict[Tuple[Any, Any, Any], int]
     ) -> None:
-        for (season, week), version in version_map.items():
+        for (season, week, team), version in version_map.items():
             try:
                 response = (
                     self.client.table("depth_charts")
                     .update({"is_current": False})
                     .eq("season", season)
                     .eq("week", week)
+                    .eq("team", team)
                     .lt("version", version)
                     .execute()
                 )
                 error = getattr(response, "error", None)
                 if error:
                     self.logger.warning(
-                        "Failed to mark stale depth charts inactive for %s/%s: %s",
+                        "Failed to mark stale depth charts inactive for %s/%s/%s: %s",
                         season,
                         week,
+                        team,
                         error,
                     )
             except Exception:  # pragma: no cover - defensive logging
                 self.logger.exception(
-                    "Error while marking stale depth charts inactive for %s/%s",
+                    "Error while marking stale depth charts inactive for %s/%s/%s",
                     season,
                     week,
+                    team,
                 )
 
 
