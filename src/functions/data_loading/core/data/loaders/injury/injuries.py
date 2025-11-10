@@ -58,11 +58,13 @@ class InjurySupabaseWriter(SupabaseWriter):
         "practice_status",
         "game_status",
         "last_update",
+        "version",
+        "is_current",
     }
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         supabase_client = kwargs.pop("supabase_client", None)
-        conflict_columns = kwargs.pop("conflict_columns", ("season", "week", "season_type", "team_abbr", "player_id"))
+        conflict_columns = kwargs.pop("conflict_columns", None)  # No conflict resolution with versioning
         clear_column = kwargs.pop("clear_column", None)
         clear_guard = kwargs.pop("clear_guard", "")
         super().__init__(
@@ -96,11 +98,17 @@ class InjurySupabaseWriter(SupabaseWriter):
                     )
                 return PipelineResult(True, processed_total, messages=messages)
 
+            self._ensure_versioning_columns()
+
+            version_map = self._apply_versioning(prepared)
+
             response = self._perform_write(prepared)
             error = getattr(response, "error", None)
             if error:
                 self.logger.error("Supabase error while writing injuries: %s", error)
                 return PipelineResult(False, processed_total, error=str(error))
+
+            self._mark_previous_versions_inactive(version_map)
 
             written = len(getattr(response, "data", []) or [])
             if not written:
@@ -176,6 +184,134 @@ class InjurySupabaseWriter(SupabaseWriter):
             )
 
         return prepared, skipped
+
+    def _apply_versioning(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any, str], int]:
+        """Assign a monotonically increasing version per (season, week, season_type)."""
+
+        if not records:
+            return {}
+
+        version_map = self._fetch_next_versions(records)
+
+        for record in records:
+            scope = (record["season"], record["week"], record["season_type"])
+            record["version"] = version_map[scope]
+            record["is_current"] = True
+
+        return version_map
+
+    def _ensure_versioning_columns(self) -> None:
+        """Validate that the injuries table exposes the versioning columns.
+
+        Raises a descriptive error when the Supabase schema has not yet been
+        updated so operators understand how to resolve the issue instead of the
+        pipeline failing with an opaque column-missing error.
+        """
+
+        hint = (
+            "The injuries table must include an integer `version` column and a "
+            "boolean `is_current` column (defaulting to true)."
+        )
+
+        try:
+            response = (
+                self.client.table("injuries")
+                .select("version,is_current")
+                .limit(0)
+                .execute()
+            )
+        except Exception as exc:  # pragma: no cover - defensive schema guard
+            message = str(exc)
+            if "version" in message or "is_current" in message:
+                raise RuntimeError(hint) from exc
+            raise
+
+        error = getattr(response, "error", None)
+        if not error:
+            return
+
+        message = str(error)
+        if "version" in message or "is_current" in message:
+            raise RuntimeError(hint)
+
+        self.logger.warning(
+            "Unexpected error while validating injury versioning columns: %s",
+            message,
+        )
+
+    def _fetch_next_versions(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any, str], int]:
+        scopes = {
+            (record["season"], record["week"], record["season_type"])
+            for record in records
+        }
+        version_map: Dict[Tuple[Any, Any, str], int] = {}
+
+        for season, week, season_type in scopes:
+            try:
+                response = (
+                    self.client.table("injuries")
+                    .select("version")
+                    .eq("season", season)
+                    .eq("week", week)
+                    .eq("season_type", season_type)
+                    .order("version", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                data = getattr(response, "data", None) or []
+                current_version = 0
+                if data:
+                    raw_value = data[0].get("version")
+                    try:
+                        current_version = int(raw_value or 0)
+                    except (TypeError, ValueError):
+                        self.logger.warning(
+                            "Unexpected version value '%s' for %s/%s/%s; defaulting to 0",
+                            raw_value,
+                            season,
+                            week,
+                            season_type,
+                        )
+                        current_version = 0
+                version_map[(season, week, season_type)] = current_version + 1
+            except Exception as exc:  # pragma: no cover - guard Supabase errors
+                self.logger.exception(
+                    "Unable to resolve next version for injuries %s/%s/%s", season, week, season_type
+                )
+                raise RuntimeError("Failed to calculate injury version") from exc
+
+        return version_map
+
+    def _mark_previous_versions_inactive(
+        self, version_map: Dict[Tuple[Any, Any, str], int]
+    ) -> None:
+        for (season, week, season_type), version in version_map.items():
+            try:
+                response = (
+                    self.client.table("injuries")
+                    .update({"is_current": False})
+                    .eq("season", season)
+                    .eq("week", week)
+                    .eq("season_type", season_type)
+                    .lt("version", version)
+                    .execute()
+                )
+                error = getattr(response, "error", None)
+                if error:
+                    self.logger.warning(
+                        "Failed to mark stale injuries inactive for %s/%s/%s: %s",
+                        season,
+                        week,
+                        season_type,
+                        error,
+                    )
+            except Exception:  # pragma: no cover - defensive logging
+                self.logger.exception(
+                    "Error while marking stale injuries inactive for %s/%s/%s",
+                    season,
+                    week,
+                    season_type,
+                )
 
     def _load_player_index(self) -> Dict[str, List[Dict[str, Optional[str]]]]:
         if self._player_index is not None:

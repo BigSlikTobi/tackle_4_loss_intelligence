@@ -1,10 +1,10 @@
-"""Pipeline-backed loader for team rosters."""
+"""Pipeline-backed loader for team rosters with versioning support."""
 
 from __future__ import annotations
 
 import re
 import logging
-import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
@@ -83,9 +83,17 @@ def _chunks(iterable: Iterable[str], size: int) -> Iterable[List[str]]:
 
 
 class RosterSupabaseWriter(SupabaseWriter):
-    """Writer that skips roster rows referencing unknown players."""
+    """Writer that skips roster rows referencing unknown players and supports versioning."""
 
-    allowed_columns = {"team", "player", "dept_chart_position", "season", "week"}
+    allowed_columns = {
+        "team",
+        "player",
+        "dept_chart_position",
+        "season",
+        "week",
+        "version",
+        "is_current",
+    }
 
     def _fetch_known_player_ids(self, player_ids: Set[str]) -> Set[str]:
         if not player_ids:
@@ -107,122 +115,213 @@ class RosterSupabaseWriter(SupabaseWriter):
 
     def write(self, records: List[Dict[str, Any]], *, clear: bool = False) -> PipelineResult:
         processed_total = len(records)
-        name_lookup: Dict[str, str] = {}
+        
+        # Note: clear is not supported for rosters table with versioning
+        # Rosters are automatically versioned per (season, week)
+        if clear:
+            self.logger.warning(
+                "Clear flag ignored for rosters table. "
+                "Records are automatically versioned per (season, week)."
+            )
+        
+        try:
+            prepared, skipped = self._prepare_records(records)
+            messages: List[str] = []
+
+            if not prepared:
+                if skipped:
+                    messages.append(
+                        f"Skipped {len(skipped)} roster records due to missing player IDs or season/week"
+                    )
+                return PipelineResult(True, processed_total, messages=messages)
+
+            self._ensure_versioning_columns()
+
+            version_map = self._apply_versioning(prepared)
+
+            response = self._perform_write(prepared)
+            error = getattr(response, "error", None)
+            if error:
+                self.logger.error("Supabase error while writing rosters: %s", error)
+                return PipelineResult(False, processed_total, error=str(error))
+
+            self._mark_previous_versions_inactive(version_map)
+
+            written = len(getattr(response, "data", []) or [])
+            if not written:
+                written = len(prepared)
+
+            if skipped:
+                messages.append(
+                    f"Skipped {len(skipped)} roster records due to missing player IDs or season/week"
+                )
+            if messages:
+                return PipelineResult(True, processed_total, written=written, messages=messages)
+            return PipelineResult(True, processed_total, written=written)
+        except Exception as exc:  # pragma: no cover - defensive safety net
+            self.logger.exception("Failed to persist roster data")
+            return PipelineResult(False, processed_total, error=str(exc))
+
+    def _prepare_records(
+        self, records: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        prepared: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        
         player_ids = {rec.get("player") for rec in records if rec.get("player")}
         player_ids = {pid for pid in player_ids if isinstance(pid, str)}
         known_players = self._fetch_known_player_ids(player_ids)
 
-        filtered: List[Dict[str, Any]] = []
-        skipped: List[Dict[str, Any]] = []
-        for rec in records:
-            player_id = rec.get("player")
-            if isinstance(player_id, str):
-                name_lookup.setdefault(player_id, rec.get("player_name") or player_id)
-            if not player_id or player_id not in known_players:
-                skipped.append(rec)
+        for record in records:
+            season = record.get("season")
+            week = record.get("week")
+            player_id = record.get("player")
+            
+            if not season or not week:
+                self.logger.warning(
+                    "Missing season/week for record: %s", record
+                )
+                skipped.append(record)
                 continue
-            filtered.append({k: v for k, v in rec.items() if k in self.allowed_columns})
+            
+            if not player_id or player_id not in known_players:
+                player_label = record.get("player_name") or player_id or "<unknown>"
+                team_label = record.get("team") or "<no team>"
+                self.logger.warning(
+                    "Unable to resolve player '%s' for team %s", player_label, team_label
+                )
+                skipped.append(record)
+                continue
 
-        for miss in skipped:
-            player_label = miss.get("player_name") or miss.get("player") or "<unknown>"
-            team_label = miss.get("team") or "<no team>"
-            self.logger.warning(
-                "Skipping roster entry for %s on %s due to missing player record",
-                player_label,
-                team_label,
+            prepared.append(
+                {
+                    "season": season,
+                    "week": week,
+                    "team": record.get("team"),
+                    "player": player_id,
+                    "dept_chart_position": record.get("dept_chart_position"),
+                }
             )
 
-        if self.logger.isEnabledFor(logging.DEBUG):
-            for miss in skipped:
-                player_label = miss.get("player_name") or miss.get("player") or "<unknown>"
-                team_label = miss.get("team") or "<no team>"
-                position = miss.get("dept_chart_position") or "<no position>"
-                season = miss.get("season")
-                week = miss.get("week")
-                self.logger.debug(
-                    "Skipped roster row (team=%s, player=%s, position=%s, season=%s, week=%s)",
-                    team_label,
-                    player_label,
-                    position,
-                    season,
-                    week,
-                )
+        return prepared, skipped
 
-        messages: List[str] = []
-        db_skipped: List[Dict[str, Any]] = []
+    def _apply_versioning(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any], int]:
+        """Assign a monotonically increasing version per (season, week)."""
+
+        if not records:
+            return {}
+
+        version_map = self._fetch_next_versions(records)
+
+        for record in records:
+            scope = (record["season"], record["week"])
+            record["version"] = version_map[scope]
+            record["is_current"] = True
+
+        return version_map
+
+    def _ensure_versioning_columns(self) -> None:
+        """Validate that the rosters table exposes the versioning columns."""
+
+        hint = (
+            "The rosters table must include an integer `version` column and a "
+            "boolean `is_current` column (defaulting to true)."
+        )
+
         try:
-            if clear:
-                self._clear_table()
-                messages.append("Cleared table before write")
+            response = (
+                self.client.table("rosters")
+                .select("version,is_current")
+                .limit(0)
+                .execute()
+            )
+        except Exception as exc:  # pragma: no cover - defensive schema guard
+            message = str(exc)
+            if "version" in message or "is_current" in message:
+                raise RuntimeError(hint) from exc
+            raise
 
-            if not filtered:
-                if skipped:
-                    skipped_count = len(skipped)
-                    messages.append(
-                        f"Skipped {skipped_count} rows missing player references"
-                    )
-                else:
-                    messages.append("No roster records eligible for insert")
-                return PipelineResult(True, processed_total, messages=messages)
+        error = getattr(response, "error", None)
+        if not error:
+            return
 
-            remaining = list(filtered)
-            response = None
-            while remaining:
-                try:
-                    response = self._perform_write(remaining)
-                    error = getattr(response, "error", None)
-                    if error:
-                        self.logger.error("Supabase error: %s", error)
-                        return PipelineResult(False, processed_total, error=str(error))
-                    break
-                except APIError as api_error:
-                    if getattr(api_error, "code", "") != "23503":
-                        raise
-                    detail_source = getattr(api_error, "details", None) or getattr(api_error, "message", "")
-                    match = re.search(r"Key \(player\)=\(([^)]+)\)", detail_source or "")
-                    if not match:
-                        raise
-                    missing_id = match.group(1)
-                    index = next((i for i, row in enumerate(remaining) if row.get("player") == missing_id), None)
-                    if index is None:
-                        raise
-                    miss_record = remaining.pop(index)
-                    db_skipped.append(miss_record)
-                    player_label = name_lookup.get(missing_id, missing_id)
-                    team_label = miss_record.get("team") or "<no team>"
-                    self.logger.warning(
-                        "Skipping roster entry for %s on %s due to missing player record",
-                        player_label,
-                        team_label,
-                    )
-                    if not remaining:
-                        continue
-                    if self.logger.isEnabledFor(logging.DEBUG):
-                        position = miss_record.get("dept_chart_position") or "<no position>"
-                        season = miss_record.get("season")
-                        week = miss_record.get("week")
-                        self.logger.debug(
-                            "Skipped roster row (team=%s, player=%s, position=%s, season=%s, week=%s)",
-                            team_label,
-                            player_label,
-                            position,
+        message = str(error)
+        if "version" in message or "is_current" in message:
+            raise RuntimeError(hint)
+
+        self.logger.warning(
+            "Unexpected error while validating roster versioning columns: %s",
+            message,
+        )
+
+    def _fetch_next_versions(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any], int]:
+        scopes = {
+            (record["season"], record["week"])
+            for record in records
+        }
+        version_map: Dict[Tuple[Any, Any], int] = {}
+
+        for season, week in scopes:
+            try:
+                response = (
+                    self.client.table("rosters")
+                    .select("version")
+                    .eq("season", season)
+                    .eq("week", week)
+                    .order("version", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                data = getattr(response, "data", None) or []
+                current_version = 0
+                if data:
+                    raw_value = data[0].get("version")
+                    try:
+                        current_version = int(raw_value or 0)
+                    except (TypeError, ValueError):
+                        self.logger.warning(
+                            "Unexpected version value '%s' for %s/%s; defaulting to 0",
+                            raw_value,
                             season,
                             week,
                         )
-            if not remaining:
-                messages.append("No roster records eligible for insert after FK validation")
-                if skipped or db_skipped:
-                    skipped_count = len(skipped) + len(db_skipped)
-                    messages.append(f"Skipped {skipped_count} rows with unknown players")
-                return PipelineResult(True, processed_total, messages=messages)
-            written = len(getattr(response, "data", []) or []) if response is not None else len(remaining)
-            if skipped or db_skipped:
-                skipped_count = len(skipped) + len(db_skipped)
-                messages.append(f"Skipped {skipped_count} rows with unknown players")
-            return PipelineResult(True, processed_total, written=written, messages=messages)
-        except Exception as exc:  # pragma: no cover
-            self.logger.exception("Failed to write roster records")
-            return PipelineResult(False, processed_total, error=str(exc))
+                        current_version = 0
+                version_map[(season, week)] = current_version + 1
+            except Exception as exc:  # pragma: no cover - guard Supabase errors
+                self.logger.exception(
+                    "Unable to resolve next version for rosters %s/%s", season, week
+                )
+                raise RuntimeError("Failed to calculate roster version") from exc
+
+        return version_map
+
+    def _mark_previous_versions_inactive(
+        self, version_map: Dict[Tuple[Any, Any], int]
+    ) -> None:
+        for (season, week), version in version_map.items():
+            try:
+                response = (
+                    self.client.table("rosters")
+                    .update({"is_current": False})
+                    .eq("season", season)
+                    .eq("week", week)
+                    .lt("version", version)
+                    .execute()
+                )
+                error = getattr(response, "error", None)
+                if error:
+                    self.logger.warning(
+                        "Failed to mark stale rosters inactive for %s/%s: %s",
+                        season,
+                        week,
+                        error,
+                    )
+            except Exception:  # pragma: no cover - defensive logging
+                self.logger.exception(
+                    "Error while marking stale rosters inactive for %s/%s",
+                    season,
+                    week,
+                )
 
 
 def build_rosters_pipeline(writer=None) -> DatasetPipeline:
@@ -232,7 +331,8 @@ def build_rosters_pipeline(writer=None) -> DatasetPipeline:
         transformer_factory=RosterDataTransformer,
         writer=writer or RosterSupabaseWriter(
             table_name="rosters",
-            clear_column="player",
+            conflict_columns=None,  # No conflict resolution with versioning - always insert
+            clear_column=None,
             clear_guard="",
         ),
     )

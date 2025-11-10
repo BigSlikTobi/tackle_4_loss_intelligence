@@ -356,7 +356,7 @@ class SnapCountsGameDataTransformer(BaseDataTransformer):
 class DepthChartsDataTransformer(BaseDataTransformer):
     """Transform depth chart information."""
 
-    required_fields = ["team", "player_id"]
+    required_fields = ["team", "player_id", "season", "week"]
 
     def sanitize_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
         def _clean(value: Any) -> Optional[str]:
@@ -498,6 +498,8 @@ class DepthChartsDataTransformer(BaseDataTransformer):
             "pos_slot": pos_slot,
             "pos_rank": pos_rank,
             "player_name": player_name,
+            "season": record.get("season"),
+            "week": record.get("week"),
         }
 
     def deduplicate_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
