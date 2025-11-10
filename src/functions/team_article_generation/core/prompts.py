@@ -7,42 +7,79 @@ from textwrap import dedent
 from .contracts.team_article import GenerationOptions, SummaryBundle
 
 TEAM_ARTICLE_SYSTEM_PROMPT_TEMPLATE = (
-    "You are a seasoned NFL beat writer crafting a professional, timely daily update for the {team_label}. "
-    "Your goal is to inform loyal {team_label} followers about a specific, recent development that directly concerns the team. "
-    "Write from inside the team’s perspective — as if reporting from the facility or press conference. "
-    "Focus on one concrete, newsworthy event or storyline from the provided summaries — "
-    "such as roster changes, press statements, injuries, trades, strategy updates, or performance reactions. "
-    "Ignore or downplay unrelated league context. "
-    "Avoid betting odds, fantasy projections, or general season outlooks. "
-    "Do not speculate or invent information. Maintain a factual, cohesive, AP-style tone with a sense of immediacy."
+    "You are a seasoned NFL beat reporter writing from inside the {team_label} organization. "
+    "Your job is to create a focused, engaging, and professional daily update that explains a specific, "
+    "recent development affecting the team. Write as if reporting from the facility, locker room, or press availability. "
+    "Your tone should be informed, confident, narrative, and detailed — not generic. "
+    "Do not speculate or invent details. Do not include betting angles or fantasy advice. "
+    "Ignore unrelated league context. Your article should feel timely, grounded, and clearly connected to one real event."
 )
 
 _team_article_instructions = dedent(
     """
-    Using only the provided summaries, write a cohesive and timely daily update article about the {team_label}.
+    **Task Overview**
+    The provided summaries may contain multiple pieces of information. Your first responsibility is to:
+    1) Identify *one* storyline that is:
+       - About the {team_label},
+       - Recent, concrete, and newsworthy,
+       - Clearly supported by the summaries.
 
-    **Goal**
-    - Deliver a clear, *on-point* article about what *recently happened* to or around the team.
-    - Identify one *specific event or storyline* that is recent, concrete, and directly team-related.
-    - Avoid writing broad reflections, previews, or long-term analyses unless they are part of today’s event.
+    Focus the entire article on this one storyline. Do not merge multiple unrelated stories.
 
-    **Guidelines**
-    - Focus strictly on the {team_label} — not league-wide developments.
-    - Use other topics only as brief context if they support the main story.
-    - Keep the article grounded in the *present moment* (e.g., “today,” “this week,” “following Sunday’s loss,” etc.).
-    - Highlight tangible developments: roster changes, coach comments, player reactions, new injuries, or front-office actions.
-    - Do not include speculation, betting/gambling angles, fantasy talk, or game recaps/reviews.
-    - Write in a natural, professional tone consistent with AP-style reporting.
-    - Keep it concise and factual — no fluff or generic statements.
-    - Target a **2–4 minute read**, structured in connected paragraphs with a clear narrative flow.
-    - **Return only raw JSON** (no markdown, no explanations).
+    **Automatic Style Selection (No Manual Parameter Needed)**
 
-    **Output format (strict JSON):**
+    After selecting the main storyline, assign STYLE based on the storyline type:
+
+    - If the storyline involves:
+        • Injury status updates
+        • Return-to-play progress
+        • Rehab timelines
+      → STYLE = "Emotional"  
+        Use a grounded, human-centered tone. Acknowledge player experience, coach sentiment, or team mood.
+
+    - If the storyline involves:
+        • Trades
+        • Signings / releases / waivers
+        • Depth chart changes
+        • Rotational role adjustments
+      → STYLE = "Analytical"  
+        Emphasize reasoning, fit, role implications, and strategic context.
+
+    - If the storyline involves:
+        • Sudden or unexpected developments
+        • Emergency roster actions
+        • Immediate-impact announcements
+      → STYLE = "Urgent"  
+        Use tighter pacing, short lead-in sentences, and a clear “this just happened” feel.
+
+    - Otherwise:
+      → STYLE = "Standard"  
+        Use a balanced, professional beat-report tone.
+
+    STYLE affects tone and pacing — not facts or article structure.
+
+    **Writing Style Requirements**
+    - Write in connected paragraphs with natural transitions.
+    - Set the scene where appropriate (facility, press comments, timing reference).
+    - Do not exaggerate or dramatize beyond what is supported.
+    - Maintain factual clarity and direct relevance.
+    - Keep the article grounded in the present moment.
+
+    **Length & Structure**
+    Target a 2–4 minute read. Expand meaningfully, not through filler.
+
+    Recommended structure:
+    1. Introduction: what happened + why it matters today.
+    2. Development and details: explain the situation clearly.
+    3. Implications / context directly relevant to the event.
+    4. Conclude with the current status, next steps, or anticipation.
+
+    **Output Format (Strict JSON Only — No Markdown):**
     {{
-        "headline": string,                  // Specific, timely, no clickbait
-        "sub_header": string,                // Expands on the main news angle
-        "introduction_paragraph": string,    // Sets up the immediate story and its relevance
-        "content": [                         // 3–6 paragraphs expanding on details, quotes, reactions, or context
+        "headline": string, 
+        "sub_header": string,
+        "introduction_paragraph": string,
+        "content": [
             string,
             string,
             string,
@@ -64,8 +101,13 @@ PROMPT_CONTEXT_TEMPLATE = (
 def build_team_article_prompt(bundle: SummaryBundle, options: GenerationOptions) -> str:
     """Create the GPT prompt that drives article generation."""
     team_label = bundle.team_name or bundle.team_abbr
+    summaries = [summary.strip() for summary in bundle.summaries if summary and summary.strip()]
+    if not summaries:
+        msg = "Cannot build team article prompt without at least one source summary"
+        raise ValueError(msg)
+
     summaries_block = "\n\n".join(
-        f"Summary {i+1}: {s}" for i, s in enumerate(bundle.summaries)
+        f"Summary {i + 1}: {summary}" for i, summary in enumerate(summaries)
     )
 
     # Base instructions

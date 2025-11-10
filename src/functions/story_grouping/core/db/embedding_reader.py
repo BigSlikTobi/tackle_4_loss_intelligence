@@ -497,28 +497,22 @@ class EmbeddingReader:
         page_size = max(batch_size, 1000)
         offset = 0
         yielded = 0
+        cutoff_date = self._get_cutoff_date()
 
         while True:
             try:
-                query = f"""
-                SELECT DISTINCT
-                    se.id,
-                    se.news_url_id,
-                    se.embedding_vector,
-                    se.created_at
-                FROM story_embeddings se
-                LEFT JOIN story_group_members sgm ON se.news_url_id = sgm.news_url_id
-                WHERE se.embedding_vector IS NOT NULL
-                  AND sgm.news_url_id IS NULL
-                ORDER BY se.created_at ASC
-                LIMIT {page_size}
-                OFFSET {offset}
-                """
-
                 logger.info(
                     f"Fetching ungrouped embeddings at offset {offset} (page size {page_size})..."
                 )
-                response = self.client.rpc('exec_sql', {'sql': query}).execute()
+                # Use the proper database function instead of exec_sql
+                response = self.client.rpc(
+                    'get_ungrouped_embeddings',
+                    {
+                        'p_limit': page_size,
+                        'p_offset': offset,
+                        'p_cutoff_date': cutoff_date
+                    }
+                ).execute()
 
                 if not response.data:
                     break
@@ -557,9 +551,9 @@ class EmbeddingReader:
                 logger.error(
                     f"Error fetching batch at offset {offset}: {batch_error}"
                 )
-                if "rpc" in str(batch_error).lower() or "exec_sql" in str(batch_error).lower():
+                if "get_ungrouped_embeddings" in str(batch_error).lower() or "pgrst" in str(batch_error).lower():
                     logger.warning(
-                        "RPC method not available, falling back to fetch-all-and-filter approach"
+                        "Database function not available, falling back to fetch-all-and-filter approach"
                     )
                     yield from self._iter_ungrouped_fallback_batches(
                         limit=limit,
