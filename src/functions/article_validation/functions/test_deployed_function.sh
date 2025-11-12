@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Test the deployed article validation Cloud Function with grounding
+#!/usr/bin/env bash
 
 set -euo pipefail
 
