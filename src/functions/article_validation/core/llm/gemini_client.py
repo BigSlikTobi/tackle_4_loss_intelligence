@@ -198,7 +198,7 @@ class GeminiClient:
         # Build tools for grounding if needed
         tools = None
         if use_web_search:
-            tools = [{"google_search_retrieval": {}}]
+            tools = [{"google_search": {}}]
 
         prompt_text = user_text.strip()
         if system_text:
@@ -219,18 +219,16 @@ class GeminiClient:
                 raise GeminiClientError("Local rate limiter exhausted") from exc
 
             try:
-                model = genai.GenerativeModel(
-                    model_name=self.config.model,
-                    generation_config=generation_config,
-                )
-                
-                # Add tools if grounding is enabled
+                model_kwargs = {
+                    "model_name": self.config.model,
+                    "generation_config": generation_config,
+                }
                 if tools:
-                    model = genai.GenerativeModel(
-                        model_name=self.config.model,
-                        generation_config=generation_config,
-                        tools=tools,
+                    model_kwargs["tools"] = tools
+                    self._logger.debug(
+                        "Invoking Gemini with Google Search grounding enabled",
                     )
+                model = genai.GenerativeModel(**model_kwargs)
                 
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
