@@ -73,3 +73,5 @@ docs/game-analysis-package/archive
 
 #mock content
 src/functions/knowledge_extraction/scripts/test_content
+src/functions/article_validation/test_output
+

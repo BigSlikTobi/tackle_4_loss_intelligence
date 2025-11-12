@@ -426,6 +426,10 @@ class ServiceCoordinator:
         if review_list:
             logger.info("Validation review reasons for %s: %s", team.abbreviation, review_list)
 
+        # Display detailed validation results if enabled
+        if self._should_display_validation_details():
+            self._display_validation_results(team.abbreviation, response)
+
         return report
 
     def translate_article(self, article: GeneratedArticle) -> TranslatedArticle:
@@ -655,3 +659,18 @@ class ServiceCoordinator:
                     "Invalid validation timeout configured: %s", timeout_value
                 )
         return llm_block
+
+    def _should_display_validation_details(self) -> bool:
+        """Check if detailed validation results should be displayed."""
+        display_env = os.getenv("DISPLAY_VALIDATION_DETAILS", "").strip().lower()
+        return display_env in {"1", "true", "yes", "on"}
+
+    def _display_validation_results(self, team_abbr: str, validation_response: Dict[str, object]) -> None:
+        """Display formatted validation results in the terminal."""
+        try:
+            # Import using absolute path to avoid relative import issues
+            from src.functions.daily_team_update.scripts.display_validation_results import display_validation_results
+            display_validation_results(team_abbr, validation_response)
+        except Exception as exc:
+            logger.debug("Failed to display validation results: %s", exc)
+
