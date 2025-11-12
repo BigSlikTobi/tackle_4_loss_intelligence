@@ -44,8 +44,5 @@
       "verify_player_names": true,
       "verify_roster_info": true
     }
-  },
-  "llm": {
-    "api_key": "YOUR_GEMINI_API_KEY"
   }
 }

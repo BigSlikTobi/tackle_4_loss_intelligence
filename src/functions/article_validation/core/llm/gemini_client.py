@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from textwrap import dedent
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from google.api_core.exceptions import GoogleAPIError, ResourceExhausted
 
 from src.shared.utils.logging import get_logger
@@ -23,7 +24,7 @@ _MAX_CONTEXT_CHARS = 12000
 _JSON_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 _RETRY_DELAY_PATTERN = re.compile(r"retry in ([0-9.]+)s", re.IGNORECASE)
 _DEFAULT_TEMPERATURE = 0.1
-_MAX_OUTPUT_TOKENS = 4096
+_MAX_OUTPUT_TOKENS = 8192  # Increased from 4096 to use Gemini 2.5's full capacity
 _MAX_CLAIMS_PER_BATCH = 5
 _SUPPORTED_MODELS = frozenset()
 
@@ -89,7 +90,7 @@ class GeminiClient:
     ) -> None:
         self.config = config
         self._logger = get_logger(__name__)
-        genai.configure(api_key=config.api_key)
+        self._client = genai.Client(api_key=config.api_key)
         self._rate_limiter = rate_limiter or RateLimiter(max_requests_per_minute=100)
         self._request_timeout = config.timeout_seconds
 
@@ -189,22 +190,23 @@ class GeminiClient:
         if not user_text:
             user_text = "(no user content provided)"
 
-        # Build generation config
-        generation_config = {
-            "temperature": _DEFAULT_TEMPERATURE,
-            "max_output_tokens": _MAX_OUTPUT_TOKENS,
-        }
-
-        # Build tools for grounding if needed
-        tools = None
-        if use_web_search:
-            tools = [{"google_search_retrieval": {}}]
-
         prompt_text = user_text.strip()
         if system_text:
             prompt_text = f"{system_text.strip()}\n\n{prompt_text}".strip()
         if not prompt_text:
             prompt_text = "(no content provided)"
+
+        # Build generation config
+        generation_config = types.GenerateContentConfig(
+            temperature=_DEFAULT_TEMPERATURE,
+            max_output_tokens=_MAX_OUTPUT_TOKENS,
+        )
+
+        # Build tools for grounding if needed
+        if use_web_search:
+            grounding_tool = types.Tool(google_search=types.GoogleSearch())
+            generation_config.tools = [grounding_tool]
+            self._logger.debug("Invoking Gemini with Google Search grounding enabled")
 
         max_attempts = 3
         attempt = 0
@@ -219,31 +221,34 @@ class GeminiClient:
                 raise GeminiClientError("Local rate limiter exhausted") from exc
 
             try:
-                model = genai.GenerativeModel(
-                    model_name=self.config.model,
-                    generation_config=generation_config,
-                )
-                
-                # Add tools if grounding is enabled
-                if tools:
-                    model = genai.GenerativeModel(
-                        model_name=self.config.model,
-                        generation_config=generation_config,
-                        tools=tools,
-                    )
-                
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
-                        model.generate_content,
-                        prompt_text,
+                        self._client.models.generate_content,
+                        model=self.config.model,
+                        contents=prompt_text,
+                        config=generation_config,
                     ),
                     timeout=self._request_timeout,
                 )
 
+                # Log grounding metadata if present
+                finish_reason = None
                 if hasattr(response, 'candidates') and response.candidates:
                     first_candidate = response.candidates[0]
                     if hasattr(first_candidate, 'finish_reason'):
-                        self._logger.debug(f"Finish reason: {first_candidate.finish_reason}")
+                        finish_reason = first_candidate.finish_reason
+                        # Log finish_reason at appropriate level
+                        if finish_reason and str(finish_reason) != 'STOP':
+                            # Non-STOP finish reasons may indicate issues
+                            self._logger.warning(f"Non-standard finish reason: {finish_reason}")
+                        else:
+                            self._logger.debug(f"Finish reason: {finish_reason}")
+                    if hasattr(first_candidate, 'grounding_metadata') and first_candidate.grounding_metadata:
+                        metadata = first_candidate.grounding_metadata
+                        if hasattr(metadata, 'web_search_queries') and metadata.web_search_queries:
+                            self._logger.debug(f"Web search queries: {metadata.web_search_queries}")
+                        if hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
+                            self._logger.debug(f"Grounding sources: {len(metadata.grounding_chunks)} chunks")
 
                 text = ""
                 try:
@@ -251,6 +256,7 @@ class GeminiClient:
                         text = response.text or ""
                 except Exception as e:
                     self._logger.warning(f"Error accessing response.text: {e}")
+                    # Try alternate path for response content
                     if hasattr(response, 'candidates') and response.candidates:
                         first_candidate = response.candidates[0]
                         if hasattr(first_candidate, 'content') and hasattr(first_candidate.content, 'parts'):
@@ -259,7 +265,9 @@ class GeminiClient:
                                 text = parts[0].text or ""
 
                 if not text:
-                    self._logger.debug("Empty response (finish_reason may indicate why)")
+                    # Log warning with finish_reason to help diagnose empty responses
+                    reason_str = f" (finish_reason: {finish_reason})" if finish_reason else ""
+                    self._logger.warning(f"Empty response from model{reason_str}")
 
                 return text
 

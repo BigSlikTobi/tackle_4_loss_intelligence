@@ -117,7 +117,8 @@ flask==3.*
 aiohttp>=3.9.0
 certifi>=2023.7.22
 supabase>=2.0.0
-google-generativeai>=0.8.0
+google-genai>=1.0.0
+google-api-core>=2.20.0
 python-dotenv>=1.0.0
 
 # Retry and backoff

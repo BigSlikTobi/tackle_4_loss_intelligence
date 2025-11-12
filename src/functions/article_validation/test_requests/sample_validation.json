@@ -24,7 +24,6 @@
     "Chiefs improve to 9-3 with the win, maintaining first place in AFC West"
   ],
   "llm": {
-    "api_key": "YOUR_GEMINI_API_KEY",
     "model": "gemini-2.5-flash-lite",
     "enable_web_search": true,
     "timeout_seconds": 60

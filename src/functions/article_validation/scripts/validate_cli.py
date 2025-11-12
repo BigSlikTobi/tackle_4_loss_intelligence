@@ -194,7 +194,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     setup_logging(level=args.log_level, include_timestamp=not args.no_timestamp)
-    LOGGER.debug("Arguments parsed", extra={"args": vars(args)})
+    LOGGER.debug("Arguments parsed", extra={"cli_args": vars(args)})
 
     if args.env_file:
         load_env(str(args.env_file))
