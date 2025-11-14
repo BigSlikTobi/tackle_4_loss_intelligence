@@ -89,7 +89,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     let query = supabase
       .from("news_urls")
       .select("id,url")
-      .order("id", { ascending: true })
+      .order("published_date", { ascending: false })
       .limit(limit);
 
     if (stage === "content") {
