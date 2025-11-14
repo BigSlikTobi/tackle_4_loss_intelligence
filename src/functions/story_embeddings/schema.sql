@@ -3,8 +3,8 @@
 -- 1.3 Create facts_embeddings table for per-fact vectors.
 CREATE TABLE IF NOT EXISTS facts_embeddings (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    news_fact_id BIGINT NOT NULL REFERENCES news_facts(id) ON DELETE CASCADE,
-    embedding_vector VECTOR NOT NULL,
+    news_fact_id UUID NOT NULL REFERENCES news_facts(id) ON DELETE CASCADE,
+    embedding_vector VECTOR(1536) NOT NULL,
     model_name TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -21,9 +21,9 @@ CREATE INDEX IF NOT EXISTS idx_facts_embeddings_vector
 ALTER TABLE story_embeddings
     ADD COLUMN IF NOT EXISTS id BIGINT GENERATED ALWAYS AS IDENTITY;
 ALTER TABLE story_embeddings
-    ADD COLUMN IF NOT EXISTS news_url_id BIGINT NOT NULL REFERENCES news_urls(id) ON DELETE CASCADE;
+    ADD COLUMN IF NOT EXISTS news_url_id UUID NOT NULL REFERENCES news_urls(id) ON DELETE CASCADE;
 ALTER TABLE story_embeddings
-    ADD COLUMN IF NOT EXISTS embedding_vector VECTOR NOT NULL;
+    ADD COLUMN IF NOT EXISTS embedding_vector VECTOR(1536) NOT NULL;
 ALTER TABLE story_embeddings
     ADD COLUMN IF NOT EXISTS model_name TEXT NOT NULL;
 ALTER TABLE story_embeddings

@@ -46,18 +46,22 @@ class LightExtractor:
         if options:
             merged.update(options if isinstance(options, dict) else options.model_dump())
         validated = parse_options(merged)
-        return self._run_sync(self._extract(validated))
+        return self._run_sync(validated)
 
-    @staticmethod
-    def _run_sync(coro: "asyncio.Future[ExtractedContent]") -> ExtractedContent:
+    def _run_sync(self, options: ExtractionOptions) -> ExtractedContent:
+        """Execute async extraction synchronously, handling existing event loops."""
+        # Check if we're already in an event loop
         try:
-            return asyncio.run(coro)
-        except RuntimeError:  # pragma: no cover - already running event loop
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(coro)
-            finally:
-                loop.close()
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop - safe to use asyncio.run()
+            return asyncio.run(self._extract(options))
+        
+        # Running loop exists - create and use a new one in a thread-safe way
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, self._extract(options))
+            return future.result(timeout=options.timeout_seconds + 10)
 
     async def _fetch(self, options: ExtractionOptions) -> tuple[str, str]:
         async with httpx.AsyncClient(headers=self._DEFAULT_HEADERS, follow_redirects=True, timeout=options.timeout_seconds) as client:

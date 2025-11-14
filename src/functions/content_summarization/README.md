@@ -28,17 +28,18 @@ python scripts/content_pipeline_cli.py --stage full --limit 20
 ```
 
 ## Required Environment Variables
-All configuration lives in the root `.env` file and is loaded via `load_env()` before execution.
+All configuration lives in the root `.env` file and is loaded via `load_env()` before execution. The module uses standard environment variables shared across the platform.
 
 | Variable | Purpose |
 | --- | --- |
-| `SUPABASE_URL`, `SUPABASE_KEY` | Supabase connection (service role key recommended). |
-| `EDGE_FUNCTION_BASE_URL` | Base URL for Supabase Edge Functions (e.g. `https://<project>.functions.supabase.co`). |
-| `CONTENT_EXTRACTION_URL` | Cloud Run HTTP endpoint that returns raw article text for a URL. |
-| `LLM_API_URL`, `LLM_API_KEY` | Endpoint and credential for Gemma 3n JSON-mode calls. |
-| `EMBEDDING_API_URL`, `EMBEDDING_API_KEY` | Endpoint and credential for `text-embedding-3-small` vectors (defaults to LLM endpoint/key if omitted). |
+| `SUPABASE_URL`, `SUPABASE_KEY` | Supabase connection (service role key recommended). Edge function URL is automatically derived from SUPABASE_URL. |
+| `OPENAI_API_KEY` | OpenAI API key for LLM calls (fact extraction, summarization) and embeddings (`text-embedding-3-small`). |
+| `CONTENT_EXTRACTION_URL` | Optional: Cloud Run HTTP endpoint that returns raw article text for a URL. If not configured, content extraction stage will be skipped. |
 | `BATCH_LIMIT` | Optional default batch size pulled from the Edge Function. |
 | `LLM_TIMEOUT_SECONDS`, `EMBEDDING_TIMEOUT_SECONDS`, `CONTENT_TIMEOUT_SECONDS` | Optional request timeouts for each service. |
+| `FACT_LLM_MODEL` | Optional: Override the default model for fact extraction (default: `gemma-3n`). |
+| `SUMMARY_LLM_MODEL` | Optional: Override the default model for summary generation (default: `gemma-3n`). |
+| `OPENAI_EMBEDDING_MODEL` | Optional: Override the default embedding model (default: `text-embedding-3-small`). |
 
 ## Architecture Notes
 - All orchestration code for the new pipeline lives under `core/` and `scripts/` within this module; no cross-module imports are used.

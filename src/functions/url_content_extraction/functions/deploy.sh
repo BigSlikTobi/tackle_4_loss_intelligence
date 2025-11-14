@@ -7,8 +7,9 @@ FUNCTION_NAME="url-content-extraction"
 REGION="us-central1"
 RUNTIME="python312"
 ENTRY_POINT="url_content_extraction_handler"
-MEMORY="1024MB"
+MEMORY="2048MB"  # Increased for Playwright - gives ~1.2 CPU cores
 TIMEOUT="540s"
+CPU="2"  # Explicitly allocate 2 CPU cores for faster extraction
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -219,6 +220,7 @@ gcloud functions deploy "${FUNCTION_NAME}" \
   --trigger-http \
   --allow-unauthenticated \
   --memory="${MEMORY}" \
+  --cpu="${CPU}" \
   --timeout="${TIMEOUT}" \
   --source="$TEMP_DEPLOY_DIR" \
   --set-env-vars="LOG_LEVEL=INFO,PLAYWRIGHT_BROWSERS_PATH=${RUNTIME_PLAYWRIGHT_PATH}" \

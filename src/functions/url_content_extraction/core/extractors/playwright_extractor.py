@@ -33,11 +33,15 @@ class PlaywrightExtractor:
         "--disable-blink-features=AutomationControlled",
         "--disable-dev-shm-usage",
         "--disable-gpu",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-web-security",
+        "--disable-features=IsolateOrigins,site-per-process",
     ]
     _USER_AGENT = (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) "
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/119.0.0.0 Safari/537.36"
+        "Chrome/120.0.0.0 Safari/537.36"
     )
 
     _CONTENT_SELECTORS: tuple[str, ...] = (
@@ -90,18 +94,22 @@ class PlaywrightExtractor:
         if options:
             merged_options.update(options if isinstance(options, dict) else options.model_dump())
         validated = parse_options(merged_options)
-        return self._run_sync(self._extract(validated))
+        return self._run_sync(validated)
 
-    @staticmethod
-    def _run_sync(coro: "asyncio.Future[ExtractedContent]") -> ExtractedContent:
+    def _run_sync(self, options: ExtractionOptions) -> ExtractedContent:
+        """Execute async extraction synchronously, handling existing event loops."""
+        # Check if we're already in an event loop
         try:
-            return asyncio.run(coro)
-        except RuntimeError:  # pragma: no cover - already running loop
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(coro)
-            finally:
-                loop.close()
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop - safe to use asyncio.run()
+            return asyncio.run(self._extract(options))
+        
+        # Running loop exists - create and use a new one in a thread-safe way
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, self._extract(options))
+            return future.result(timeout=options.timeout_seconds + 10)
 
     @asynccontextmanager
     async def _browser_context(self, options: ExtractionOptions):  # pragma: no cover - thin wrapper
@@ -160,35 +168,83 @@ class PlaywrightExtractor:
                 raise RuntimeError(msg)
             
             async with async_playwright() as playwright:
-                browser = await playwright.chromium.launch(headless=True, args=self._STEALTH_ARGS)
+                browser = await playwright.chromium.launch(
+                    headless=True, 
+                    args=self._STEALTH_ARGS,
+                    channel=None  # Use bundled Chromium
+                )
                 context = await browser.new_context(
                     user_agent=self._USER_AGENT,
                     locale="en-US",
                     timezone_id="America/New_York",
                     ignore_https_errors=True,
-                    viewport={"width": 1280, "height": 1600},
+                    viewport={"width": 1920, "height": 1080},
+                    screen={"width": 1920, "height": 1080},
+                    device_scale_factor=1,
+                    has_touch=False,
+                    is_mobile=False,
                     extra_http_headers={
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
                         "Accept-Language": "en-US,en;q=0.9",
+                        "Accept-Encoding": "gzip, deflate, br",
                         "Upgrade-Insecure-Requests": "1",
+                        "Sec-Fetch-Dest": "document",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Site": "none",
+                        "Sec-Fetch-User": "?1",
+                        "Cache-Control": "max-age=0",
                     },
                 )
                 
-                # Anti-detection script
+                # Enhanced anti-detection script
                 await context.add_init_script("""
+                    // Remove webdriver property
                     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    window.chrome = window.chrome || { runtime: {} };
-                    const originalQuery = navigator.permissions && navigator.permissions.query;
-                    if (originalQuery) {
-                        navigator.permissions.query = (parameters) => (
-                            parameters && parameters.name === 'notifications'
-                                ? Promise.resolve({ state: 'denied', onchange: null })
-                                : originalQuery(parameters)
-                        );
-                    }
+                    
+                    // Add chrome object
+                    window.chrome = {
+                        runtime: {},
+                        loadTimes: function() {},
+                        csi: function() {},
+                        app: {}
+                    };
+                    
+                    // Override permissions
+                    const originalQuery = window.navigator.permissions.query;
+                    window.navigator.permissions.query = (parameters) => (
+                        parameters.name === 'notifications' ?
+                            Promise.resolve({ state: Notification.permission }) :
+                            originalQuery(parameters)
+                    );
+                    
+                    // Add realistic properties
                     Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
                     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+                    Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
                     Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+                    
+                    // Add plugins
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [
+                            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+                        ]
+                    });
+                    
+                    // Override automation-related properties
+                    delete navigator.__proto__.webdriver;
+                    
+                    // Add realistic connection info
+                    Object.defineProperty(navigator, 'connection', {
+                        get: () => ({
+                            effectiveType: '4g',
+                            rtt: 50,
+                            downlink: 10,
+                            saveData: false
+                        })
+                    });
                 """)
                 
                 context.set_default_navigation_timeout(options.timeout_seconds * 1000)
@@ -201,6 +257,12 @@ class PlaywrightExtractor:
                     await page.wait_for_load_state("domcontentloaded", timeout=10000)
                 except PlaywrightTimeoutError:
                     pass
+                
+                # Handle consent dialogs BEFORE extracting content
+                await consent_handler.solve_consent(page, logger=self._logger)
+                
+                # Wait a bit for consent dialog to be dismissed and page to reflow
+                await page.wait_for_timeout(500)
                 
                 # Scroll to trigger lazy-loaded content (critical for ESPN)
                 try:
@@ -217,9 +279,6 @@ class PlaywrightExtractor:
                     await page.wait_for_timeout(2000)
                 
                 html = await page.content()
-                
-                # Handle consent dialogs
-                await consent_handler.solve_consent(page, logger=self._logger)
                 
                 # Check for AMP
                 amp_target = amp_detector.find_amp_alternate(html, str(options.url))

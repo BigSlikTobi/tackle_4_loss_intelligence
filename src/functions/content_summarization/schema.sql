@@ -10,8 +10,8 @@ ALTER TABLE news_urls
 
 -- 1.2 Create news_facts table for atomic article facts.
 CREATE TABLE IF NOT EXISTS news_facts (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    news_url_id BIGINT NOT NULL REFERENCES news_urls(id) ON DELETE CASCADE,
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    news_url_id UUID NOT NULL REFERENCES news_urls(id) ON DELETE CASCADE,
     fact_text TEXT NOT NULL,
     llm_model TEXT NOT NULL,
     prompt_version TEXT NOT NULL,
@@ -23,9 +23,9 @@ CREATE INDEX IF NOT EXISTS idx_news_facts_news_url_id
 
 -- 1.4 Ensure context_summaries schema has required columns.
 ALTER TABLE context_summaries
-    ADD COLUMN IF NOT EXISTS id BIGINT GENERATED ALWAYS AS IDENTITY;
+    ADD COLUMN IF NOT EXISTS id UUID DEFAULT gen_random_uuid();
 ALTER TABLE context_summaries
-    ADD COLUMN IF NOT EXISTS news_url_id BIGINT NOT NULL REFERENCES news_urls(id) ON DELETE CASCADE;
+    ADD COLUMN IF NOT EXISTS news_url_id UUID NOT NULL REFERENCES news_urls(id) ON DELETE CASCADE;
 ALTER TABLE context_summaries
     ADD COLUMN IF NOT EXISTS summary_text TEXT NOT NULL;
 ALTER TABLE context_summaries
