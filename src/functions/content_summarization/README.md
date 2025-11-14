@@ -33,7 +33,7 @@ All configuration lives in the root `.env` file and is loaded via `load_env()` b
 | Variable | Purpose |
 | --- | --- |
 | `SUPABASE_URL`, `SUPABASE_KEY` | Supabase connection (service role key recommended). Edge function URL is automatically derived from SUPABASE_URL. |
-| `OPENAI_API_KEY` | OpenAI API key for LLM calls (fact extraction, summarization) and embeddings (`text-embedding-3-small`). |
+| `GEMINI_API_KEY` | Gemini API key for LLM calls (fact extraction, summarization) and embeddings (`text-embedding-3-small`). |
 | `CONTENT_EXTRACTION_URL` | Optional: Cloud Run HTTP endpoint that returns raw article text for a URL. If not configured, content extraction stage will be skipped. |
 | `BATCH_LIMIT` | Optional default batch size pulled from the Edge Function. |
 | `LLM_TIMEOUT_SECONDS`, `EMBEDDING_TIMEOUT_SECONDS`, `CONTENT_TIMEOUT_SECONDS` | Optional request timeouts for each service. |
