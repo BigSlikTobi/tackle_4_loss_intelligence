@@ -1138,6 +1138,7 @@ def create_fact_pooled_embedding(client, news_url_id: str, config: PipelineConfi
         return
 
     embeddings: List[List[float]] = []
+    total_rows_returned = 0
     for chunk in chunked(fact_ids, 200):
         response = (
             client.table("facts_embeddings")
@@ -1146,6 +1147,7 @@ def create_fact_pooled_embedding(client, news_url_id: str, config: PipelineConfi
             .execute()
         )
         rows = getattr(response, "data", []) or []
+        total_rows_returned += len(rows)
         
         # Debug logging
         logger.debug(
@@ -1181,7 +1183,7 @@ def create_fact_pooled_embedding(client, news_url_id: str, config: PipelineConfi
             {
                 "news_url_id": news_url_id,
                 "fact_ids_count": len(fact_ids),
-                "rows_fetched": sum(len(getattr(client.table("facts_embeddings").select("embedding_vector").in_("news_fact_id", chunk).execute(), "data", []) or []) for chunk in chunked(fact_ids, 200)),
+                "rows_fetched": total_rows_returned,
             }
         )
         return
