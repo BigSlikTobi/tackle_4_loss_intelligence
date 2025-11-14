@@ -8,6 +8,11 @@ Production-ready vector embeddings for NFL news story summaries using OpenAI's t
 
 **What it does:** Generates 1536-dimensional vector embeddings for content summaries, enabling similarity search and story grouping for NFL news analysis.
 
+### Fact-First Enhancements
+- `facts_embeddings`: Stores per-fact vectors created by the content_summarization pipeline.
+- `story_embeddings` with `embedding_type = 'fact_pooled'`: Mean vector across all fact embeddings for a URL, giving downstream modules a dense representation before a summary exists.
+- `story_embeddings` with `embedding_type = 'summary'`: Embedding of the fact-grounded summary text.
+
 **Status:** ✅ Production Ready
 
 **Key Features:**
