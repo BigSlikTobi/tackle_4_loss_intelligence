@@ -1,3 +1,4 @@
+/// <reference path="./types.d.ts" />
 import { createClient } from "https://esm.sh/v135/@supabase/supabase-js@2.43.1?target=deno";
 
 type NewsUrlRow = { id: number; url: string | null };
@@ -89,16 +90,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     let query = supabase
       .from("news_urls")
       .select("id,url")
-      .order("published_date", { ascending: false })
+      .order("updated_at", { ascending: false })
       .limit(limit);
 
     if (stage === "content") {
       query = query.is("content_extracted_at", null);
     } else if (stage === "facts") {
-      query = query.not("content_extracted_at", "is", null).is(
-        "facts_extracted_at",
-        null,
-      );
+      query = query.is("facts_extracted_at", null);
     } else {
       query = query
         .not("facts_extracted_at", "is", null)
