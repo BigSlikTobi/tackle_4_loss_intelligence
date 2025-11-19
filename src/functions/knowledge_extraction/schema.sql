@@ -65,7 +65,13 @@ COMMENT ON TABLE news_fact_entities IS
 -- Knowledge extraction status helpers
 -- =============================================================================
 ALTER TABLE news_urls
+    ADD COLUMN IF NOT EXISTS knowledge_extracted_at TIMESTAMPTZ NULL;
+
+ALTER TABLE news_urls
     ADD COLUMN IF NOT EXISTS knowledge_error_count INTEGER DEFAULT 0;
+
+COMMENT ON COLUMN news_urls.knowledge_extracted_at IS
+'Timestamp when knowledge extraction (topics/entities) was completed for this URL';
 
 COMMENT ON COLUMN news_urls.knowledge_error_count IS
 'Number of consecutive knowledge extraction failures for this URL';

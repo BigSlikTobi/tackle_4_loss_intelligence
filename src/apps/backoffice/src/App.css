@@ -1,0 +1,33 @@
+/* App-specific styles */
+
+/* Header Styles */
+.app-header {
+  background-color: var(--bg-surface-100);
+  border-bottom: 1px solid var(--border-default);
+  padding: 1rem 0;
+  margin-bottom: 2rem;
+}
+
+.app-header .container {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.app-logo {
+  height: 3.5rem;
+  /* Increased size */
+  width: auto;
+  transition: transform 0.3s ease;
+  cursor: pointer;
+}
+
+.app-logo:hover {
+  transform: scale(1.05);
+}
+
+.app-header h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}

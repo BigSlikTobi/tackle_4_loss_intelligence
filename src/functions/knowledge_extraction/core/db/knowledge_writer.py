@@ -235,8 +235,6 @@ class KnowledgeWriter:
 
         updates = {
             "facts_count": num_facts,
-            "distinct_topics": distinct_topics,
-            "distinct_teams": distinct_teams,
             "article_difficulty": difficulty,
             "knowledge_extracted_at": datetime.datetime.utcnow().isoformat(),
             "knowledge_error_count": 0,

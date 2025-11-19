@@ -23,6 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from src.shared.db import get_supabase_client
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
+from src.functions.knowledge_extraction.core.pipelines.extraction_pipeline import (
+    ExtractionPipeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +197,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the content pipeline stages.")
     parser.add_argument(
         "--stage",
-        choices=["content", "facts", "summary", "full"],
+        choices=["content", "facts", "knowledge", "summary", "full"],
         default="facts",
         help="Pipeline stage to run.",
     )
@@ -258,6 +261,9 @@ def run_single_batch(client, config: PipelineConfig, stage: str) -> None:
 
     if stage in {"facts", "full"}:
         process_facts_stage(client, config)
+
+    if stage in {"knowledge", "full"}:
+        process_knowledge_stage(client, config)
 
     if stage in {"summary", "full"}:
         process_summary_stage(client, config)
@@ -460,6 +466,36 @@ def process_facts_stage(client, config: PipelineConfig) -> None:
             continue
 
 
+def process_knowledge_stage(client, config: PipelineConfig) -> None:
+    """Run knowledge extraction for pending URLs."""
+    
+    logger.info("Processing knowledge stage")
+    
+    try:
+        # Use the existing ExtractionPipeline which handles its own DB querying
+        # We pass the batch limit from our config
+        pipeline = ExtractionPipeline(continue_on_error=True)
+        results = pipeline.run(
+            limit=config.batch_limit,
+            dry_run=False,
+            retry_failed=False
+        )
+        
+        processed = results.get("urls_processed", 0)
+        errors = results.get("urls_with_errors", 0)
+        
+        if processed > 0:
+            logger.info(
+                "Knowledge extraction completed", 
+                {"processed": processed, "errors": errors}
+            )
+        else:
+            logger.info("No URLs pending knowledge extraction")
+            
+    except Exception:
+        logger.exception("Failed to run knowledge extraction pipeline")
+
+
 def process_summary_stage(client, config: PipelineConfig) -> None:
     """Generate summaries or topic bundles based on article difficulty."""
 
@@ -558,7 +594,7 @@ def get_article_difficulty(client, news_url_id: str) -> Dict[str, Any]:
 
     response = (
         client.table("news_urls")
-        .select("facts_count,distinct_topics,distinct_teams,article_difficulty")
+        .select("facts_count,article_difficulty")
         .eq("id", news_url_id)
         .limit(1)
         .execute()
