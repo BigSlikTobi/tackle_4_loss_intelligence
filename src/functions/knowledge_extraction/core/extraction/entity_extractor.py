@@ -251,7 +251,7 @@ class EntityExtractor:
                     team_name = team_name[0]
                 
                 # Validate entity type
-                if entity_type not in ("player", "team", "game"):
+                if entity_type not in ("player", "team", "game", "staff"):
                     logger.warning(f"Invalid entity_type: {entity_type}, skipping")
                     continue
                 
@@ -267,8 +267,11 @@ class EntityExtractor:
                     has_team_abbr = team_abbr is not None and len(str(team_abbr).strip()) > 0
                     has_team_name = team_name is not None and len(str(team_name).strip()) > 0
                     
-                    # Require at least one disambiguation field
-                    if not (has_position or has_team_abbr or has_team_name):
+                    # Relaxed check: Allow if high confidence or primary rank, even without full context
+                    is_prominent = (entity_dict.get("confidence", 0) > 0.8) or (entity_dict.get("rank", 99) == 1)
+                    
+                    # Require at least one disambiguation field OR high prominence
+                    if not (has_position or has_team_abbr or has_team_name or is_prominent):
                         logger.warning(
                             f"Player '{mention_text}' missing disambiguation info "
                             "(position, team_abbr, or team_name required), skipping"
@@ -277,7 +280,7 @@ class EntityExtractor:
                     
                     logger.debug(
                         f"Player '{mention_text}' validated with: "
-                        f"position={position}, team_abbr={team_abbr}, team_name={team_name}"
+                        f"position={position}, team_abbr={team_abbr}, team_name={team_name}, prominent={is_prominent}"
                     )
                 
                 entity = ExtractedEntity(
