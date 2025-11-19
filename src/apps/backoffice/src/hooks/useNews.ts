@@ -17,7 +17,6 @@ export function useNewsList() {
                     .limit(50)
 
                 if (error) throw error
-                if (error) throw error
 
                 // Calculate facts_count from the returned news_facts array
                 const transformedData = (data || []).map((item: any) => ({
