@@ -7,6 +7,16 @@ ALTER TABLE news_urls
     ADD COLUMN IF NOT EXISTS facts_extracted_at TIMESTAMPTZ NULL;
 ALTER TABLE news_urls
     ADD COLUMN IF NOT EXISTS summary_created_at TIMESTAMPTZ NULL;
+ALTER TABLE news_urls
+    ADD COLUMN IF NOT EXISTS knowledge_extracted_at TIMESTAMPTZ NULL;
+ALTER TABLE news_urls
+    ADD COLUMN IF NOT EXISTS facts_count INTEGER;
+ALTER TABLE news_urls
+    ADD COLUMN IF NOT EXISTS distinct_topics INTEGER;
+ALTER TABLE news_urls
+    ADD COLUMN IF NOT EXISTS distinct_teams INTEGER;
+ALTER TABLE news_urls
+    ADD COLUMN IF NOT EXISTS article_difficulty TEXT;
 
 -- 1.2 Create news_facts table for atomic article facts.
 CREATE TABLE IF NOT EXISTS news_facts (
@@ -20,6 +30,30 @@ CREATE TABLE IF NOT EXISTS news_facts (
 
 CREATE INDEX IF NOT EXISTS idx_news_facts_news_url_id
     ON news_facts (news_url_id);
+
+-- 1.3 Topic-level summaries for hard articles.
+CREATE TABLE IF NOT EXISTS topic_summaries (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    news_url_id UUID NOT NULL REFERENCES news_urls(id) ON DELETE CASCADE,
+    primary_topic TEXT NOT NULL,
+    primary_team TEXT,
+    primary_scope_type TEXT,
+    primary_scope_id TEXT,
+    primary_scope_label TEXT,
+    summary_text TEXT NOT NULL,
+    llm_model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_topic_summaries_news_url_id
+    ON topic_summaries (news_url_id);
+
+CREATE INDEX IF NOT EXISTS idx_topic_summaries_topic_team
+    ON topic_summaries (primary_topic, COALESCE(primary_team, ''));
+
+CREATE INDEX IF NOT EXISTS idx_topic_summaries_scope
+    ON topic_summaries (primary_scope_type, COALESCE(primary_scope_id, ''));
 
 -- 1.4 Ensure context_summaries schema has required columns.
 ALTER TABLE context_summaries

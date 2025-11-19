@@ -75,3 +75,4 @@ docs/game-analysis-package/archive
 src/functions/knowledge_extraction/scripts/test_content
 src/functions/article_validation/test_output
 
+supabase
