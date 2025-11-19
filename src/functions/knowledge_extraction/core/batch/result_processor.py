@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass
 
 from ..db.knowledge_writer import KnowledgeWriter
+from ..db.fact_reader import NewsFactReader
 from ..extraction.entity_extractor import ExtractedEntity
 from ..extraction.topic_extractor import (
     ExtractedTopic,
@@ -52,6 +53,7 @@ class BatchResultProcessor:
         self,
         writer: Optional[KnowledgeWriter] = None,
         entity_resolver: Optional[EntityResolver] = None,
+        reader: Optional[NewsFactReader] = None,
         continue_on_error: bool = True,
     ):
         """
@@ -60,10 +62,12 @@ class BatchResultProcessor:
         Args:
             writer: Knowledge writer (default: new instance)
             entity_resolver: Entity resolver (default: new instance)
+            reader: News fact reader (default: new instance)
             continue_on_error: Whether to continue on errors
         """
         self.writer = writer or KnowledgeWriter()
         self.entity_resolver = entity_resolver or EntityResolver()
+        self.reader = reader or NewsFactReader()
         self.continue_on_error = continue_on_error
         
         logger.info("Initialized BatchResultProcessor")
@@ -134,11 +138,16 @@ class BatchResultProcessor:
                         group_results[group_id] = {
                             "topics": None,
                             "entities": None,
-                            "errors": []
+                            "errors": [],
+                            "model": None
                         }
                     
                     # Extract response body
                     body = response.get("body", {})
+                    
+                    # Capture model if available
+                    if not group_results[group_id]["model"]:
+                        group_results[group_id]["model"] = body.get("model")
                     
                     # For Responses API, the text is in output[1].content[0].text
                     # Structure: body.output -> array of [reasoning, message]
@@ -202,20 +211,51 @@ class BatchResultProcessor:
                 
                 # Write to database
                 if topics or resolved_entities:
-                    write_results = self.writer.write_knowledge(
-                        story_group_id=group_id,
-                        topics=topics,
-                        entities=resolved_entities,
+                    # Fetch facts for this group (news_url)
+                    facts = self.reader.get_facts_for_url(group_id)
+                    if not facts:
+                        logger.warning(f"No facts found for group {group_id}")
+                        result.groups_with_errors += 1
+                        continue
+
+                    llm_model = group_data.get("model") or "gpt-5-nano"
+                    topics_count = 0
+                    entities_count = 0
+
+                    for fact in facts:
+                        fact_id = fact.get("id")
+                        if not fact_id:
+                            continue
+                        
+                        if topics:
+                            topics_count += self.writer.write_fact_topics(
+                                news_fact_id=fact_id,
+                                topics=topics,
+                                llm_model=llm_model,
+                                dry_run=dry_run
+                            )
+                        
+                        if resolved_entities:
+                            entities_count += self.writer.write_fact_entities(
+                                news_fact_id=fact_id,
+                                entities=resolved_entities,
+                                llm_model=llm_model,
+                                dry_run=dry_run
+                            )
+
+                    # Update article metrics
+                    self.writer.update_article_metrics(
+                        news_url_id=group_id,
                         dry_run=dry_run
                     )
                     
                     result.groups_processed += 1
-                    result.topics_extracted += write_results["topics"]
-                    result.entities_extracted += write_results["entities"]
+                    result.topics_extracted += topics_count
+                    result.entities_extracted += entities_count
                     
                     logger.info(
-                        f"Wrote {write_results['topics']} topics and "
-                        f"{write_results['entities']} entities"
+                        f"Wrote {topics_count} topics and "
+                        f"{entities_count} entities across {len(facts)} facts"
                     )
                 else:
                     logger.warning(f"No knowledge extracted for group {group_id}")
