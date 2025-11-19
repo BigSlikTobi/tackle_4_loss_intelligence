@@ -1841,7 +1841,7 @@ def store_topic_summary(
     """Insert topic-level summary record."""
 
     scope_info = normalize_scope(scope)
-    primary_team = scope_info.get("team") if scope_info.get("type") != "team" else scope_info.get("id")
+    primary_team = scope_info.get("id") if scope_info.get("type") == "team" else scope_info.get("team")
     client.table("topic_summaries").insert(
         {
             "news_url_id": news_url_id,
