@@ -54,6 +54,14 @@ def _canonicalize_topic(topic: str) -> str:
     return normalized.replace(" ", "_")
 
 
+def _build_entity_dedup_key(entity: ResolvedEntity) -> str:
+    """Return normalized deduplication key for an entity row."""
+
+    source = entity.entity_id or entity.matched_name or entity.mention_text or "unknown"
+    normalized = source.strip().lower()
+    return normalized or "unknown"
+
+
 class KnowledgeWriter:
     """Persist fact-level knowledge extraction outputs."""
 
@@ -74,31 +82,34 @@ class KnowledgeWriter:
         if not topics:
             return 0
 
-        dedup: Dict[str, ExtractedTopic] = {}
+        dedup: Dict[str, Tuple[str, ExtractedTopic]] = {}
         for topic in topics:
-            key = (topic.topic or "").strip().lower()
+            raw_topic = (topic.topic or "").strip()
+            key = raw_topic.lower()
             if not key:
                 continue
-            existing = dedup.get(key)
+            canonical_key = _canonicalize_topic(key)
+            existing = dedup.get(canonical_key)
             if not existing:
-                dedup[key] = topic
+                dedup[canonical_key] = (key, topic)
                 continue
+            _, existing_topic = existing
             # Keep highest confidence / lowest rank
-            existing_conf = existing.confidence or 0.0
+            existing_conf = existing_topic.confidence or 0.0
             new_conf = topic.confidence or 0.0
             if new_conf > existing_conf:
-                dedup[key] = topic
+                dedup[canonical_key] = (key, topic)
             elif new_conf == existing_conf:
-                if (topic.rank or 99) < (existing.rank or 99):
-                    dedup[key] = topic
+                if (topic.rank or 99) < (existing_topic.rank or 99):
+                    dedup[canonical_key] = (key, topic)
 
         records: List[Dict] = []
-        for key, topic in dedup.items():
+        for canonical_key, (normalized_topic, topic) in dedup.items():
             records.append(
                 {
                     "news_fact_id": news_fact_id,
-                    "topic": key,
-                    "canonical_topic": _canonicalize_topic(key),
+                    "topic": normalized_topic,
+                    "canonical_topic": canonical_key,
                     "confidence": topic.confidence,
                     "rank": topic.rank,
                     "is_primary": (topic.rank or 0) <= 1,
@@ -118,7 +129,7 @@ class KnowledgeWriter:
 
         response = (
             self.client.table("news_fact_topics")
-            .upsert(records, on_conflict="news_fact_id,topic")
+            .upsert(records, on_conflict="news_fact_id,canonical_topic")
             .execute()
         )
         return len(getattr(response, "data", []) or records)
@@ -137,11 +148,14 @@ class KnowledgeWriter:
             return 0
 
         dedup: Dict[Tuple[str, str], ResolvedEntity] = {}
+        dedup_keys: Dict[Tuple[str, str], str] = {}
         for entity in entities:
-            key = (entity.entity_type, entity.entity_id or entity.mention_text)
+            dedup_key = _build_entity_dedup_key(entity)
+            key = (entity.entity_type, dedup_key)
             existing = dedup.get(key)
             if not existing:
                 dedup[key] = entity
+                dedup_keys[key] = dedup_key
                 continue
             existing_conf = existing.confidence or 0.0
             new_conf = entity.confidence or 0.0
@@ -149,14 +163,17 @@ class KnowledgeWriter:
                 existing.is_primary == entity.is_primary and new_conf >= existing_conf
             ):
                 dedup[key] = entity
+                dedup_keys[key] = dedup_key
 
         records: List[Dict] = []
-        for entity in dedup.values():
+        for key, entity in dedup.items():
+            dedup_key = dedup_keys[key]
             records.append(
                 {
                     "news_fact_id": news_fact_id,
                     "entity_type": entity.entity_type,
                     "entity_id": entity.entity_id,
+                    "entity_dedup_key": dedup_key,
                     "mention_text": entity.mention_text,
                     "matched_name": entity.matched_name,
                     "confidence": entity.confidence,
@@ -179,7 +196,11 @@ class KnowledgeWriter:
             )
             return len(records)
 
-        response = self.client.table("news_fact_entities").insert(records).execute()
+        response = (
+            self.client.table("news_fact_entities")
+            .upsert(records, on_conflict="news_fact_id,entity_type,entity_dedup_key")
+            .execute()
+        )
         return len(getattr(response, "data", []) or records)
 
     def update_article_metrics(

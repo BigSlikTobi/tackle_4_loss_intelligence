@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS news_fact_topics (
     llm_model TEXT,
     prompt_version TEXT,
     extracted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT news_fact_topics_unique UNIQUE (news_fact_id, topic)
+    CONSTRAINT news_fact_topics_unique UNIQUE (news_fact_id, canonical_topic)
 );
 
 CREATE INDEX IF NOT EXISTS idx_news_fact_topics_fact_id
@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS news_fact_entities (
     news_fact_id UUID NOT NULL REFERENCES news_facts(id) ON DELETE CASCADE,
     entity_type TEXT NOT NULL CHECK (entity_type IN ('player', 'team', 'game')),
     entity_id TEXT,
+    entity_dedup_key TEXT NOT NULL,
     mention_text TEXT,
     matched_name TEXT,
     confidence REAL,
@@ -46,7 +47,8 @@ CREATE TABLE IF NOT EXISTS news_fact_entities (
     team_name TEXT,
     llm_model TEXT,
     prompt_version TEXT,
-    extracted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    extracted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT news_fact_entities_unique UNIQUE (news_fact_id, entity_type, entity_dedup_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_news_fact_entities_fact_id

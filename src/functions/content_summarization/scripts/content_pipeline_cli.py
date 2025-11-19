@@ -38,6 +38,7 @@ DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 EDGE_FUNCTION_NAME = "get-pending-news-urls"
 
 FACT_PROMPT = """ASK: Extract discrete facts from the article. Closed world. No inferences.
+Current Date: {current_date}
 
 RULES
 - Use only the information explicitly stated in the text.
@@ -52,11 +53,22 @@ RULES
 - Include all player names, team names, dates, trades, quotes, contract references, injuries, and statements about future plans that are explicitly stated.
 - If something is not in the article, do NOT mention it.
 
-INSTRUCTIONS
-1. Divide the article into logical segments in your reasoning.
-2. Extract each factual statement as a separate item.
-3. Do not summarize or compress multiple facts into one statement.
-4. Do not omit any named entity or event that appears in a factual statement.
+CRITICAL QUALITY RULES:
+1. TIMELINESS: Ensure all temporal statements are anchored to the Current Date ({current_date}).
+   - BAD: "Joe Flacco turns 40 next year."
+   - GOOD: "Joe Flacco will turn 40 in 2026." (if context allows) or "Joe Flacco turns 40 on [Specific Date]."
+   - BAD: "Lamp is starting his 4th season."
+   - GOOD: "Lamp is starting his 4th season in 2025."
+2. NO META-INFO: EXCLUDE facts about the author, source, publication time, or media outlet.
+   - BAD: "Tristan H. Cockcroft wrote the article."
+   - BAD: "The article suggests..."
+3. NO GENERALITIES: EXCLUDE general statements, opinions, platitudes, or vague commentary.
+   - BAD: "Fantasy football lineup decisions can be challenging."
+   - BAD: "Losses are costing seasons."
+4. SPECIFIC SUBJECTS: ALWAYS specify the subject. Replace "The organization", "The team", or pronouns with the specific team or player name.
+   - BAD: "The organization was looking for a path to turn things around."
+   - GOOD: "The [Team Name] was looking for a path to turn things around."
+5. LEANNESS: Optimize for leanness. Extract only significant, concrete facts. Avoid verbose filler.
 
 INVALID EXAMPLES (DO NOT DO):
 - "Gardner was traded to Team X" when not stated → INVALID inference
@@ -64,13 +76,13 @@ INVALID EXAMPLES (DO NOT DO):
 - Adding any commentary, opinions, or analysis.
 
 OUTPUT FORMAT (JSON only):
-{
+{{
   "facts": [
     "fact 1",
     "fact 2",
     "fact 3"
   ]
-}
+}}
 
 Output ONLY valid JSON. No extra text, no comments, no explanations.
 """
@@ -671,9 +683,12 @@ def fetch_article_content(url: str, config: PipelineConfig) -> str:
 def extract_facts(article_text: str, config: PipelineConfig) -> List[str]:
     """Extract atomic facts from article text using the LLM."""
 
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    formatted_prompt = FACT_PROMPT.format(current_date=current_date)
+
     for attempt in range(2):
         response_json = call_llm_json(
-            prompt=FACT_PROMPT,
+            prompt=formatted_prompt,
             user_content=article_text,
             model=config.fact_llm_model,
             config=config,

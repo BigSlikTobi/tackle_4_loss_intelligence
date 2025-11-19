@@ -222,26 +222,39 @@ class BatchResultProcessor:
                     topics_count = 0
                     entities_count = 0
 
+                    fact_ids = [fact.get("id") for fact in facts if fact.get("id")]
+                    existing_topic_fact_ids = set(self.reader.get_existing_topic_fact_ids(fact_ids))
+                    existing_entity_fact_ids = set(self.reader.get_existing_entity_fact_ids(fact_ids))
+
                     for fact in facts:
                         fact_id = fact.get("id")
                         if not fact_id:
                             continue
-                        
-                        if topics:
+
+                        need_topics = bool(topics) and fact_id not in existing_topic_fact_ids
+                        need_entities = bool(resolved_entities) and fact_id not in existing_entity_fact_ids
+
+                        if not need_topics and not need_entities:
+                            logger.debug("Skipping fact %s (already populated)", fact_id)
+                            continue
+
+                        if need_topics:
                             topics_count += self.writer.write_fact_topics(
                                 news_fact_id=fact_id,
                                 topics=topics,
                                 llm_model=llm_model,
                                 dry_run=dry_run
                             )
-                        
-                        if resolved_entities:
+                            existing_topic_fact_ids.add(fact_id)
+
+                        if need_entities:
                             entities_count += self.writer.write_fact_entities(
                                 news_fact_id=fact_id,
                                 entities=resolved_entities,
                                 llm_model=llm_model,
                                 dry_run=dry_run
                             )
+                            existing_entity_fact_ids.add(fact_id)
 
                     # Update article metrics
                     self.writer.update_article_metrics(
