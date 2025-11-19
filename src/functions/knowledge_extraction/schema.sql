@@ -1,331 +1,71 @@
--- Knowledge Extraction Database Schema
--- 
--- This schema defines tables for extracting and storing key topics and entities
--- from story groups. Enables cross-referencing of stories based on shared topics
--- and linking stories to specific NFL entities (players, teams, games).
+-- Knowledge Extraction Database Schema (Fact-level)
+-- -------------------------------------------------
+-- Stores per-fact topics and entities extracted from news articles.
 
 -- =============================================================================
--- story_topics
+-- news_fact_topics
 -- =============================================================================
--- Stores key topics extracted from story groups as text.
--- Topics enable finding cross-references between unrelated story groups.
--- Examples: "QB performance", "Sunday Night Football", "Touchdowns", "Injuries"
-
-CREATE TABLE IF NOT EXISTS story_topics (
-    -- Unique identifier for the topic record
+CREATE TABLE IF NOT EXISTS news_fact_topics (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    
-    -- Foreign key to story_groups (from story_grouping module)
-    story_group_id UUID NOT NULL REFERENCES story_groups(id) ON DELETE CASCADE,
-    
-    -- Topic text (normalized, lowercase for consistency)
-    -- Examples: "qb performance", "injury update", "trade rumors"
+    news_fact_id UUID NOT NULL REFERENCES news_facts(id) ON DELETE CASCADE,
     topic TEXT NOT NULL,
-    
-    -- Confidence score from LLM extraction (0.0 to 1.0)
-    -- Higher scores indicate stronger relevance
+    canonical_topic TEXT NOT NULL,
     confidence REAL,
-    
-    -- Importance ranking (1=most important, 2=secondary, 3+=minor)
-    -- Lower numbers indicate higher priority/relevance
     rank INTEGER,
-    
-    -- Timestamp when topic was extracted
-    extracted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    -- Ensure same topic isn't duplicated for a group
-    CONSTRAINT story_topics_unique UNIQUE (story_group_id, topic)
-);
-
--- Index on story_group_id for efficient lookups
-CREATE INDEX IF NOT EXISTS idx_story_topics_group_id 
-ON story_topics(story_group_id);
-
--- Index on topic for finding groups with same topic
-CREATE INDEX IF NOT EXISTS idx_story_topics_topic 
-ON story_topics(topic);
-
--- GIN index for full-text search on topics
-CREATE INDEX IF NOT EXISTS idx_story_topics_topic_gin 
-ON story_topics USING gin(to_tsvector('english', topic));
-
--- Index on confidence for filtering high-quality topics
-CREATE INDEX IF NOT EXISTS idx_story_topics_confidence 
-ON story_topics(confidence DESC) WHERE confidence IS NOT NULL;
-
--- Index on rank for sorting by importance
-CREATE INDEX IF NOT EXISTS idx_story_topics_rank 
-ON story_topics(story_group_id, rank) WHERE rank IS NOT NULL;
-
-COMMENT ON TABLE story_topics IS 
-'Key topics extracted from story groups for cross-referencing';
-
-COMMENT ON COLUMN story_topics.topic IS 
-'Normalized topic text (lowercase) like "qb performance" or "injury update"';
-
-COMMENT ON COLUMN story_topics.confidence IS 
-'LLM confidence score (0.0-1.0) indicating topic relevance';
-
-
--- =============================================================================
--- story_entities
--- =============================================================================
--- Links story groups to specific NFL entities (players, teams, games).
--- Uses foreign keys to reference existing entities in the data_loading tables.
--- Supports multiple entity types in a single table using polymorphic pattern.
-
-CREATE TABLE IF NOT EXISTS story_entities (
-    -- Unique identifier for the entity link record
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    
-    -- Foreign key to story_groups (from story_grouping module)
-    story_group_id UUID NOT NULL REFERENCES story_groups(id) ON DELETE CASCADE,
-    
-    -- Type of entity: 'player', 'team', 'game'
-    entity_type TEXT NOT NULL CHECK (entity_type IN ('player', 'team', 'game')),
-    
-    -- Entity ID (polymorphic - references different tables based on entity_type)
-    -- For 'player': references players.player_id
-    -- For 'team': references teams.team_abbr
-    -- For 'game': references games.game_id
-    entity_id TEXT NOT NULL,
-    
-    -- Original mention text from the story (for debugging/display)
-    -- Examples: "Patrick Mahomes", "Chiefs", "Mahomes", "KC"
-    mention_text TEXT,
-    
-    -- Confidence score from entity resolution (0.0 to 1.0)
-    -- Lower scores may indicate fuzzy matches or nicknames
-    confidence REAL,
-    
-    -- Whether this is a primary entity (main subject) or secondary mention
     is_primary BOOLEAN DEFAULT FALSE,
-    
-    -- Player disambiguation fields (only populated for entity_type='player')
-    -- Extracted from story context to help disambiguate players with same names
-    -- Example: "Josh Allen" could be QB (Bills) or LB (Jaguars)
-    -- At least ONE of these fields must be present for player entities
-    position TEXT,        -- Player position: QB, RB, WR, TE, etc.
-    team_abbr TEXT,       -- Team abbreviation: BUF, KC, SF, etc.
-    team_name TEXT,       -- Team full name: Bills, Chiefs, 49ers, etc.
-    
-    -- Importance ranking (1=most important, 2=secondary, 3+=minor)
-    -- Lower numbers indicate higher priority/relevance
-    rank INTEGER,
-    
-    -- Timestamp when entity was extracted
+    llm_model TEXT,
+    prompt_version TEXT,
     extracted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    -- Ensure same entity isn't duplicated for a group
-    CONSTRAINT story_entities_unique UNIQUE (story_group_id, entity_type, entity_id)
+    CONSTRAINT news_fact_topics_unique UNIQUE (news_fact_id, topic)
 );
 
--- Index on story_group_id for efficient lookups
-CREATE INDEX IF NOT EXISTS idx_story_entities_group_id 
-ON story_entities(story_group_id);
+CREATE INDEX IF NOT EXISTS idx_news_fact_topics_fact_id
+ON news_fact_topics(news_fact_id);
 
--- Composite index on entity_type and entity_id for reverse lookups
--- (e.g., "find all stories mentioning Patrick Mahomes")
-CREATE INDEX IF NOT EXISTS idx_story_entities_type_id 
-ON story_entities(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_news_fact_topics_canonical
+ON news_fact_topics(canonical_topic);
 
--- Index on entity_id for quick lookups
-CREATE INDEX IF NOT EXISTS idx_story_entities_entity_id 
-ON story_entities(entity_id);
-
--- Index on is_primary for filtering primary entities
-CREATE INDEX IF NOT EXISTS idx_story_entities_primary 
-ON story_entities(story_group_id) WHERE is_primary = TRUE;
-
--- Index on confidence for filtering high-quality matches
-CREATE INDEX IF NOT EXISTS idx_story_entities_confidence 
-ON story_entities(confidence DESC) WHERE confidence IS NOT NULL;
-
--- Index on extracted_at for chronological queries
-CREATE INDEX IF NOT EXISTS idx_story_entities_extracted_at 
-ON story_entities(extracted_at DESC);
-
--- Index on player disambiguation fields for faster lookups
-CREATE INDEX IF NOT EXISTS idx_story_entities_player_hints 
-ON story_entities(mention_text, position, team_abbr) 
-WHERE entity_type = 'player';
-
--- Index on rank for sorting by importance
-CREATE INDEX IF NOT EXISTS idx_story_entities_rank 
-ON story_entities(story_group_id, rank) WHERE rank IS NOT NULL;
-
-COMMENT ON TABLE story_entities IS 
-'Links story groups to NFL entities (players, teams, games)';
-
-COMMENT ON COLUMN story_entities.entity_type IS 
-'Type of entity: player, team, or game';
-
-COMMENT ON COLUMN story_entities.entity_id IS 
-'Entity ID (player_id, team_abbr, or game_id based on type)';
-
-COMMENT ON COLUMN story_entities.mention_text IS 
-'Original text mentioning this entity (e.g., "Mahomes", "Chiefs")';
-
-COMMENT ON COLUMN story_entities.confidence IS 
-'Confidence score (0.0-1.0) from entity resolution';
-
-COMMENT ON COLUMN story_entities.is_primary IS 
-'TRUE if entity is the main subject of the story';
-
-COMMENT ON COLUMN story_entities.position IS 
-'Player position (QB, RB, etc.) for disambiguation - required for player entities';
-
-COMMENT ON COLUMN story_entities.team_abbr IS 
-'Player team abbreviation for disambiguation - helps identify which player';
-
-COMMENT ON COLUMN story_entities.team_name IS 
-'Player team name for disambiguation - at least one hint (position/team) required';
-
+COMMENT ON TABLE news_fact_topics IS
+'Topics extracted per fact to support downstream grouping and classification';
 
 -- =============================================================================
--- Utility Views
+-- news_fact_entities
 -- =============================================================================
-
--- View for player entities with player details
-CREATE OR REPLACE VIEW story_player_entities AS
-SELECT 
-    se.id,
-    se.story_group_id,
-    se.entity_id AS player_id,
-    se.mention_text,
-    se.confidence,
-    se.is_primary,
-    se.extracted_at,
-    p.display_name,
-    p.position,
-    p.latest_team,
-    p.status
-FROM story_entities se
-LEFT JOIN players p ON se.entity_id = p.player_id
-WHERE se.entity_type = 'player';
-
-COMMENT ON VIEW story_player_entities IS 
-'Story entities joined with player details';
-
--- View for team entities with team details
-CREATE OR REPLACE VIEW story_team_entities AS
-SELECT 
-    se.id,
-    se.story_group_id,
-    se.entity_id AS team_abbr,
-    se.mention_text,
-    se.confidence,
-    se.is_primary,
-    se.extracted_at,
-    t.team_name,
-    t.team_conference AS conference,
-    t.team_division AS division
-FROM story_entities se
-LEFT JOIN teams t ON se.entity_id = t.team_abbr
-WHERE se.entity_type = 'team';
-
-COMMENT ON VIEW story_team_entities IS 
-'Story entities joined with team details';
-
--- View for game entities with game details
-CREATE OR REPLACE VIEW story_game_entities AS
-SELECT 
-    se.id,
-    se.story_group_id,
-    se.entity_id AS game_id,
-    se.mention_text,
-    se.confidence,
-    se.is_primary,
-    se.extracted_at,
-    g.season,
-    g.week,
-    g.game_type,
-    g.home_team,
-    g.away_team,
-    g.home_score,
-    g.away_score,
-    g.gameday
-FROM story_entities se
-LEFT JOIN games g ON se.entity_id = g.game_id
-WHERE se.entity_type = 'game';
-
-COMMENT ON VIEW story_game_entities IS 
-'Story entities joined with game details';
-
-
--- =============================================================================
--- Helper Functions
--- =============================================================================
-
--- Function to find story groups sharing topics
-CREATE OR REPLACE FUNCTION find_groups_by_topic(
-    topic_text TEXT
-) RETURNS TABLE (
-    story_group_id UUID,
-    topic TEXT,
-    confidence REAL,
-    match_count BIGINT
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT 
-        st.story_group_id,
-        st.topic,
-        st.confidence,
-        COUNT(*) OVER (PARTITION BY st.story_group_id) as match_count
-    FROM story_topics st
-    WHERE st.topic ILIKE '%' || topic_text || '%'
-    ORDER BY st.confidence DESC NULLS LAST, match_count DESC;
-END;
-$$ LANGUAGE plpgsql;
-
-COMMENT ON FUNCTION find_groups_by_topic IS 
-'Find story groups containing a specific topic (case-insensitive)';
-
--- Function to find story groups mentioning an entity
-CREATE OR REPLACE FUNCTION find_groups_by_entity(
-    entity_type_param TEXT,
-    entity_id_param TEXT
-) RETURNS TABLE (
-    story_group_id UUID,
+CREATE TABLE IF NOT EXISTS news_fact_entities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    news_fact_id UUID NOT NULL REFERENCES news_facts(id) ON DELETE CASCADE,
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('player', 'team', 'game')),
+    entity_id TEXT,
     mention_text TEXT,
+    matched_name TEXT,
     confidence REAL,
-    is_primary BOOLEAN,
-    extracted_at TIMESTAMPTZ
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT 
-        se.story_group_id,
-        se.mention_text,
-        se.confidence,
-        se.is_primary,
-        se.extracted_at
-    FROM story_entities se
-    WHERE se.entity_type = entity_type_param
-      AND se.entity_id = entity_id_param
-    ORDER BY se.is_primary DESC, se.confidence DESC NULLS LAST, se.extracted_at DESC;
-END;
-$$ LANGUAGE plpgsql;
+    is_primary BOOLEAN DEFAULT FALSE,
+    rank INTEGER,
+    position TEXT,
+    team_abbr TEXT,
+    team_name TEXT,
+    llm_model TEXT,
+    prompt_version TEXT,
+    extracted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
-COMMENT ON FUNCTION find_groups_by_entity IS 
-'Find story groups mentioning a specific entity (player, team, or game)';
+CREATE INDEX IF NOT EXISTS idx_news_fact_entities_fact_id
+ON news_fact_entities(news_fact_id);
 
+CREATE INDEX IF NOT EXISTS idx_news_fact_entities_type_id
+ON news_fact_entities(entity_type, entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_news_fact_entities_team_abbr
+ON news_fact_entities(team_abbr) WHERE team_abbr IS NOT NULL;
+
+COMMENT ON TABLE news_fact_entities IS
+'Resolved entities extracted per fact for accurate team/player tracking';
 
 -- =============================================================================
--- Indexes for Performance
+-- Knowledge extraction status helpers
 -- =============================================================================
+ALTER TABLE news_urls
+    ADD COLUMN IF NOT EXISTS knowledge_error_count INTEGER DEFAULT 0;
 
--- Additional composite indexes for common query patterns
-
--- Find topics for a specific group
-CREATE INDEX IF NOT EXISTS idx_story_topics_group_topic 
-ON story_topics(story_group_id, topic);
-
--- Find entities for a specific group by type
-CREATE INDEX IF NOT EXISTS idx_story_entities_group_type 
-ON story_entities(story_group_id, entity_type);
-
--- Find primary entities by type
-CREATE INDEX IF NOT EXISTS idx_story_entities_type_primary 
-ON story_entities(entity_type, entity_id, is_primary) WHERE is_primary = TRUE;
+COMMENT ON COLUMN news_urls.knowledge_error_count IS
+'Number of consecutive knowledge extraction failures for this URL';

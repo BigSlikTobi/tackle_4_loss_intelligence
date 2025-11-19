@@ -1,11 +1,10 @@
-"""Database writer for extracted knowledge (topics and entities).
+"""Database writer for fact-level topics and entities."""
 
-Writes topics and resolved entities to the database.
-"""
+from __future__ import annotations
 
 import datetime
 import logging
-from typing import Dict, List
+from typing import Dict, List, Sequence, Tuple
 
 from src.shared.db.connection import get_supabase_client
 from ..extraction.topic_extractor import ExtractedTopic
@@ -13,380 +12,258 @@ from ..resolution.entity_resolver import ResolvedEntity
 
 logger = logging.getLogger(__name__)
 
+FACT_TOPIC_PROMPT_VERSION = "fact-topic-v1"
+FACT_ENTITY_PROMPT_VERSION = "fact-entity-v1"
+
+
+def _canonicalize_topic(topic: str) -> str:
+    """Return canonical topic key for downstream grouping."""
+
+    if not topic:
+        return "unknown"
+
+    normalized = topic.lower().strip()
+    if "injur" in normalized:
+        return "injury"
+    if any(keyword in normalized for keyword in ["trade", "roster move", "signing"]):
+        return "trade"
+    if "contract" in normalized or "cap" in normalized:
+        return "contract"
+    if any(keyword in normalized for keyword in ["game", "highlight", "matchup", "gameday", "week"]):
+        return "gameday"
+    if "rumor" in normalized:
+        return "rumor"
+    if "draft" in normalized or "prospect" in normalized:
+        return "draft"
+    if "fantasy" in normalized:
+        return "fantasy"
+    if "season" in normalized or "prediction" in normalized:
+        return "season_outlook"
+    if "offseason" in normalized or "training" in normalized:
+        return "offseason"
+    if "culture" in normalized or "leadership" in normalized:
+        return "culture"
+    if "profile" in normalized or "interview" in normalized:
+        return "profile"
+    if "defense" in normalized or "turnover" in normalized:
+        return "defense"
+    if "offense" in normalized or "quarterback" in normalized or "passing" in normalized:
+        return "offense"
+    if "league" in normalized:
+        return "league"
+    return normalized.replace(" ", "_")
+
 
 class KnowledgeWriter:
-    """
-    Writer for saving extracted topics and entities.
-    
-    Handles batch writes and conflict resolution.
-    """
-    
-    def __init__(self):
-        """Initialize the knowledge writer."""
+    """Persist fact-level knowledge extraction outputs."""
+
+    def __init__(self) -> None:
         self.client = get_supabase_client()
         logger.info("Initialized KnowledgeWriter")
-    
-    def write_topics(
+
+    def write_fact_topics(
         self,
-        story_group_id: str,
-        topics: List[ExtractedTopic],
-        dry_run: bool = False
+        *,
+        news_fact_id: str,
+        topics: Sequence[ExtractedTopic],
+        llm_model: str,
+        dry_run: bool = False,
     ) -> int:
-        """
-        Write topics for a story group.
-        
-        Args:
-            story_group_id: UUID of the story group
-            topics: List of ExtractedTopic instances
-            dry_run: If True, don't actually write to database
-            
-        Returns:
-            Number of topics written
-        """
+        """Insert or upsert topic annotations for a fact."""
+
         if not topics:
-            logger.debug(f"No topics to write for group {story_group_id}")
             return 0
-        
-        try:
-            # Deduplicate topics by normalized text
-            # Keep the one with highest confidence
-            seen = {}
-            for topic in topics:
-                normalized_topic = topic.topic.lower().strip()
-                
-                if normalized_topic not in seen:
-                    seen[normalized_topic] = topic
-                else:
-                    # Keep the one with higher confidence
-                    existing = seen[normalized_topic]
-                    if topic.confidence and existing.confidence:
-                        if topic.confidence > existing.confidence:
-                            seen[normalized_topic] = topic
-                    elif topic.confidence:
-                        seen[normalized_topic] = topic
-            
-            # Prepare records from deduplicated topics
-            records = []
-            for normalized_topic, topic in seen.items():
-                record = {
-                    "story_group_id": story_group_id,
-                    "topic": normalized_topic,
+
+        dedup: Dict[str, ExtractedTopic] = {}
+        for topic in topics:
+            key = (topic.topic or "").strip().lower()
+            if not key:
+                continue
+            existing = dedup.get(key)
+            if not existing:
+                dedup[key] = topic
+                continue
+            # Keep highest confidence / lowest rank
+            existing_conf = existing.confidence or 0.0
+            new_conf = topic.confidence or 0.0
+            if new_conf > existing_conf:
+                dedup[key] = topic
+            elif new_conf == existing_conf:
+                if (topic.rank or 99) < (existing.rank or 99):
+                    dedup[key] = topic
+
+        records: List[Dict] = []
+        for key, topic in dedup.items():
+            records.append(
+                {
+                    "news_fact_id": news_fact_id,
+                    "topic": key,
+                    "canonical_topic": _canonicalize_topic(key),
                     "confidence": topic.confidence,
                     "rank": topic.rank,
+                    "is_primary": (topic.rank or 0) <= 1,
+                    "llm_model": llm_model,
+                    "prompt_version": FACT_TOPIC_PROMPT_VERSION,
                 }
-                records.append(record)
-            
-            if len(seen) < len(topics):
-                logger.info(
-                    f"Deduplicated {len(topics)} topics to {len(seen)} "
-                    f"for group {story_group_id}"
-                )
-            
-            if dry_run:
-                logger.info(f"[DRY RUN] Would write {len(records)} topics for group {story_group_id}")
-                return len(records)
-            
-            # Use upsert to avoid duplicates
-            response = (
-                self.client.table("story_topics")
-                .upsert(records, on_conflict="story_group_id,topic")
-                .execute()
             )
-            
-            written_count = len(response.data) if response.data else 0
-            logger.info(f"Wrote {written_count} topics for group {story_group_id}")
-            return written_count
-            
-        except Exception as e:
-            logger.error(f"Failed to write topics for group {story_group_id}: {e}", 
-                        exc_info=True)
+
+        if not records:
             return 0
-    
-    def write_entities(
+
+        if dry_run:
+            logger.info(
+                "[DRY RUN] Would insert %d fact topics for fact %s", len(records), news_fact_id
+            )
+            return len(records)
+
+        response = (
+            self.client.table("news_fact_topics")
+            .upsert(records, on_conflict="news_fact_id,topic")
+            .execute()
+        )
+        return len(getattr(response, "data", []) or records)
+
+    def write_fact_entities(
         self,
-        story_group_id: str,
-        entities: List[ResolvedEntity],
-        dry_run: bool = False
+        *,
+        news_fact_id: str,
+        entities: Sequence[ResolvedEntity],
+        llm_model: str,
+        dry_run: bool = False,
     ) -> int:
-        """
-        Write resolved entities for a story group.
-        
-        Args:
-            story_group_id: UUID of the story group
-            entities: List of ResolvedEntity instances
-            dry_run: If True, don't actually write to database
-            
-        Returns:
-            Number of entities written
-        """
+        """Insert resolved entities for a fact."""
+
         if not entities:
-            logger.debug(f"No entities to write for group {story_group_id}")
             return 0
-        
-        try:
-            # Deduplicate entities by (entity_type, entity_id)
-            # Keep the one with highest confidence or marked as primary
-            seen = {}
-            for entity in entities:
-                key = (entity.entity_type, entity.entity_id)
-                
-                if key not in seen:
-                    seen[key] = entity
-                else:
-                    # Keep the better one (primary first, then highest confidence)
-                    existing = seen[key]
-                    if entity.is_primary and not existing.is_primary:
-                        seen[key] = entity
-                    elif entity.is_primary == existing.is_primary:
-                        # Both same primary status, use confidence
-                        if entity.confidence and existing.confidence:
-                            if entity.confidence > existing.confidence:
-                                seen[key] = entity
-                        elif entity.confidence:
-                            seen[key] = entity
-            
-            # Prepare records from deduplicated entities
-            records = []
-            for entity in seen.values():
-                record = {
-                    "story_group_id": story_group_id,
+
+        dedup: Dict[Tuple[str, str], ResolvedEntity] = {}
+        for entity in entities:
+            key = (entity.entity_type, entity.entity_id or entity.mention_text)
+            existing = dedup.get(key)
+            if not existing:
+                dedup[key] = entity
+                continue
+            existing_conf = existing.confidence or 0.0
+            new_conf = entity.confidence or 0.0
+            if (entity.is_primary and not existing.is_primary) or (
+                existing.is_primary == entity.is_primary and new_conf >= existing_conf
+            ):
+                dedup[key] = entity
+
+        records: List[Dict] = []
+        for entity in dedup.values():
+            records.append(
+                {
+                    "news_fact_id": news_fact_id,
                     "entity_type": entity.entity_type,
                     "entity_id": entity.entity_id,
                     "mention_text": entity.mention_text,
+                    "matched_name": entity.matched_name,
                     "confidence": entity.confidence,
                     "is_primary": entity.is_primary,
                     "rank": entity.rank,
                     "position": entity.position,
                     "team_abbr": entity.team_abbr,
                     "team_name": entity.team_name,
+                    "llm_model": llm_model,
+                    "prompt_version": FACT_ENTITY_PROMPT_VERSION,
                 }
-                records.append(record)
-            
-            if len(seen) < len(entities):
-                logger.info(
-                    f"Deduplicated {len(entities)} entities to {len(seen)} "
-                    f"for group {story_group_id}"
-                )
-            
-            if dry_run:
-                logger.info(f"[DRY RUN] Would write {len(records)} entities for group {story_group_id}")
-                return len(records)
-            
-            # Use upsert to avoid duplicates
-            response = (
-                self.client.table("story_entities")
-                .upsert(records, on_conflict="story_group_id,entity_type,entity_id")
-                .execute()
             )
-            
-            written_count = len(response.data) if response.data else 0
-            logger.info(f"Wrote {written_count} entities for group {story_group_id}")
-            return written_count
-            
-        except Exception as e:
-            logger.error(f"Failed to write entities for group {story_group_id}: {e}", 
-                        exc_info=True)
+
+        if not records:
             return 0
-    
-    def write_knowledge(
+
+        if dry_run:
+            logger.info(
+                "[DRY RUN] Would insert %d fact entities for fact %s", len(records), news_fact_id
+            )
+            return len(records)
+
+        response = self.client.table("news_fact_entities").insert(records).execute()
+        return len(getattr(response, "data", []) or records)
+
+    def update_article_metrics(
         self,
-        story_group_id: str,
-        topics: List[ExtractedTopic],
-        entities: List[ResolvedEntity],
-        dry_run: bool = False
+        *,
+        news_url_id: str,
+        dry_run: bool = False,
     ) -> Dict[str, int]:
-        """
-        Write both topics and entities for a story group.
-        Also updates extraction status tracking.
-        
-        Args:
-            story_group_id: UUID of the story group
-            topics: List of ExtractedTopic instances
-            entities: List of ResolvedEntity instances
-            dry_run: If True, don't actually write to database
-            
-        Returns:
-            Dict with 'topics' and 'entities' counts
-        """
-        if not dry_run:
-            # Mark as processing
-            self._update_status(story_group_id, "processing", started_at=True)
-        
-        try:
-            topics_written = self.write_topics(story_group_id, topics, dry_run)
-            entities_written = self.write_entities(story_group_id, entities, dry_run)
-            
-            if not dry_run:
-                # Determine final status
-                if topics_written > 0 or entities_written > 0:
-                    status = "completed"
-                else:
-                    status = "partial"
-                
-                # Mark as completed
-                self._update_status(
-                    story_group_id,
-                    status,
-                    topics_count=topics_written,
-                    entities_count=entities_written,
-                    completed_at=True
-                )
-            
-            return {
-                "topics": topics_written,
-                "entities": entities_written,
-            }
-        
-        except Exception as e:
-            if not dry_run:
-                # Mark as failed
-                self._update_status(
-                    story_group_id,
-                    "failed",
-                    error_message=str(e)
-                )
-            raise
-    
-    def clear_group_knowledge(
-        self,
-        story_group_id: str,
-        dry_run: bool = False
-    ) -> Dict[str, int]:
-        """
-        Clear all topics and entities for a story group.
-        Also resets extraction status to pending.
-        
-        Useful for reprocessing a group.
-        
-        Args:
-            story_group_id: UUID of the story group
-            dry_run: If True, don't actually delete
-            
-        Returns:
-            Dict with counts of deleted topics and entities
-        """
-        try:
-            if dry_run:
-                # Count what would be deleted
-                topics_response = (
-                    self.client.table("story_topics")
-                    .select("id", count="exact")
-                    .eq("story_group_id", story_group_id)
-                    .execute()
-                )
-                
-                entities_response = (
-                    self.client.table("story_entities")
-                    .select("id", count="exact")
-                    .eq("story_group_id", story_group_id)
-                    .execute()
-                )
-                
-                logger.info(f"[DRY RUN] Would delete {topics_response.count} topics "
-                           f"and {entities_response.count} entities for group {story_group_id}")
-                
-                return {
-                    "topics": topics_response.count or 0,
-                    "entities": entities_response.count or 0,
-                }
-            
-            # Delete topics
+        """Compute and persist article-level metrics for downstream flows."""
+
+        facts_response = (
+            self.client.table("news_facts")
+            .select("id")
+            .eq("news_url_id", news_url_id)
+            .execute()
+        )
+        fact_rows = getattr(facts_response, "data", []) or []
+        fact_ids = [row["id"] for row in fact_rows]
+        num_facts = len(fact_ids)
+
+        distinct_topics = 0
+        distinct_teams = 0
+
+        if fact_ids:
             topics_response = (
-                self.client.table("story_topics")
-                .delete()
-                .eq("story_group_id", story_group_id)
+                self.client.table("news_fact_topics")
+                .select("canonical_topic")
+                .in_("news_fact_id", fact_ids)
                 .execute()
             )
-            topics_deleted = len(topics_response.data) if topics_response.data else 0
-            
-            # Delete entities
+            topic_rows = getattr(topics_response, "data", []) or []
+            distinct_topics = len({row["canonical_topic"] for row in topic_rows if row.get("canonical_topic")})
+
             entities_response = (
-                self.client.table("story_entities")
-                .delete()
-                .eq("story_group_id", story_group_id)
+                self.client.table("news_fact_entities")
+                .select("entity_type,entity_id,team_abbr")
+                .in_("news_fact_id", fact_ids)
                 .execute()
             )
-            entities_deleted = len(entities_response.data) if entities_response.data else 0
-            
-            # Reset extraction status to pending
-            self._update_status(story_group_id, "pending", topics_count=0, entities_count=0)
-            
-            logger.info(f"Cleared {topics_deleted} topics and {entities_deleted} entities "
-                       f"for group {story_group_id}")
-            
-            return {
-                "topics": topics_deleted,
-                "entities": entities_deleted,
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to clear knowledge for group {story_group_id}: {e}", 
-                        exc_info=True)
-            return {"topics": 0, "entities": 0}
-    
-    def _update_status(
-        self,
-        story_group_id: str,
-        status: str,
-        topics_count: int = None,
-        entities_count: int = None,
-        error_message: str = None,
-        started_at: bool = False,
-        completed_at: bool = False
-    ):
-        """
-        Update extraction status for a story group.
-        
-        Args:
-            story_group_id: UUID of the story group
-            status: Status value (pending, processing, completed, failed, partial)
-            topics_count: Number of topics extracted
-            entities_count: Number of entities extracted
-            error_message: Error message if failed
-            started_at: If True, set started_at timestamp
-            completed_at: If True, set completed_at timestamp
-        """
-        try:
-            record = {
-                "story_group_id": story_group_id,
-                "status": status,
-                "last_attempt_at": datetime.datetime.utcnow().isoformat(),
-            }
-            
-            if topics_count is not None:
-                record["topics_extracted"] = topics_count
-            
-            if entities_count is not None:
-                record["entities_extracted"] = entities_count
-            
-            if error_message:
-                record["error_message"] = error_message[:1000]  # Limit error message length
-                # Increment error count
-                existing = (
-                    self.client.table("story_group_extraction_status")
-                    .select("error_count")
-                    .eq("story_group_id", story_group_id)
-                    .execute()
-                )
-                if existing.data:
-                    record["error_count"] = (existing.data[0].get("error_count", 0) or 0) + 1
-                else:
-                    record["error_count"] = 1
-            
-            if started_at:
-                record["started_at"] = datetime.datetime.utcnow().isoformat()
-            
-            if completed_at:
-                record["completed_at"] = datetime.datetime.utcnow().isoformat()
-            
-            # Upsert status record
-            self.client.table("story_group_extraction_status").upsert(
-                record,
-                on_conflict="story_group_id"
-            ).execute()
-            
-            logger.debug(f"Updated extraction status for {story_group_id}: {status}")
-            
-        except Exception as e:
-            logger.warning(f"Failed to update extraction status: {e}")
-            # Don't fail the main operation if status update fails
+            team_codes = set()
+            for row in getattr(entities_response, "data", []) or []:
+                if row.get("entity_type") == "team" and row.get("entity_id"):
+                    team_codes.add(row["entity_id"])
+                elif row.get("team_abbr"):
+                    team_codes.add(row["team_abbr"])
+            distinct_teams = len(team_codes)
+
+        difficulty = (
+            "easy"
+            if num_facts <= 50 and distinct_teams <= 3 and distinct_topics <= 3
+            else "hard"
+        )
+
+        updates = {
+            "facts_count": num_facts,
+            "distinct_topics": distinct_topics,
+            "distinct_teams": distinct_teams,
+            "article_difficulty": difficulty,
+            "knowledge_extracted_at": datetime.datetime.utcnow().isoformat(),
+            "knowledge_error_count": 0,
+        }
+
+        if dry_run:
+            logger.info(
+                "[DRY RUN] Would update article metrics", {"news_url_id": news_url_id, **updates}
+            )
+            return updates
+
+        self.client.table("news_urls").update(updates).eq("id", news_url_id).execute()
+        return updates
+
+    def increment_error(self, *, news_url_id: str, error_message: str) -> None:
+        """Increment error counter for repeated failures."""
+
+        logger.error("Knowledge extraction failed for %s: %s", news_url_id, error_message)
+        response = (
+            self.client.table("news_urls")
+            .select("knowledge_error_count")
+            .eq("id", news_url_id)
+            .limit(1)
+            .execute()
+        )
+        current = 0
+        rows = getattr(response, "data", []) or []
+        if rows:
+            current = rows[0].get("knowledge_error_count") or 0
+        self.client.table("news_urls").update({"knowledge_error_count": current + 1}).eq("id", news_url_id).execute()

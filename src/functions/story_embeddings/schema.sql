@@ -30,6 +30,18 @@ ALTER TABLE story_embeddings
     ADD COLUMN IF NOT EXISTS embedding_type TEXT NOT NULL;
 ALTER TABLE story_embeddings
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE story_embeddings
+    ADD COLUMN IF NOT EXISTS scope TEXT DEFAULT 'article';
+ALTER TABLE story_embeddings
+    ADD COLUMN IF NOT EXISTS primary_topic TEXT;
+ALTER TABLE story_embeddings
+    ADD COLUMN IF NOT EXISTS primary_team TEXT;
+ALTER TABLE story_embeddings
+    ADD COLUMN IF NOT EXISTS primary_scope_type TEXT;
+ALTER TABLE story_embeddings
+    ADD COLUMN IF NOT EXISTS primary_scope_id TEXT;
+ALTER TABLE story_embeddings
+    ADD COLUMN IF NOT EXISTS primary_scope_label TEXT;
 
 DO $$
 BEGIN
@@ -45,6 +57,12 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS idx_story_embeddings_url_type
     ON story_embeddings (news_url_id, embedding_type);
+
+CREATE INDEX IF NOT EXISTS idx_story_embeddings_scope
+    ON story_embeddings (scope, primary_topic, COALESCE(primary_team, ''));
+
+CREATE INDEX IF NOT EXISTS idx_story_embeddings_scope_type
+    ON story_embeddings (scope, primary_scope_type, COALESCE(primary_scope_id, ''));
 
 CREATE INDEX IF NOT EXISTS idx_story_embeddings_vector
     ON story_embeddings

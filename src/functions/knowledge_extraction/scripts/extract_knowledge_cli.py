@@ -1,7 +1,7 @@
 """
 Command-line interface for knowledge extraction.
 
-Extracts topics and entities from story groups and saves to database.
+Extracts topics and entities from fact records and saves to Supabase.
 Provides utilities for manual payload testing used by other CLI helpers.
 """
 
@@ -24,7 +24,6 @@ from src.functions.knowledge_extraction.core.pipelines.extraction_pipeline impor
 from src.functions.knowledge_extraction.core.pipelines.batch_pipeline import (
     BatchPipeline,
 )
-from src.functions.knowledge_extraction.core.db.story_reader import StoryGroupReader
 from src.functions.knowledge_extraction.core.extraction.entity_extractor import (
     EntityExtractor,
     ExtractedEntity,
@@ -364,42 +363,22 @@ Configuration:
 
 def show_progress():
     """Display extraction progress statistics."""
+
     logger.info("Fetching progress statistics...")
-    
-    reader = StoryGroupReader()
-    stats = reader.get_progress_stats()
-    
-    if not stats:
-        logger.error("Failed to fetch progress statistics")
-        return False
-    
+    pipeline = ExtractionPipeline()
+    stats = pipeline.get_progress()
+
     print("\n" + "=" * 60)
     print("KNOWLEDGE EXTRACTION PROGRESS")
     print("=" * 60)
-    print(f"Total story groups:        {stats.get('total_groups', 0):,}")
-    print(f"Groups with extraction:    {stats.get('extracted_groups', 0):,}")
-    print(f"Groups remaining:          {stats.get('remaining_groups', 0):,}")
-    print(f"Failed groups:             {stats.get('failed_groups', 0):,}")
-    print(f"Partial groups:            {stats.get('partial_groups', 0):,}")
-    print(f"Processing groups:         {stats.get('processing_groups', 0):,}")
-    print(f"\nTotal topics extracted:    {stats.get('total_topics', 0):,}")
-    print(f"Total entities extracted:  {stats.get('total_entities', 0):,}")
-    print(f"\nAvg topics per group:      {stats.get('avg_topics_per_group', 0)}")
-    print(f"Avg entities per group:    {stats.get('avg_entities_per_group', 0)}")
+    print(f"Total facts stored:       {stats.get('facts', 0):,}")
+    print(f"Total fact topics:        {stats.get('topics', 0):,}")
+    print(f"Total fact entities:      {stats.get('entities', 0):,}")
     print("=" * 60)
     print()
-    
-    if stats.get('failed_groups', 0) > 0:
-        print(f"⚠️  {stats['failed_groups']} groups failed - use --retry-failed to retry")
-    
-    if stats.get('remaining_groups', 0) > 0:
-        print(f"💡 Run without --progress flag to extract knowledge for "
-              f"{stats['remaining_groups']} remaining groups")
-        print(f"💰 Use --batch flag for 50% cost savings on large volumes!")
-    else:
-        print("✅ All story groups have knowledge extracted!")
-    
+
     return True
+
 
 
 def handle_batch_create(args) -> bool:
@@ -678,24 +657,32 @@ def main():
         print("\n" + "=" * 60)
         print("EXTRACTION SUMMARY")
         print("=" * 60)
-        print(f"Groups processed:      {results['groups_processed']}")
-        print(f"Topics extracted:      {results['topics_extracted']}")
-        print(f"Entities extracted:    {results['entities_extracted']}")
-        print(f"Groups with errors:    {results['groups_with_errors']}")
+
+        urls_processed = results.get("urls_processed", results.get("groups_processed", 0))
+        topics_written = results.get("topics_written", results.get("topics_extracted", 0))
+        entities_written = results.get("entities_written", results.get("entities_extracted", 0))
+        error_count = results.get("urls_with_errors", results.get("groups_with_errors", 0))
+
+        print(f"URLs processed:        {urls_processed}")
+        print(f"Facts processed:       {results.get('facts_processed', 0)}")
+        print(f"Topics written:        {topics_written}")
+        print(f"Entities written:      {entities_written}")
+        print(f"URLs with errors:      {error_count}")
         print("=" * 60)
-        
-        if results["errors"]:
+
+        error_messages = results.get("errors") or []
+        if isinstance(error_messages, list) and error_messages:
             print("\nErrors encountered:")
-            for error in results["errors"][:10]:  # Show first 10 errors
+            for error in error_messages[:10]:  # Show first 10 errors
                 print(f"  • {error}")
-            if len(results["errors"]) > 10:
-                print(f"  ... and {len(results['errors']) - 10} more")
+            if len(error_messages) > 10:
+                print(f"  ... and {len(error_messages) - 10} more")
         
         if args.dry_run:
             print("\n💡 Remove --dry-run flag to save results to database")
         
         # Exit with appropriate code
-        if results["groups_with_errors"] > 0:
+        if error_count > 0:
             sys.exit(1)
         else:
             sys.exit(0)

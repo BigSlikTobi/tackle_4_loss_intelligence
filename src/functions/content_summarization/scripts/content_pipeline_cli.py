@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 FACT_PROMPT_VERSION = "facts-v1"
 SUMMARY_PROMPT_VERSION = "summary-from-facts-v1"
+TOPIC_SUMMARY_PROMPT_VERSION = "summary-from-facts-topic-v1"
 DEFAULT_FACT_MODEL = "gemma-3n-e4b-it"  # Use Gemini model for fact extraction
 DEFAULT_SUMMARY_MODEL = "gemma-3n-e4b-it"  # Chunking strategy for large fact sets
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
@@ -92,6 +94,24 @@ OUTPUT FORMAT (JSON only):
 {
   "summary": "your complete summarized text here"
 }
+"""
+
+TOPIC_SUMMARY_TEMPLATE = """TASK: Summarize the provided NFL facts.
+
+FOCUS
+- Topic: {topic}
+- Context: {context}
+
+RULES
+- Only use content from the `facts` list.
+- Stay specific to the topic/context scope above.
+- Keep the summary short (2-3 sentences) and information-dense.
+- Mention the context label when relevant; otherwise note league-wide scope.
+
+OUTPUT FORMAT (JSON only):
+{{
+  "summary": "your concise topic summary here"
+}}
 """
 
 
@@ -441,7 +461,7 @@ def process_facts_stage(client, config: PipelineConfig) -> None:
 
 
 def process_summary_stage(client, config: PipelineConfig) -> None:
-    """Generate summaries and summary embeddings from stored facts."""
+    """Generate summaries or topic bundles based on article difficulty."""
 
     urls = fetch_pending_urls("summary", config)
     if not urls:
@@ -456,18 +476,19 @@ def process_summary_stage(client, config: PipelineConfig) -> None:
             continue
 
         try:
-            summary_text = create_summary_from_facts(client, url_id, config)
-            if not summary_text:
-                logger.warning("Summary generation returned empty text", {"news_url_id": url_id})
+            difficulty_record = get_article_difficulty(client, url_id)
+            difficulty = difficulty_record.get("article_difficulty") if difficulty_record else None
+            if not difficulty:
+                logger.info(
+                    "Skipping summary until knowledge extraction completes",
+                    {"news_url_id": url_id},
+                )
                 continue
 
-            stored_summary = store_summary(client, url_id, summary_text, config)
-            if stored_summary:
-                logger.info("Stored summary", {"news_url_id": url_id})
+            if difficulty == "easy":
+                handle_easy_article_summary(client, url_id, config)
             else:
-                logger.info("Summary already existed", {"news_url_id": url_id})
-
-            create_summary_embedding(client, url_id, config)
+                handle_hard_article_summary(client, url_id, config)
 
             if summary_stage_completed(client, url_id):
                 mark_news_url_timestamp(client, url_id, "summary_created_at")
@@ -530,6 +551,20 @@ def fetch_pending_urls(stage: str, config: PipelineConfig) -> List[Dict[str, Any
         {"stage": stage, "count": len(urls), "limit": params["limit"]},
     )
     return urls
+
+
+def get_article_difficulty(client, news_url_id: str) -> Dict[str, Any]:
+    """Fetch classification metadata computed during knowledge extraction."""
+
+    response = (
+        client.table("news_urls")
+        .select("facts_count,distinct_topics,distinct_teams,article_difficulty")
+        .eq("id", news_url_id)
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(response, "data", []) or []
+    return rows[0] if rows else {}
 
 
 def fetch_article_content(url: str, config: PipelineConfig) -> str:
@@ -1199,6 +1234,9 @@ def create_fact_pooled_embedding(client, news_url_id: str, config: PipelineConfi
             "embedding_vector": averaged,
             "model_name": config.embedding_model_name,
             "embedding_type": "fact_pooled",
+            "scope": "article",
+            "primary_topic": None,
+            "primary_team": None,
         }
     ).execute()
 
@@ -1432,6 +1470,9 @@ def create_summary_embedding(client, news_url_id: str, config: PipelineConfig) -
                 "embedding_vector": embedding,
                 "model_name": config.embedding_model_name,
                 "embedding_type": "summary",
+                "scope": "article",
+                "primary_topic": None,
+                "primary_team": None,
             }
         ).execute()
     except Exception as e:
@@ -1440,6 +1481,380 @@ def create_summary_embedding(client, news_url_id: str, config: PipelineConfig) -
             logger.info("Summary embedding already exists (duplicate)", {"news_url_id": news_url_id})
             return
         raise
+
+
+def handle_easy_article_summary(client, news_url_id: str, config: PipelineConfig) -> None:
+    """Generate single summary and embedding for easy articles."""
+
+    summary_text = create_summary_from_facts(client, news_url_id, config)
+    if not summary_text:
+        logger.warning("Easy article summary was empty", {"news_url_id": news_url_id})
+        return
+
+    clear_topic_artifacts(client, news_url_id)
+
+    client.table("context_summaries").delete().eq("news_url_id", news_url_id).eq(
+        "prompt_version", SUMMARY_PROMPT_VERSION
+    ).execute()
+    delete_story_embeddings(client, news_url_id, embedding_type="summary")
+
+    stored_summary = store_summary(client, news_url_id, summary_text, config)
+    if stored_summary:
+        logger.info("Stored easy-article summary", {"news_url_id": news_url_id})
+
+    create_summary_embedding(client, news_url_id, config)
+
+
+def handle_hard_article_summary(client, news_url_id: str, config: PipelineConfig) -> None:
+    """Create topic/team summaries and embeddings for hard articles."""
+
+    client.table("context_summaries").delete().eq("news_url_id", news_url_id).eq(
+        "prompt_version", SUMMARY_PROMPT_VERSION
+    ).execute()
+    delete_story_embeddings(client, news_url_id, embedding_type="summary")
+
+    clear_topic_artifacts(client, news_url_id)
+
+    grouped_facts = group_facts_by_topic_and_scope(client, news_url_id)
+    if not grouped_facts:
+        logger.warning("No fact groups available for hard article", {"news_url_id": news_url_id})
+        return
+
+    for group in grouped_facts:
+        topic = group["topic"]
+        scope = group["scope"]
+        facts = group["facts"]
+        summary_text = create_topic_summary_from_facts(facts, topic, scope, config)
+        if not summary_text:
+            continue
+        store_topic_summary(client, news_url_id, topic, scope, summary_text, config)
+        create_topic_summary_embedding(client, news_url_id, topic, scope, summary_text, config)
+        logger.info(
+            "Stored topic summary",
+            {
+                "news_url_id": news_url_id,
+                "topic": topic,
+                "scope": scope,
+                "facts": len(facts),
+            },
+        )
+
+
+def clear_topic_artifacts(client, news_url_id: str) -> None:
+    """Remove topic-level summaries and embeddings for a URL."""
+
+    client.table("topic_summaries").delete().eq("news_url_id", news_url_id).execute()
+    delete_story_embeddings(client, news_url_id, scope="topic")
+
+
+def delete_story_embeddings(
+    client,
+    news_url_id: str,
+    *,
+    scope: Optional[str] = None,
+    embedding_type: Optional[str] = None,
+) -> None:
+    """Delete story embeddings filtered by scope and/or type."""
+
+    query = client.table("story_embeddings").delete().eq("news_url_id", news_url_id)
+    if scope is not None:
+        query = query.eq("scope", scope)
+    if embedding_type is not None:
+        query = query.eq("embedding_type", embedding_type)
+    query.execute()
+
+
+def group_facts_by_topic_and_scope(client, news_url_id: str) -> List[Dict[str, Any]]:
+    """Return topic groups with associated scope metadata."""
+
+    metadata = fetch_fact_metadata(client, news_url_id)
+    groups: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+
+    for record in metadata:
+        topic = record.get("canonical_topic") or "general"
+        scope = record.get("primary_scope") or {}
+        scope_type = scope.get("type") or "unscoped"
+        scope_key = scope.get("id") or scope.get("label") or "unscoped"
+        fact_text = record.get("fact_text")
+        if not fact_text:
+            continue
+
+        key = (topic, scope_type, scope_key)
+        group = groups.setdefault(
+            key,
+            {
+                "topic": topic,
+                "scope": scope,
+                "facts": [],
+            },
+        )
+        group["facts"].append(fact_text)
+
+    return [group for group in groups.values() if group["facts"]]
+
+
+def fetch_fact_metadata(client, news_url_id: str) -> List[Dict[str, Any]]:
+    """Collect facts with their primary topics and teams."""
+
+    facts_response = (
+        client.table("news_facts")
+        .select("id,fact_text")
+        .eq("news_url_id", news_url_id)
+        .execute()
+    )
+    fact_rows = getattr(facts_response, "data", []) or []
+    facts: Dict[str, Dict[str, Any]] = {}
+    for row in fact_rows:
+        fact_id = row.get("id")
+        fact_text = row.get("fact_text")
+        if fact_id and isinstance(fact_text, str):
+            facts[fact_id] = {"fact_text": fact_text.strip()}
+
+    if not facts:
+        return []
+
+    fact_ids = list(facts.keys())
+
+    topics_response = (
+        client.table("news_fact_topics")
+        .select("news_fact_id,topic,canonical_topic,is_primary,rank")
+        .in_("news_fact_id", fact_ids)
+        .execute()
+    )
+    topics_by_fact: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in getattr(topics_response, "data", []) or []:
+        fact_id = row.get("news_fact_id")
+        if fact_id in facts:
+            topics_by_fact[fact_id].append(row)
+
+    entities_response = (
+        client.table("news_fact_entities")
+        .select(
+            "news_fact_id,entity_type,entity_id,team_abbr,is_primary,rank,matched_name,mention_text"
+        )
+        .in_("news_fact_id", fact_ids)
+        .execute()
+    )
+    entities_by_fact: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in getattr(entities_response, "data", []) or []:
+        fact_id = row.get("news_fact_id")
+        if fact_id in facts:
+            entities_by_fact[fact_id].append(row)
+
+    metadata: List[Dict[str, Any]] = []
+    for fact_id, data in facts.items():
+        topics = topics_by_fact.get(fact_id, [])
+        selected_topic = select_primary_topic(topics)
+        entities = entities_by_fact.get(fact_id, [])
+        primary_scope = select_primary_scope(entities)
+        metadata.append(
+            {
+                "fact_id": fact_id,
+                "fact_text": data.get("fact_text"),
+                "canonical_topic": selected_topic.get("canonical_topic") if selected_topic else None,
+                "primary_topic": selected_topic.get("topic") if selected_topic else None,
+                "primary_team": primary_scope.get("team") if primary_scope else None,
+                "primary_scope": primary_scope,
+            }
+        )
+
+    return metadata
+
+
+def select_primary_topic(topics: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Choose the primary topic record for a fact."""
+
+    if not topics:
+        return None
+
+    sorted_topics = sorted(
+        topics,
+        key=lambda row: (
+            0 if row.get("is_primary") else 1,
+            row.get("rank") or 99,
+        ),
+    )
+    return sorted_topics[0]
+
+
+def select_primary_scope(entities: List[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+    """Determine the primary contextual scope (team/player/game) for a fact."""
+
+    if not entities:
+        return {}
+
+    def sort_key(row: Dict[str, Any]) -> Tuple[int, int]:
+        return (0 if row.get("is_primary") else 1, row.get("rank") or 99)
+
+    team_candidates = [row for row in entities if row.get("entity_type") == "team"]
+    if team_candidates:
+        best = sorted(team_candidates, key=sort_key)[0]
+        identifier = best.get("entity_id") or best.get("team_abbr")
+        label = best.get("matched_name") or identifier or best.get("team_abbr")
+        return {
+            "type": "team",
+            "id": identifier,
+            "label": label,
+            "team": identifier or best.get("team_abbr"),
+        }
+
+    player_candidates = [row for row in entities if row.get("entity_type") == "player"]
+    if player_candidates:
+        best = sorted(player_candidates, key=sort_key)[0]
+        identifier = best.get("entity_id") or best.get("mention_text")
+        label = best.get("matched_name") or best.get("mention_text") or identifier
+        return {
+            "type": "player",
+            "id": identifier,
+            "label": label,
+            "team": best.get("team_abbr"),
+        }
+
+    game_candidates = [row for row in entities if row.get("entity_type") == "game"]
+    if game_candidates:
+        best = sorted(game_candidates, key=sort_key)[0]
+        identifier = best.get("entity_id") or best.get("mention_text")
+        label = best.get("matched_name") or best.get("mention_text") or identifier
+        return {
+            "type": "game",
+            "id": identifier,
+            "label": label,
+        }
+
+    return {}
+
+
+def normalize_scope(scope: Optional[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+    """Normalize scope metadata for storage and prompt construction."""
+
+    if not scope:
+        return {"type": None, "id": None, "label": "League-wide", "team": None}
+
+    normalized = {
+        "type": scope.get("type"),
+        "id": scope.get("id"),
+        "label": scope.get("label"),
+        "team": scope.get("team"),
+    }
+
+    if not normalized["label"]:
+        if normalized["type"] == "team":
+            normalized["label"] = normalized.get("id") or normalized.get("team") or "Team context"
+        elif normalized["type"] == "player":
+            normalized["label"] = "Player context"
+        elif normalized["type"] == "game":
+            normalized["label"] = "Game context"
+    if normalized["label"] is None:
+        normalized["label"] = "League-wide"
+
+    return normalized
+
+
+def build_scope_label(scope: Dict[str, Optional[str]]) -> str:
+    """Create human-readable label for a scope."""
+
+    label = scope.get("label") or "League-wide"
+    scope_type = scope.get("type")
+    if not scope_type or scope_type == "team":
+        return label
+    return f"{label} ({scope_type})"
+
+
+def create_topic_summary_from_facts(
+    facts: List[str],
+    topic: str,
+    scope: Optional[Dict[str, Any]],
+    config: PipelineConfig,
+) -> str:
+    """Run topic-specific summarization for fact subset."""
+
+    if not facts:
+        return ""
+
+    scope_info = normalize_scope(scope)
+    context_label = build_scope_label(scope_info)
+    prompt = TOPIC_SUMMARY_TEMPLATE.format(topic=topic, context=context_label)
+    payload = json.dumps({"facts": facts}, ensure_ascii=False)
+
+    for attempt in range(2):
+        response_json = call_llm_json(
+            prompt=prompt,
+            user_content=payload,
+            model=config.summary_llm_model,
+            config=config,
+        )
+        summary = parse_summary_response(response_json)
+        if summary:
+            return summary
+        logger.warning(
+            "Topic summary generation failed",
+            {"topic": topic, "scope": scope_info, "attempt": attempt + 1},
+        )
+
+    return ""
+
+
+def store_topic_summary(
+    client,
+    news_url_id: str,
+    topic: str,
+    scope: Optional[Dict[str, Any]],
+    summary_text: str,
+    config: PipelineConfig,
+) -> None:
+    """Insert topic-level summary record."""
+
+    scope_info = normalize_scope(scope)
+    primary_team = scope_info.get("team") if scope_info.get("type") != "team" else scope_info.get("id")
+    client.table("topic_summaries").insert(
+        {
+            "news_url_id": news_url_id,
+            "primary_topic": topic,
+            "primary_team": primary_team,
+            "primary_scope_type": scope_info.get("type"),
+            "primary_scope_id": scope_info.get("id"),
+            "primary_scope_label": scope_info.get("label"),
+            "summary_text": summary_text,
+            "llm_model": config.summary_llm_model,
+            "prompt_version": TOPIC_SUMMARY_PROMPT_VERSION,
+        }
+    ).execute()
+
+
+def create_topic_summary_embedding(
+    client,
+    news_url_id: str,
+    topic: str,
+    scope: Optional[Dict[str, Any]],
+    summary_text: str,
+    config: PipelineConfig,
+) -> None:
+    """Create embedding for topic-level summary."""
+
+    embedding = generate_embedding(summary_text, config)
+    if not embedding:
+        logger.warning(
+            "Failed to generate topic summary embedding",
+            {"news_url_id": news_url_id, "topic": topic, "scope": scope},
+        )
+        return
+
+    scope_info = normalize_scope(scope)
+    primary_team = scope_info.get("team") if scope_info.get("type") != "team" else scope_info.get("id")
+    client.table("story_embeddings").insert(
+        {
+            "news_url_id": news_url_id,
+            "embedding_vector": embedding,
+            "model_name": config.embedding_model_name,
+            "embedding_type": "summary",
+            "scope": "topic",
+            "primary_topic": topic,
+            "primary_team": primary_team,
+            "primary_scope_type": scope_info.get("type"),
+            "primary_scope_id": scope_info.get("id"),
+            "primary_scope_label": scope_info.get("label"),
+        }
+    ).execute()
 
 
 def fact_stage_completed(client, news_url_id: str) -> bool:
@@ -1469,6 +1884,29 @@ def fact_stage_completed(client, news_url_id: str) -> bool:
 def summary_stage_completed(client, news_url_id: str) -> bool:
     """Check whether summary and summary embedding exist for a URL."""
 
+    difficulty = get_article_difficulty(client, news_url_id).get("article_difficulty")
+
+    if difficulty == "hard":
+        summary_exists = (
+            client.table("topic_summaries")
+            .select("id")
+            .eq("news_url_id", news_url_id)
+            .limit(1)
+            .execute()
+        )
+        if not getattr(summary_exists, "data", []):
+            return False
+
+        embedding_exists = (
+            client.table("story_embeddings")
+            .select("id")
+            .eq("news_url_id", news_url_id)
+            .eq("scope", "topic")
+            .limit(1)
+            .execute()
+        )
+        return bool(getattr(embedding_exists, "data", []))
+
     summary_exists = (
         client.table("context_summaries")
         .select("id")
@@ -1485,6 +1923,7 @@ def summary_stage_completed(client, news_url_id: str) -> bool:
         .select("id")
         .eq("news_url_id", news_url_id)
         .eq("embedding_type", "summary")
+        .eq("scope", "article")
         .limit(1)
         .execute()
     )
