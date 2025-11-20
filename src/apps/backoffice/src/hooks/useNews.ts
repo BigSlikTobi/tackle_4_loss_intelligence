@@ -2,21 +2,39 @@ import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import type { NewsUrl, NewsDetail } from '../types'
 
-export function useNewsList() {
+export function useNewsList(
+    page: number = 1,
+    pageSize: number = 50,
+    sortBy: string = 'publication_date',
+    sortOrder: 'asc' | 'desc' = 'desc'
+) {
     const [news, setNews] = useState<NewsUrl[]>([])
+    const [totalCount, setTotalCount] = useState<number>(0)
+    const [totalFacts, setTotalFacts] = useState<number>(0)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
 
     useEffect(() => {
         async function fetchNews() {
             try {
-                const { data, error } = await supabase
+                setLoading(true)
+                const from = (page - 1) * pageSize
+                const to = from + pageSize - 1
+
+                const { data, error, count } = await supabase
                     .from('news_urls')
-                    .select('*, news_facts!inner(id)')
-                    .order('publication_date', { ascending: false })
-                    .limit(50)
+                    .select('*, news_facts!inner(id)', { count: 'exact' })
+                    .order(sortBy, { ascending: sortOrder === 'asc' })
+                    .range(from, to)
 
                 if (error) throw error
+
+                // Fetch total facts count
+                const { count: factsCount, error: factsError } = await supabase
+                    .from('news_facts')
+                    .select('*', { count: 'exact', head: true })
+
+                if (factsError) console.error('Error fetching facts count:', factsError)
 
                 // Calculate facts_count from the returned news_facts array
                 const transformedData = (data || []).map((item: any) => ({
@@ -25,6 +43,8 @@ export function useNewsList() {
                 }))
 
                 setNews(transformedData)
+                if (count !== null) setTotalCount(count)
+                if (factsCount !== null) setTotalFacts(factsCount)
             } catch (err: any) {
                 setError(err.message)
             } finally {
@@ -33,9 +53,9 @@ export function useNewsList() {
         }
 
         fetchNews()
-    }, [])
+    }, [page, pageSize, sortBy, sortOrder])
 
-    return { news, loading, error }
+    return { news, totalCount, totalFacts, loading, error }
 }
 
 export function useNewsDetail(id: string) {

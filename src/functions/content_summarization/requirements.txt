@@ -17,3 +17,5 @@ python-dotenv>=1.0.0
 
 # Cloud Function deployment
 functions-framework==3.*
+openai>=1.0.0
+rapidfuzz>=3.0.0
