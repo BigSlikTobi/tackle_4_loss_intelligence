@@ -276,3 +276,40 @@ a {
 .hover\:underline:hover {
   text-decoration: underline;
 }
+
+/* Buttons */
+.sb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: var(--bg-surface-100);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  color: var(--text-default);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  height: 32px;
+}
+
+.sb-btn:hover:not(:disabled) {
+  background-color: var(--bg-surface-200);
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
+
+.sb-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Additional Utilities */
+.justify-between {
+  justify-content: space-between;
+}
+
+.mt-4 {
+  margin-top: 1rem;
+}
