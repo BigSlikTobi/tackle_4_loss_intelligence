@@ -44,6 +44,13 @@ cd functions
 ./test_function.sh
 ```
 
+### Testing & Deployment Notes
+
+- `functions/run_local.sh` bootstraps a venv, installs dependencies, exports `PYTHONPATH` to the repo root, and starts Functions Framework on `http://localhost:8080`. Use `functions/test_function.sh` or `curl -d @requests/*.json` to keep exercising the handler while iterating.
+- For manual sessions run from the repo root, set `export PYTHONPATH="$(pwd):$PYTHONPATH"`, `source .env`, and launch `functions-framework --target=package_handler --source=src/functions/data_loading/functions --port=8080 --debug`.
+- Cloud deployments expect a module-specific `.env.yaml` (Supabase URL/key, log level). The hardened `deploy.sh` copies the source tree into a temporary directory and deploys from there so real repo files are never overwritten.
+- If Cloud Functions throws import errors after deploy, confirm you ran from the project root, that `.gcloudignore` is not excluding `src/`, and that `.env.yaml` matches your local configuration. `gcloud functions logs read package-handler --region=<region> --limit=50` surfaces stack traces quickly.
+
 ## 📦 Structure
 
 ```
@@ -112,6 +119,18 @@ python scripts/depth_charts_cli.py --season 2024 --week 1 [--clear] [--dry-run]
 ```bash
 python scripts/injuries_cli.py --season 2025 --week 6 [--season-type reg] [--dry-run]
 ```
+
+The injury workflow scrapes nfl.com reports, performs fuzzy player resolution, and writes history-preserving rows keyed by `(season, week, season_type, team_abbr, player_id)`. Highlights:
+
+- **Database schema:** run `schema_injuries.sql` to create the `injuries` table with versioned primary key plus timestamps (`last_update`, `created_at`, `updated_at`). Historical queries (e.g., recovery timelines) are now simple grouping queries.
+- **CLI flags:** `--season`, `--week`, optional `--season-type {pre,reg,post}`, `--dry-run`, `--log-level`. Use `scripts/get_current_week.py [--json]` to auto-detect the current week/season type when automating.
+- **Automation:** `.github/workflows/injuries-daily.yml` runs nightly at 6 PM ET, leveraging automatic week detection and retry logic. Set `LOG_LEVEL=DEBUG` for verbose Supabase logging when troubleshooting.
+- **Player resolution:** uses scraped IDs when present, otherwise falls back to name + team + Levenshtein distance against the `players` table. Unresolved players log warnings so you can add them via the players loader.
+- **Common SQL snippets:**
+  - Current-week snapshot: `SELECT team_abbr, player_name, injury, game_status FROM injuries WHERE season=2025 AND week=6 AND season_type='REG';`
+  - Recovered players: compare week N vs week N+1 with a `LEFT JOIN` to find absences.
+  - Recurring injuries: `SELECT player_name, COUNT(*) FROM injuries WHERE season=2025 AND season_type='REG' GROUP BY player_name HAVING COUNT(*)>3;`
+- **Troubleshooting:** missing table errors mean the schema script wasn’t run; wrong week detection means updating the start-date constants in `scripts/get_current_week.py`; `ModuleNotFoundError: src` indicates `PYTHONPATH` was not pointed at the repo root.
 
 ## 🌐 API
 

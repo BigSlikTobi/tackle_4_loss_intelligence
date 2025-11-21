@@ -17,6 +17,16 @@ from src.functions.url_content_extraction.core.extractors.extractor_factory impo
 )
 from src.functions.url_content_extraction.core.utils import amp_detector
 
+# Import fact extraction post-processor
+try:
+    from src.functions.url_content_extraction.core.post_processors.fact_extraction import (
+        extract_and_store_facts,
+    )
+    FACT_EXTRACTION_AVAILABLE = True
+except ImportError:
+    FACT_EXTRACTION_AVAILABLE = False
+    logger.warning("Fact extraction post-processor not available")
+
 load_env()
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -27,7 +37,12 @@ DEFAULT_MIN_PARAGRAPH_CHARS = 240
 
 
 def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract structured content for each requested URL."""
+    """Extract structured content for each requested URL.
+    
+    Supports optional fact extraction via enable_fact_extraction flag.
+    For real-time processing of 1-10 articles with fact extraction.
+    For bulk backlog processing (1000+ articles), use backlog_processor.py instead.
+    """
 
     urls = request.get("urls") or []
     if not isinstance(urls, list) or not urls:
@@ -35,6 +50,17 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
             "status": "error",
             "message": "Request must include a non-empty 'urls' list",
         }
+
+    # Check if fact extraction is enabled
+    enable_fact_extraction = request.get("enable_fact_extraction", False)
+    
+    # Extract fact extraction configs (with fallback to environment)
+    fact_config = None
+    if enable_fact_extraction and FACT_EXTRACTION_AVAILABLE:
+        fact_config = _build_fact_extraction_config(request)
+        if not fact_config:
+            logger.warning("Fact extraction requested but config incomplete, skipping")
+            enable_fact_extraction = False
 
     defaults = _as_mapping(request.get("defaults"))
     base_options = _as_mapping(request.get("options"))
@@ -101,6 +127,45 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in metadata.items():
             if key not in payload and value is not None:
                 payload[key] = value
+
+        # Optional fact extraction (for real-time processing)
+        if enable_fact_extraction and fact_config and "error" not in payload:
+            news_url_id = metadata.get("news_url_id") or metadata.get("id")
+            if news_url_id and payload.get("content"):
+                try:
+                    fact_result = extract_and_store_facts(
+                        article_content=payload["content"],
+                        news_url_id=news_url_id,
+                        supabase_config=fact_config["supabase"],
+                        llm_config=fact_config["llm"],
+                        embedding_config=fact_config["embedding"],
+                    )
+                    
+                    # Add fact extraction results to response
+                    payload["facts_count"] = fact_result.get("facts_count", 0)
+                    payload["facts_extracted"] = fact_result.get("facts_extracted", False)
+                    payload["embedding_count"] = fact_result.get("embedding_count", 0)
+                    
+                    if fact_result.get("error"):
+                        payload["facts_error"] = fact_result["error"]
+                        logger.warning(
+                            f"Fact extraction failed for {news_url_id}: {fact_result['error']}"
+                        )
+                    else:
+                        logger.info(
+                            f"Fact extraction complete for {news_url_id}: "
+                            f"{fact_result['facts_count']} facts, "
+                            f"{fact_result['embedding_count']} embeddings"
+                        )
+                except Exception as e:
+                    logger.error(f"Fact extraction error for {news_url_id}: {e}", exc_info=True)
+                    payload["facts_error"] = str(e)
+                    payload["facts_extracted"] = False
+            else:
+                if not news_url_id:
+                    logger.debug("Skipping fact extraction: no news_url_id in metadata")
+                if not payload.get("content"):
+                    logger.debug("Skipping fact extraction: no content extracted")
 
         articles.append(payload)
 
@@ -224,4 +289,60 @@ def _prefer_amp_variant(
     except Exception as exc:  # pragma: no cover - defensive safety
         logger.debug("AMP probe raised for %s: %s", url, exc)
         return url, False
+
+
+def _build_fact_extraction_config(request: Dict[str, Any]) -> Dict[str, Dict[str, str]] | None:
+    """Build fact extraction configuration from request with environment fallbacks.
+    
+    Args:
+        request: Request dict with optional supabase, llm, and embedding configs
+        
+    Returns:
+        Config dict with supabase, llm, and embedding sections, or None if incomplete
+    """
+    # Supabase config (required)
+    supabase_config = request.get("supabase", {})
+    supabase_url = supabase_config.get("url") or os.getenv("SUPABASE_URL")
+    supabase_key = supabase_config.get("key") or os.getenv("SUPABASE_KEY")
+    
+    if not supabase_url or not supabase_key:
+        logger.error("Fact extraction requires Supabase credentials (url and key)")
+        return None
+    
+    # LLM config (required)
+    llm_config = request.get("llm", {})
+    llm_api_url = llm_config.get("api_url") or "https://generativelanguage.googleapis.com/v1beta/models"
+    llm_api_key = llm_config.get("api_key") or os.getenv("GEMINI_API_KEY")
+    llm_model = llm_config.get("model") or os.getenv("FACT_LLM_MODEL", "gemma-3n-e4b-it")
+    
+    if not llm_api_key:
+        logger.error("Fact extraction requires LLM API key (GEMINI_API_KEY)")
+        return None
+    
+    # Embedding config (required)
+    embedding_config = request.get("embedding", {})
+    embedding_api_url = embedding_config.get("api_url") or "https://api.openai.com/v1/embeddings"
+    embedding_api_key = embedding_config.get("api_key") or os.getenv("OPENAI_API_KEY")
+    embedding_model = embedding_config.get("model") or os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+    
+    if not embedding_api_key:
+        logger.error("Fact extraction requires embedding API key (OPENAI_API_KEY)")
+        return None
+    
+    return {
+        "supabase": {
+            "url": supabase_url,
+            "key": supabase_key,
+        },
+        "llm": {
+            "api_url": llm_api_url,
+            "api_key": llm_api_key,
+            "model": llm_model,
+        },
+        "embedding": {
+            "api_url": embedding_api_url,
+            "api_key": embedding_api_key,
+            "model": embedding_model,
+        },
+    }
 

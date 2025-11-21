@@ -342,6 +342,16 @@ All database queries use pagination (1000 rows per page) to handle large dataset
 4. **Database indexes**: Ensure indexes exist (see `schema.sql`)
 5. **Consider archiving**: Set old groups to `status='archived'`
 
+### Recent Optimizations
+
+Large batches (8K+ stories) once triggered Supabase timeouts when fetching active groups and ungrouped embeddings. The 2025 performance pass introduced both schema and code changes that are now part of the default module:
+
+- **Database indexes:** `idx_story_groups_status_created_at`, `idx_story_embeddings_created_at`, `idx_story_embeddings_news_url_id`, `idx_story_embeddings_created_at_news_url_id`, and the partial index `idx_story_embeddings_with_vectors` dramatically reduce range-scan costs. Apply the corresponding migration in `supabase/migrations` if your project predates the change.
+- **Reader/writer tweaks:** `group_writer.get_active_groups()` now fetches IDs first, caps batch sizes at 500, removes expensive `ORDER BY` clauses, and guards against unbounded paging. `embedding_reader` mirrors the smaller batches and limits grouped-ID lookups to keep latency predictable.
+- **Graceful degradation:** Both readers log partial progress and return the data they already fetched if Supabase hits timeout thresholds, letting the CLI continue instead of hard failing.
+
+If you still encounter timeouts after pulling latest migrations, run `EXPLAIN ANALYZE` against the queries shown above to confirm your database is using the new indexes, or temporarily lower `--days`/`--limit` while the backlog drains.
+
 ---
 
 ## Troubleshooting

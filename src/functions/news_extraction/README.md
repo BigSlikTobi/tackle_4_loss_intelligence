@@ -46,7 +46,41 @@ cd functions
 ./deploy.sh
 ```
 
-See **[DEPLOYMENT.md](DEPLOYMENT.md)** for detailed testing and deployment instructions.
+### Testing & Deployment Notes
+
+- **Local validation:**
+  - `python scripts/extract_news_cli.py --dry-run --max-articles 2 --verbose` exercises all sources without Supabase writes.
+  - `python scripts/extract_news_cli.py --environment prod --max-workers 6 --timeout 20 --output-format json --metrics-file metrics.json --dry-run` mirrors production concurrency while keeping writes disabled.
+  - Manual smoke test:
+
+    ```bash
+    python - <<'PY'
+    from src.functions.news_extraction.core.pipelines.news_pipeline import NewsPipeline
+    from src.functions.news_extraction.core.config.loader import load_config
+    from src.shared.utils.logging import setup_logging
+    setup_logging()
+    pipeline = NewsPipeline(load_config())
+    result = pipeline.run(dry_run=True)
+    print(result)
+    PY
+    ```
+
+- **Cloud deployment flow:** create `functions/.env.yaml` with Supabase credentials, ensure it’s gitignored, then run `functions/deploy.sh`. The script validates that `main.py` and `.env.yaml` exist, jumps to the repo root, and deploys with `gcloud functions deploy news-extraction --gen2 --runtime python310 --source=. --entry-point extract_news --trigger-http --allow-unauthenticated --memory 512MB --timeout 540s --env-vars-file=src/functions/news_extraction/functions/.env.yaml --set-env-vars=PYTHONPATH=/workspace/src`.
+- **Post-deploy tests:**
+
+  ```bash
+  FUNCTION_URL=$(gcloud functions describe news-extraction --region=us-central1 --gen2 --format="value(serviceConfig.uri)")
+  curl -X POST "$FUNCTION_URL" -H 'Content-Type: application/json' -d '{}'
+  curl -X POST "$FUNCTION_URL" -H 'Content-Type: application/json' -d '{"source":"ESPN","max_articles":10}'
+  ```
+
+  Watch logs with `gcloud functions logs read news-extraction --region=us-central1 --limit=50 --follow`.
+- **Troubleshooting:**
+  - `ModuleNotFoundError: src` → ensure `export PYTHONPATH="$(pwd):$PYTHONPATH"` before running scripts.
+  - Connection errors → re-check `.env`/`.env.yaml` Supabase keys via `python -c "from src.shared.db import get_supabase_client; print(get_supabase_client())"`.
+  - HTTP timeouts → increase `--timeout` or lower `--max-articles`; verify caching logs show hits (`Cached response for ...`).
+  - `gcloud` not found → install the Google Cloud SDK (`brew install google-cloud-sdk`).
+- **Performance expectations:** cold starts: 2–4 s, warm invocations: ~1–2 s for four sources (~20 items). Throughput improves by raising `--max-workers` (watch memory) and leaving HTTP `cache_ttl_seconds` at 300 to avoid redundant fetches.
 
 ## 📦 Structure
 

@@ -67,6 +67,24 @@ cd src/functions/news_extraction/functions
 ./deploy.sh
 ```
 
+### Safe Deployment Script Pattern
+
+Older scripts briefly wrote temporary entry points (`main.py`, `requirements.txt`) straight into the repo root and then deleted them, which risked wiping out real files whenever a deploy failed. Every module now follows a hardened flow:
+
+- Allocate `TEMP_DEPLOY_DIR=$(mktemp -d -t <module>-deploy.XXXXXX)` and register `trap cleanup EXIT` so the directory is always removed.
+- Copy the required source tree into that temp directory and generate any lightweight wrappers there instead of in the repository.
+- Call `gcloud functions deploy ... --source="$TEMP_DEPLOY_DIR"` so Cloud Functions only sees the isolated hand-off.
+- Let the `cleanup` function delete the temp directory; do **not** `rm` repo files manually.
+
+Use this checklist before committing a new `deploy.sh`:
+
+1. `TEMP_DEPLOY_DIR` is defined and the cleanup trap is in place.
+2. No `cat > main.py` or similar commands point at the repo root.
+3. Deployment commands reference `--source="$TEMP_DEPLOY_DIR"`.
+4. The only `rm` happens inside the cleanup trap.
+
+Sticking to this pattern keeps every module independently deployable without endangering local worktrees.
+
 Deployed functions:
 - `https://region-project.cloudfunctions.net/data-loader`
 - `https://region-project.cloudfunctions.net/news-extractor`
