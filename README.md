@@ -22,9 +22,9 @@ NFL data ingestion, transformation, and on-demand package assembly.
 
 - **Location**: [`src/functions/data_loading/`](src/functions/data_loading/)
 - **Status**: ✅ Production Ready
-- **Features**: Warehouse datasets, on-demand packages, Cloud Function API, CLI tools, **injury reports**
+- **Features**: Warehouse datasets, on-demand packages, Cloud Function API, CLI tools, weekly injury reports (see README for schema/testing details)
 
-[**→ Full Documentation**](src/functions/data_loading/README.md) | [**→ Injury Reports**](src/functions/data_loading/INJURIES.md)
+[**→ Full Documentation**](src/functions/data_loading/README.md)
 
 **Quick Start:**
 ```bash
@@ -37,7 +37,7 @@ cp .env.example .env  # Configure Supabase
 python scripts/players_cli.py --dry-run
 python scripts/games_cli.py --season 2024
 
-# Load injury reports (see INJURIES.md)
+# Load injury reports (see README "Injuries Loader")
 python scripts/injuries_cli.py --season 2025 --week 6
 
 # Test locally
@@ -54,7 +54,7 @@ NFL news URL extraction from RSS feeds and sitemaps.
 - **Status**: ✅ Production Ready
 - **Features**: Concurrent extraction, HTTP caching, circuit breaker, comprehensive monitoring
 
-[**→ Full Documentation**](src/functions/news_extraction/README.md) | [**→ Deployment Guide**](src/functions/news_extraction/DEPLOYMENT.md)
+[**→ Full Documentation (testing & deployment included)**](src/functions/news_extraction/README.md)
 
 **Quick Start:**
 ```bash
@@ -69,7 +69,7 @@ python scripts/extract_news_cli.py --dry-run --verbose
 # Production with metrics
 python scripts/extract_news_cli.py --environment prod --metrics-file metrics.json
 
-# Deploy
+# Deploy (see README testing & deployment notes)
 cd functions && ./deploy.sh
 ```
 
@@ -78,7 +78,7 @@ AI-powered content summarization using Google Gemini with intelligent fallback s
 
 - **Location**: [`src/functions/content_summarization/`](src/functions/content_summarization/)
 - **Status**: ✅ Production Ready
-- **Features**: URL context analysis, multi-tier fallback, anti-hallucination prompts, rate limiting, circuit breaker, metrics collection
+- **Features**: Fact-first pipeline (facts → embeddings → summaries), Supabase edge queue integration, backlog processor with concurrency/heartbeats, rate limiting, circuit breaker, rich metrics
 
 [**→ Full Documentation**](src/functions/content_summarization/README.md)
 
@@ -88,11 +88,13 @@ cd src/functions/content_summarization
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-# Add to .env: GEMINI_API_KEY, GEMINI_MODEL
+# Add to .env: GEMINI_API_KEY (plus optional overrides in README)
 
-# Summarize URLs
-python scripts/summarize_cli.py --dry-run --limit 5 --verbose
-python scripts/summarize_cli.py --limit 10
+# Run fact→summary pipeline
+python scripts/content_pipeline_cli.py --stage full --limit 20
+
+# High-volume backlog run (see README for more flags)
+python scripts/backlog_processor.py --stage facts --limit 1000 --prefetch-size 1000
 
 # Deploy
 cd functions && ./deploy.sh
@@ -214,8 +216,7 @@ T4L_data_loaders/
 │       │   ├── scripts/           # CLI tools
 │       │   ├── functions/         # Cloud Function deployment
 │       │   ├── requirements.txt   # Module dependencies
-│       │   ├── README.md          # Module documentation
-│       │   └── DEPLOYMENT.md      # Testing & deployment guide
+│       │   └── README.md          # Module documentation
 │       │
 │       ├── content_summarization/ # ✅ Production ready
 │       │   ├── core/              # Business logic
@@ -334,15 +335,12 @@ Each module is independent:
 8. **[Knowledge Extraction Module](src/functions/knowledge_extraction/README.md)** - Topic and entity extraction
 
 ### Module Documentation
-- **[Data Loading README](src/functions/data_loading/README.md)** - Complete module documentation
-- **[Data Loading Testing & Deployment](src/functions/data_loading/TESTING_DEPLOYMENT.md)** - Local testing & Cloud deployment
-- **[Injury Reports](src/functions/data_loading/INJURIES.md)** - NFL injury scraping & historical tracking
-- **[News Extraction README](src/functions/news_extraction/README.md)** - Complete module documentation
-- **[News Extraction Deployment](src/functions/news_extraction/DEPLOYMENT.md)** - Testing & deployment guide
-- **[Content Summarization README](src/functions/content_summarization/README.md)** - Complete module documentation
-- **[Story Embeddings README](src/functions/story_embeddings/README.md)** - Complete module documentation
-- **[Story Grouping README](src/functions/story_grouping/README.md)** - Complete module documentation
-- **[Knowledge Extraction README](src/functions/knowledge_extraction/README.md)** - Complete module documentation
+- **[Data Loading README](src/functions/data_loading/README.md)** – Includes testing/deployment flow and the injuries loader reference
+- **[News Extraction README](src/functions/news_extraction/README.md)** – Covers CLI usage plus testing & cloud deployment steps
+- **[Content Summarization README](src/functions/content_summarization/README.md)** – Fact-first pipeline, backlog processor, knowledge/summary stages, and ops quick reference
+- **[Story Embeddings README](src/functions/story_embeddings/README.md)** – Embedding pipeline details and tuning flags
+- **[Story Grouping README](src/functions/story_grouping/README.md)** – Clustering algorithm, performance optimizations, schema
+- **[Knowledge Extraction README](src/functions/knowledge_extraction/README.md)** – Topic/entity extraction, batch processing, schema
 
 ### Technical References
 - **[Package Contract](docs/package_contract.md)** - On-demand package request/response spec
@@ -391,8 +389,7 @@ src/functions/your_module/
 │   └── deploy.sh     # Deployment script
 ├── requirements.txt   # Module dependencies
 ├── .env.example      # Configuration template
-├── README.md         # Module documentation
-└── DEPLOYMENT.md     # Testing & deployment guide
+└── README.md         # Module documentation (include testing & deployment notes)
 ```
 
 See [function_isolation.md](docs/architecture/function_isolation.md) for details.
@@ -433,7 +430,7 @@ python scripts/players_cli.py --dry-run  # ✅ Still works!
 - **Content Summarization**: [src/functions/content_summarization/README.md](src/functions/content_summarization/README.md)
 - **Story Embeddings**: [src/functions/story_embeddings/README.md](src/functions/story_embeddings/README.md)
 - **Story Grouping**: [src/functions/story_grouping/README.md](src/functions/story_grouping/README.md)
-- **Testing & Deployment**: Module-specific DEPLOYMENT.md files
+- **Testing & Deployment**: Each module README now includes local testing and Cloud Function notes
 
 ---
 

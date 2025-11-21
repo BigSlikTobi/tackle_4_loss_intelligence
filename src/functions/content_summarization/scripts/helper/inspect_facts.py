@@ -1,3 +1,6 @@
+# This script fetches and inspects facts associated with a given news URL ID.
+# It writes the retrieved facts to a local text file for review.
+
 import argparse
 import os
 import sys

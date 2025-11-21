@@ -1,4 +1,28 @@
-"""Content summarization pipeline CLI for multi-step fact-first processing."""
+"""Content summarization pipeline CLI for multi-step fact-first processing.
+
+USAGE GUIDANCE:
+  This tool is designed for SMALL BATCH CORRECTIONS (10-100 articles).
+  
+  For LARGE BACKLOG PROCESSING (1000+ articles):
+    Use backlog_processor.py with checkpoint/resume support, concurrent processing,
+    and adaptive memory management. Run: python backlog_processor.py --help
+  
+  For REAL-TIME PROCESSING (1-10 articles):
+    Use url_extraction Cloud Function with enable_fact_extraction=true.
+    Processes articles as they're discovered with immediate fact extraction.
+
+WHEN TO USE THIS TOOL:
+  - Manual corrections and reprocessing
+  - Small batch updates (10-100 articles)
+  - Testing pipeline changes
+  - One-off data fixes
+
+FEATURES:
+  - Multi-stage pipeline (content → facts → knowledge → summary)
+  - Batch mode with configurable limits
+  - Per-stage processing
+  - Basic error handling and logging
+"""
 
 from __future__ import annotations
 

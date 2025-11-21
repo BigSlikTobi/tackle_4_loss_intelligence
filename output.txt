@@ -1,5 +1,0 @@
-Forgot your password? Reset it from the Dashboard: https://supabase.com/dashboard/project/yqtiuzhedkfacwgormhn/settings/database
-Enter your database password: 
-Connecting to remote database...
-failed to connect to postgres: failed to connect to `host=aws-0-eu-central-1.pooler.supabase.com user=postgres.yqtiuzhedkfacwgormhn database=postgres`: hostname resolving error (lookup aws-0-eu-central-1.pooler.supabase.com: operation was canceled)
-Try rerunning the command with --debug to troubleshoot the error.
