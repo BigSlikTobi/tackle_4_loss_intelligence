@@ -62,6 +62,9 @@ export function useNewsDetail(id: string) {
     const [newsDetail, setNewsDetail] = useState<NewsDetail | null>(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
+    const [refreshKey, setRefreshKey] = useState(0)
+
+    const refetch = () => setRefreshKey(prev => prev + 1)
 
     useEffect(() => {
         if (!id) return
@@ -109,7 +112,7 @@ export function useNewsDetail(id: string) {
         }
 
         fetchDetail()
-    }, [id])
+    }, [id, refreshKey])
 
-    return { newsDetail, loading, error }
+    return { newsDetail, loading, error, refetch }
 }
