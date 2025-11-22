@@ -1,5 +1,6 @@
 """
-Cleanup script to detect and remove author-related facts and regenerate downstream data.
+Cleanup script to detect and remove author-related facts with optional pagination,
+checkpointing, and downstream regeneration controls.
 """
 
 import argparse
@@ -9,8 +10,7 @@ import os
 import re
 import sys
 import time
-from collections import defaultdict
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Add project root to Python path
 from pathlib import Path
@@ -26,7 +26,6 @@ try:
     from src.functions.content_summarization.scripts.content_pipeline_cli import (
         PipelineConfig,
         build_config,
-        call_llm_json,
         create_fact_pooled_embedding,
         handle_easy_article_summary,
         handle_hard_article_summary,
@@ -41,7 +40,6 @@ except ImportError:
     from content_pipeline_cli import (
         PipelineConfig,
         build_config,
-        call_llm_json,
         create_fact_pooled_embedding,
         handle_easy_article_summary,
         handle_hard_article_summary,
@@ -52,6 +50,69 @@ except ImportError:
     from src.functions.knowledge_extraction.core.db.knowledge_writer import KnowledgeWriter
 
 logger = logging.getLogger(__name__)
+
+
+def _load_checkpoint(checkpoint_path: Optional[str]) -> Dict[str, Any]:
+    """Load checkpoint data if available."""
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        return {
+            "cursor_id": None,
+            "stats": {
+                "facts_scanned": 0,
+                "facts_flagged": 0,
+                "facts_deleted": 0,
+                "batches_processed": 0,
+            },
+            "completed": False,
+        }
+
+    try:
+        with open(checkpoint_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            data.setdefault("stats", {})
+            data["stats"].setdefault("facts_scanned", 0)
+            data["stats"].setdefault("facts_flagged", 0)
+            data["stats"].setdefault("facts_deleted", 0)
+            data["stats"].setdefault("batches_processed", 0)
+            data.setdefault("cursor_id", None)
+            data.setdefault("completed", False)
+            return data
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to load checkpoint %s: %s", checkpoint_path, exc)
+        return {
+            "cursor_id": None,
+            "stats": {
+                "facts_scanned": 0,
+                "facts_flagged": 0,
+                "facts_deleted": 0,
+                "batches_processed": 0,
+            },
+            "completed": False,
+        }
+
+
+def _save_checkpoint(
+    checkpoint_path: Optional[str],
+    cursor_id: Optional[str],
+    stats: Dict[str, int],
+    completed: bool,
+) -> None:
+    """Persist checkpoint data so long runs can resume."""
+    if not checkpoint_path:
+        return
+
+    payload = {
+        "cursor_id": cursor_id,
+        "stats": stats,
+        "completed": completed,
+    }
+    tmp_path = f"{checkpoint_path}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        os.replace(tmp_path, checkpoint_path)
+    except OSError as exc:
+        logger.warning("Unable to write checkpoint %s: %s", checkpoint_path, exc)
 
 AUTHOR_FACT_PATTERNS = [
     # Author/journalist titles and affiliations
@@ -117,54 +178,131 @@ class AuthorFactCleaner:
         self.config = config
         self.knowledge_writer = KnowledgeWriter()
 
-    def run(self, limit: int = 100, news_url_id: str = None, dry_run: bool = False):
-        """Main execution loop."""
-        logger.info(f"Starting author fact cleanup (Limit: {limit}, News URL ID: {news_url_id}, Dry Run: {dry_run})")
-        
-        # 1. Fetch candidate facts
-        facts = self._fetch_facts(limit, news_url_id)
-        logger.info(f"Fetched {len(facts)} facts to analyze")
-        
-        facts_to_delete = []
-        affected_urls = set()
-        
+    def run(
+        self,
+        limit: int = 100,
+        news_url_id: Optional[str] = None,
+        dry_run: bool = False,
+        paginate: bool = False,
+        checkpoint_path: Optional[str] = None,
+        skip_regenerate: bool = False,
+        sleep_seconds: float = 0.0,
+    ) -> Dict[str, int]:
+        """Main execution loop with optional pagination and checkpointing."""
+        logger.info(
+            "Starting author fact cleanup (batch size=%s, news_url_id=%s, dry_run=%s, paginate=%s, skip_regenerate=%s)",
+            limit,
+            news_url_id,
+            dry_run,
+            paginate,
+            skip_regenerate,
+        )
+
+        checkpoint_data = _load_checkpoint(checkpoint_path)
+        cursor_id = checkpoint_data.get("cursor_id")
+        stats = checkpoint_data.get("stats", {})
+        stats.setdefault("facts_scanned", 0)
+        stats.setdefault("facts_flagged", 0)
+        stats.setdefault("facts_deleted", 0)
+        stats.setdefault("batches_processed", 0)
+
+        # If a prior run was marked complete we start over unless explicitly resumed with cursor
+        if checkpoint_data.get("completed") and not cursor_id:
+            logger.info("Checkpoint marked complete. Starting a fresh run.")
+            stats = {"facts_scanned": 0, "facts_flagged": 0, "facts_deleted": 0, "batches_processed": 0}
+
+        while True:
+            facts = self._fetch_facts(limit, news_url_id, cursor_id)
+            if not facts:
+                logger.info("No more facts returned from Supabase")
+                break
+
+            cursor_id = facts[-1]["id"]
+            stats["batches_processed"] += 1
+            stats["facts_scanned"] += len(facts)
+
+            facts_to_delete, affected_urls = self._identify_author_facts(facts)
+            stats["facts_flagged"] += len(facts_to_delete)
+
+            if facts_to_delete:
+                logger.info(
+                    "Batch summary: scanned=%s flagged=%s urls=%s",
+                    len(facts),
+                    len(facts_to_delete),
+                    len(affected_urls),
+                )
+
+                if dry_run:
+                    logger.info("[DRY RUN] Skipping deletion/regeneration for this batch")
+                else:
+                    self._delete_facts(facts_to_delete)
+                    stats["facts_deleted"] += len(facts_to_delete)
+
+                    if not skip_regenerate:
+                        self._regenerate_urls(affected_urls)
+                    else:
+                        logger.debug("Skipping regeneration for batch because --skip-regenerate was provided")
+            else:
+                logger.info("Batch summary: scanned=%s flagged=0", len(facts))
+
+            _save_checkpoint(checkpoint_path, cursor_id, stats, completed=False)
+
+            if not paginate:
+                break
+
+            if len(facts) < limit:
+                logger.info("Short page (%s facts) indicates completion", len(facts))
+                break
+
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+        _save_checkpoint(checkpoint_path, cursor_id, stats, completed=True)
+        logger.info(
+            "Cleanup complete: scanned=%s flagged=%s deleted=%s batches=%s",
+            stats["facts_scanned"],
+            stats["facts_flagged"],
+            stats["facts_deleted"],
+            stats["batches_processed"],
+        )
+        return stats
+
+    def _fetch_facts(
+        self,
+        limit: int,
+        news_url_id: Optional[str] = None,
+        cursor_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch facts from DB in deterministic order using keyset pagination."""
+        query = self.client.table("news_facts").select("id, news_url_id, fact_text")
+
+        if news_url_id:
+            query = query.eq("news_url_id", news_url_id)
+
+        query = query.order("id", desc=False)
+
+        if cursor_id:
+            query = query.gt("id", cursor_id)
+
+        response = query.limit(limit).execute()
+        return getattr(response, "data", []) or []
+
+    def _identify_author_facts(
+        self, facts: List[Dict[str, Any]]
+    ) -> Tuple[List[str], Set[str]]:
+        """Return matching fact ids and affected URLs for a batch."""
+        facts_to_delete: List[str] = []
+        affected_urls: Set[str] = set()
+
         for fact in facts:
             is_author, reason = self._is_author_fact(fact["fact_text"])
             if is_author:
-                logger.info(f"Found author fact: {fact['fact_text'][:100]}...")
-                logger.info(f"  Reason: {reason}")
+                preview = (fact["fact_text"] or "")[:100]
+                logger.info("Found author fact %s (reason: %s)", preview, reason)
                 facts_to_delete.append(fact["id"])
                 affected_urls.add(fact["news_url_id"])
-        
-        logger.info(f"Identified {len(facts_to_delete)} facts to delete across {len(affected_urls)} URLs")
-        
-        if not facts_to_delete:
-            return
 
-        if dry_run:
-            logger.info("[DRY RUN] Skipping deletion and regeneration")
-            return
-
-        # 2. Delete facts (Cascades to embeddings, topics, entities)
-        self._delete_facts(facts_to_delete)
-        
-        # 3. Regenerate downstream data for affected URLs
-        self._regenerate_urls(affected_urls)
-
-    def _fetch_facts(self, limit: int, news_url_id: str = None) -> List[Dict[str, Any]]:
-        """Fetch facts from DB."""
-        query = self.client.table("news_facts").select("id, news_url_id, fact_text")
-        
-        if news_url_id:
-            query = query.eq("news_url_id", news_url_id)
-        
-        response = (
-            query
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return getattr(response, "data", []) or []
+        return facts_to_delete, affected_urls
 
     def _is_author_fact(self, fact_text: str) -> Tuple[bool, str]:
         """Use Regex to check if fact is author-related."""
@@ -227,6 +365,27 @@ def main():
     parser.add_argument("--limit", type=int, default=100, help="Number of facts to check")
     parser.add_argument("--news-url-id", type=str, help="Specific news URL ID to clean")
     parser.add_argument("--dry-run", action="store_true", help="Don't delete anything")
+    parser.add_argument(
+        "--paginate",
+        action="store_true",
+        help="Continue batching through the full table using keyset pagination",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        help="Optional checkpoint JSON path for resuming long runs",
+    )
+    parser.add_argument(
+        "--skip-regenerate",
+        action="store_true",
+        help="Skip downstream regeneration to avoid LLM/API usage",
+    )
+    parser.add_argument(
+        "--sleep-seconds",
+        type=float,
+        default=0.0,
+        help="Sleep between batches to stay under Supabase rate limits",
+    )
     args = parser.parse_args()
 
     load_env()
@@ -237,7 +396,15 @@ def main():
     client = get_supabase_client()
     
     cleaner = AuthorFactCleaner(client, config)
-    cleaner.run(limit=args.limit, news_url_id=args.news_url_id, dry_run=args.dry_run)
+    cleaner.run(
+        limit=args.limit,
+        news_url_id=args.news_url_id,
+        dry_run=args.dry_run,
+        paginate=args.paginate,
+        checkpoint_path=args.checkpoint,
+        skip_regenerate=args.skip_regenerate,
+        sleep_seconds=args.sleep_seconds,
+    )
 
 if __name__ == "__main__":
     main()

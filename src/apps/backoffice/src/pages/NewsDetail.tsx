@@ -1,11 +1,35 @@
 import { useRoute, Link } from 'wouter'
 import { useNewsDetail } from '../hooks/useNews'
-import { ArrowLeft, Calendar, Database, Tag, Hash, AlignLeft, Users } from 'lucide-react'
+import { ArrowLeft, Database, Hash, AlignLeft, Users, Trash2 } from 'lucide-react'
+import { supabase } from '../lib/supabase'
 
 export default function NewsDetail() {
     const [, params] = useRoute('/news/:id')
     const id = params?.id || ''
-    const { newsDetail, loading, error } = useNewsDetail(id)
+    const { newsDetail, loading, error, refetch } = useNewsDetail(id)
+
+    const handleDeleteFact = async (e: React.MouseEvent, factId: string) => {
+        e.preventDefault()
+        e.stopPropagation()
+
+        if (!window.confirm('Are you sure you want to delete this fact? This will also delete associated topics, entities, and embeddings.')) {
+            return
+        }
+
+        try {
+            const { error } = await supabase
+                .from('news_facts')
+                .delete()
+                .eq('id', factId)
+
+            if (error) throw error
+
+            refetch()
+        } catch (err) {
+            console.error('Error deleting fact:', err)
+            alert('Failed to delete fact')
+        }
+    }
 
     if (loading) return <div className="loading-state">Loading details...</div>
     if (error) return <div className="error-state">Error: {error}</div>
@@ -72,6 +96,7 @@ export default function NewsDetail() {
                                 <th style={{ width: '25%' }}>
                                     <div className="cell-text"><Users size={14} /> Entities</div>
                                 </th>
+                                <th style={{ width: '50px' }}></th>
                             </tr>
                         </thead>
                         <tbody>
@@ -109,6 +134,16 @@ export default function NewsDetail() {
                                                 <span className="text-xs text-muted italic">null</span>
                                             )}
                                         </div>
+                                    </td>
+                                    <td style={{ verticalAlign: 'top', textAlign: 'right' }}>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleDeleteFact(e, fact.id)}
+                                            className="p-1 hover:bg-red-50 text-gray-400 hover:text-red-600 rounded transition-colors"
+                                            title="Delete fact"
+                                        >
+                                            <Trash2 size={14} />
+                                        </button>
                                     </td>
                                 </tr>
                             ))}
