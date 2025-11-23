@@ -117,6 +117,24 @@ class NewsFactReader:
             logger.warning("Failed to check existing entities: %s", exc)
             return []
 
+    def filter_existing_fact_ids(self, fact_ids: Sequence[str]) -> List[str]:
+        """Return only fact IDs that exist in news_facts."""
+
+        if not fact_ids:
+            return []
+
+        try:
+            response = (
+                self.client.table("news_facts")
+                .select("id")
+                .in_("id", list(fact_ids))
+                .execute()
+            )
+            return [row["id"] for row in getattr(response, "data", []) or []]
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to check existing fact ids: %s", exc)
+            return []
+
     def get_progress_stats(self) -> Dict[str, int]:
         """Return aggregate counts of extracted facts/topics/entities."""
 

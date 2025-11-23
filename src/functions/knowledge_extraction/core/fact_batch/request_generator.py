@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Optional
 
+from ..extraction.topic_extractor import TOPIC_CATEGORIES
 from ..db.fact_reader import NewsFactReader
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class FactBatchRequestGenerator:
         self,
         *,
         reader: Optional[NewsFactReader] = None,
-        model: str = "gpt-4-1-nano",
+        model: str = "gpt-4.1-nano-2025-04-14",
         temperature: float = 0.1,
         chunk_size: int = 25,
         output_dir: Optional[Path] = None,
@@ -138,24 +139,59 @@ class FactBatchRequestGenerator:
             for row in chunk
         ]
 
-        instruction = (
-            "Return ONLY a JSON array. Each element must contain `news_fact_id` and "
-            f"a list named `{task}` containing the extracted values. Do not add prose "
-            "or commentary."
-        )
-
-        task_details = {
-            "task": task,
-            "facts": facts_payload,
-            "requirements": {
+        if task == "topics":
+            instruction = (
+                "Return ONLY a JSON array. Each element must contain `news_fact_id` and a `topics` array. "
+                "For each fact, select 1-3 items from the allowed topic categories list only. "
+                "Do not return player names, team names, stats, or prose—only the closest matching categories."
+            )
+            task_details = {
+                "task": "topics",
+                "facts": facts_payload,
+                "allowed_topics": TOPIC_CATEGORIES,
                 "output_format": [
                     {
                         "news_fact_id": "<uuid>",
-                        task: ["text", "text"],
+                        "topics": [
+                            {
+                                "topic": "<one of allowed topic categories>",
+                                "confidence": 0.0,
+                                "rank": 1,
+                            }
+                        ],
                     }
-                ]
-            },
-        }
+                ],
+            }
+        else:
+            instruction = (
+                "Return ONLY a JSON array. Each element must contain `news_fact_id` and an `entities` array. "
+                "Entities must be limited to one of: player, team, game. Exclude topics, stats, odds, or dates. "
+                "Use canonical player names and team names only (no prefixes like 'player:', 'team:', 'players:', 'teams:'), include team_abbr when known for disambiguation."
+            )
+            task_details = {
+                "task": "entities",
+                "facts": facts_payload,
+                "allowed_entity_types": ["player", "team", "game"],
+                "output_format": [
+                    {
+                        "news_fact_id": "<uuid>",
+                        "entities": [
+                            {
+                                "entity_type": "player|team|game",
+                                "mention_text": "<name only>",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            # Tighten instruction to reduce token usage
+            instruction = (
+                "Return ONLY a JSON array. Each element must contain `news_fact_id` and an `entities` array. "
+                "Entities must be limited to: player, team, or game. Exclude topics, stats, odds, dates, commentary. "
+                "For each entity include ONLY `entity_type` and `mention_text` fields (no confidence, rank, team_abbr, etc.). "
+                "Use canonical player names and team names only; no prefixes like 'player:' or 'team:'."
+            )
 
         user_content = json.dumps(task_details, ensure_ascii=False)
 

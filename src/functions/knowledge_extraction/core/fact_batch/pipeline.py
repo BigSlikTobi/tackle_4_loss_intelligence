@@ -13,6 +13,7 @@ from typing import Optional
 import openai
 
 from .request_generator import FactBatchRequestGenerator, GeneratedBatch, KnowledgeTask
+from .result_processor import FactBatchResultProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,12 @@ class FactBatchPipeline:
         self,
         *,
         generator: Optional[FactBatchRequestGenerator] = None,
+        processor: Optional[FactBatchResultProcessor] = None,
         api_key: Optional[str] = None,
         output_dir: Optional[Path] = None,
     ) -> None:
         self.generator = generator or FactBatchRequestGenerator(output_dir=output_dir)
+        self.processor = processor or FactBatchResultProcessor()
         self.output_dir = output_dir or Path("./batch_files")
 
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
@@ -105,3 +108,85 @@ class FactBatchPipeline:
             total_requests=batch_payload.total_requests,
             total_facts=batch_payload.total_facts,
         )
+
+    def check_status(self, batch_id: str) -> dict:
+        """Retrieve batch status from OpenAI."""
+        batch = openai.batches.retrieve(batch_id)
+        status_info = {
+            "batch_id": batch.id,
+            "status": batch.status,
+            "created_at": getattr(batch, "created_at", None),
+            "completed_at": getattr(batch, "completed_at", None),
+            "expires_at": getattr(batch, "expires_at", None),
+            "output_file_id": getattr(batch, "output_file_id", None),
+            "error_file_id": getattr(batch, "error_file_id", None),
+        }
+        if hasattr(batch, "request_counts") and batch.request_counts:
+            status_info["request_counts"] = {
+                "total": batch.request_counts.total,
+                "completed": batch.request_counts.completed,
+                "failed": batch.request_counts.failed,
+            }
+        return status_info
+
+    def process_batch(
+        self,
+        batch_id: str,
+        *,
+        task: KnowledgeTask,
+        dry_run: bool = False,
+        skip_existing: bool = False,
+    ) -> dict:
+        """Download a completed batch output and write results to the database."""
+        batch = openai.batches.retrieve(batch_id)
+        if batch.status != "completed":
+            raise ValueError(f"Batch {batch_id} is not completed (status: {batch.status})")
+
+        if not getattr(batch, "output_file_id", None):
+            raise ValueError(f"Batch {batch_id} has no output file")
+
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        output_path = self.output_dir / f"fact_batch_{batch_id}_output_{timestamp}.jsonl"
+
+        logger.info("Downloading output file %s", batch.output_file_id)
+        output_content = openai.files.content(batch.output_file_id)
+        output_text = output_content.text
+        with output_path.open("w") as handle:
+            handle.write(output_text)
+
+        error_path = None
+        if getattr(batch, "error_file_id", None):
+            logger.info("Downloading error file %s", batch.error_file_id)
+            error_content = openai.files.content(batch.error_file_id)
+            error_text = error_content.text
+            error_path = self.output_dir / f"fact_batch_{batch_id}_errors_{timestamp}.jsonl"
+            with error_path.open("w") as handle:
+                handle.write(error_text)
+
+        logger.info("Processing output file: %s", output_path)
+        result = self.processor.process(
+            output_file=output_path,
+            task=task,
+            dry_run=dry_run,
+            skip_existing=skip_existing,
+        )
+
+        summary = {
+            "batch_id": batch_id,
+            "status": batch.status,
+            "output_path": str(output_path),
+            "error_path": str(error_path) if error_path else None,
+            "facts_processed": result.facts_processed,
+            "topics_written": result.topics_written,
+            "entities_written": result.entities_written,
+            "errors": result.errors,
+            "missing_fact_ids": result.missing_fact_ids,
+            "dry_run": dry_run,
+        }
+
+        summary_path = self.output_dir / f"fact_batch_{batch_id}_summary_{timestamp}.json"
+        with summary_path.open("w") as handle:
+            json.dump(summary, handle, indent=2)
+
+        logger.info("Fact batch processing complete for %s", batch_id)
+        return summary
