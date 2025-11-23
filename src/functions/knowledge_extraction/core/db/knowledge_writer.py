@@ -69,18 +69,21 @@ class KnowledgeWriter:
         self.client = get_supabase_client()
         logger.info("Initialized KnowledgeWriter")
 
-    def write_fact_topics(
+    # --------------------
+    # Topic helpers
+    # --------------------
+
+    def _build_topic_records(
         self,
         *,
         news_fact_id: str,
         topics: Sequence[ExtractedTopic],
         llm_model: str,
-        dry_run: bool = False,
-    ) -> int:
-        """Insert or upsert topic annotations for a fact."""
+    ) -> List[Dict]:
+        """Return deduped topic records for a fact (no DB IO)."""
 
         if not topics:
-            return 0
+            return []
 
         dedup: Dict[str, Tuple[str, ExtractedTopic]] = {}
         for topic in topics:
@@ -118,6 +121,22 @@ class KnowledgeWriter:
                 }
             )
 
+        return records
+
+    def write_fact_topics(
+        self,
+        *,
+        news_fact_id: str,
+        topics: Sequence[ExtractedTopic],
+        llm_model: str,
+        dry_run: bool = False,
+    ) -> int:
+        """Insert or upsert topic annotations for a fact."""
+
+        records = self._build_topic_records(
+            news_fact_id=news_fact_id, topics=topics, llm_model=llm_model
+        )
+
         if not records:
             return 0
 
@@ -134,18 +153,71 @@ class KnowledgeWriter:
         )
         return len(getattr(response, "data", []) or records)
 
-    def write_fact_entities(
+    def write_fact_topics_bulk(
+        self,
+        items: Sequence[Dict],
+        *,
+        dry_run: bool = False,
+        chunk_size: int = 1000,
+    ) -> int:
+        """
+        Bulk insert or upsert topic annotations.
+
+        items: list of dicts with keys: news_fact_id, topics, llm_model
+        """
+        all_records: List[Dict] = []
+        for item in items:
+            records = self._build_topic_records(
+                news_fact_id=item["news_fact_id"],
+                topics=item["topics"],
+                llm_model=item["llm_model"],
+            )
+            all_records.extend(records)
+
+        if not all_records:
+            return 0
+
+        # Deduplicate across the batch to avoid double-upsert conflicts
+        deduped: List[Dict] = []
+        seen_keys = set()
+        for rec in all_records:
+            key = (rec["news_fact_id"], rec["canonical_topic"])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(rec)
+
+        if dry_run:
+            logger.info("[DRY RUN] Would insert %d fact topics (bulk)", len(deduped))
+            return len(deduped)
+
+        total_written = 0
+        for i in range(0, len(deduped), chunk_size):
+            chunk = deduped[i : i + chunk_size]
+            response = (
+                self.client.table("news_fact_topics")
+                .upsert(chunk, on_conflict="news_fact_id,canonical_topic")
+                .execute()
+            )
+            total_written += len(getattr(response, "data", []) or chunk)
+
+        return total_written
+
+    # --------------------
+    # Entity helpers
+    # --------------------
+
+    def _build_entity_records(
         self,
         *,
         news_fact_id: str,
         entities: Sequence[ResolvedEntity],
         llm_model: str,
-        dry_run: bool = False,
-    ) -> int:
-        """Insert resolved entities for a fact."""
+    ) -> List[Dict]:
+        """Return deduped entity records for a fact (no DB IO)."""
 
         if not entities:
-            return 0
+            return []
 
         dedup: Dict[Tuple[str, str], ResolvedEntity] = {}
         dedup_keys: Dict[Tuple[str, str], str] = {}
@@ -187,6 +259,22 @@ class KnowledgeWriter:
                 }
             )
 
+        return records
+
+    def write_fact_entities(
+        self,
+        *,
+        news_fact_id: str,
+        entities: Sequence[ResolvedEntity],
+        llm_model: str,
+        dry_run: bool = False,
+    ) -> int:
+        """Insert resolved entities for a fact."""
+
+        records = self._build_entity_records(
+            news_fact_id=news_fact_id, entities=entities, llm_model=llm_model
+        )
+
         if not records:
             return 0
 
@@ -202,6 +290,56 @@ class KnowledgeWriter:
             .execute()
         )
         return len(getattr(response, "data", []) or records)
+
+    def write_fact_entities_bulk(
+        self,
+        items: Sequence[Dict],
+        *,
+        dry_run: bool = False,
+        chunk_size: int = 1000,
+    ) -> int:
+        """
+        Bulk insert or upsert entities.
+
+        items: list of dicts with keys: news_fact_id, entities, llm_model
+        """
+        all_records: List[Dict] = []
+        for item in items:
+            records = self._build_entity_records(
+                news_fact_id=item["news_fact_id"],
+                entities=item["entities"],
+                llm_model=item["llm_model"],
+            )
+            all_records.extend(records)
+
+        if not all_records:
+            return 0
+
+        # Deduplicate across the batch to avoid ON CONFLICT double-hit
+        deduped: List[Dict] = []
+        seen_keys = set()
+        for rec in all_records:
+            key = (rec["news_fact_id"], rec["entity_type"], rec["entity_dedup_key"])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(rec)
+
+        if dry_run:
+            logger.info("[DRY RUN] Would insert %d fact entities (bulk)", len(deduped))
+            return len(deduped)
+
+        total_written = 0
+        for i in range(0, len(deduped), chunk_size):
+            chunk = deduped[i : i + chunk_size]
+            response = (
+                self.client.table("news_fact_entities")
+                .upsert(chunk, on_conflict="news_fact_id,entity_type,entity_dedup_key")
+                .execute()
+            )
+            total_written += len(getattr(response, "data", []) or chunk)
+
+        return total_written
 
     def update_article_metrics(
         self,

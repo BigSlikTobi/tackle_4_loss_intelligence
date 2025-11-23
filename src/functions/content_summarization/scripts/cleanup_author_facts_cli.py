@@ -1,4 +1,5 @@
 """
+DO NOT USE - CURRENTLY IN DEVELOPMENT
 Cleanup script to detect and remove author-related facts with optional pagination,
 checkpointing, and downstream regeneration controls.
 """

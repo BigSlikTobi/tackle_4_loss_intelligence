@@ -42,6 +42,7 @@ TOPIC_CATEGORIES: List[str] = [
     "League News & Administration",
     "Off-Field & Lifestyle",
     "Media & Fan Reactions",
+    "Non American Football Topic",
 ]
 
 
