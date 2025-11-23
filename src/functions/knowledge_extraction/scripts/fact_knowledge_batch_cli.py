@@ -48,6 +48,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of facts per model request",
     )
     parser.add_argument(
+        "--page-size",
+        type=int,
+        default=200,
+        help="DB page size when streaming facts (lower to reduce DB timeouts)",
+    )
+    parser.add_argument(
         "--model",
         default="gpt-4.1-nano-2025-04-14",
         help="OpenAI model to use for knowledge extraction",
@@ -162,6 +168,7 @@ def main() -> None:
         temperature=args.temperature,
         chunk_size=args.chunk_size,
         output_dir=args.output_dir,
+        page_size=args.page_size,
     )
 
     if args.no_submit:
