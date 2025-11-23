@@ -144,3 +144,67 @@ class NewsFactReader:
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.error("Failed to compute progress stats: %s", exc)
             return {"facts": 0, "topics": 0, "entities": 0}
+
+    def stream_facts(
+        self,
+        *,
+        limit: Optional[int] = None,
+        page_size: int = 1000,
+        require_topics: bool = False,
+        require_entities: bool = False,
+    ):
+        """Yield fact rows with optional filtering for missing knowledge.
+
+        Args:
+            limit: Maximum number of facts to yield (None for all).
+            page_size: Supabase page size (defaults to 1000 to respect pagination guidance).
+            require_topics: When True, only yield facts missing topic rows.
+            require_entities: When True, only yield facts missing entity rows.
+        """
+
+        offset = 0
+        yielded = 0
+
+        while True:
+            query = (
+                self.client.table("news_facts")
+                .select("id,fact_text,news_fact_topics(id),news_fact_entities(id)")
+                .order("created_at", desc=False)
+                .range(offset, offset + page_size - 1)
+            )
+
+            response = query.execute()
+            rows = getattr(response, "data", []) or []
+
+            if not rows:
+                break
+
+            for row in rows:
+                if limit is not None and yielded >= limit:
+                    return
+
+                topic_links = row.get("news_fact_topics") or []
+                entity_links = row.get("news_fact_entities") or []
+
+                if require_topics and topic_links:
+                    continue
+
+                if require_entities and entity_links:
+                    continue
+
+                fact_text = (row.get("fact_text") or "").strip()
+                fact_id = row.get("id")
+
+                if not fact_id or not fact_text:
+                    continue
+
+                yielded += 1
+                yield {
+                    "id": fact_id,
+                    "fact_text": fact_text,
+                }
+
+            if len(rows) < page_size:
+                break
+
+            offset += page_size
