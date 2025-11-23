@@ -43,6 +43,7 @@ class FactBatchRequestGenerator:
         temperature: float = 0.1,
         chunk_size: int = 25,
         output_dir: Optional[Path] = None,
+        page_size: int = 200,
     ) -> None:
         self.reader = reader or NewsFactReader()
         self.model = model
@@ -50,6 +51,7 @@ class FactBatchRequestGenerator:
         self.chunk_size = chunk_size
         self.output_dir = output_dir or Path("./batch_files")
         self.output_dir.mkdir(exist_ok=True)
+        self.page_size = page_size
 
         logger.info(
             "Initialized FactBatchRequestGenerator",
@@ -57,6 +59,7 @@ class FactBatchRequestGenerator:
                 "model": model,
                 "temperature": temperature,
                 "chunk_size": chunk_size,
+                "page_size": page_size,
             },
         )
 
@@ -74,6 +77,7 @@ class FactBatchRequestGenerator:
 
         facts_iter = self.reader.stream_facts(
             limit=limit,
+            page_size=self.page_size,
             require_topics=task == "topics",
             require_entities=task == "entities",
         )
