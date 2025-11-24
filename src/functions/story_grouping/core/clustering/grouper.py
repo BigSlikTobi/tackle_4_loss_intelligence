@@ -97,7 +97,12 @@ class StoryGroup:
 
         return centroid.tolist()
 
-    def add_member(self, news_url_id: str, embedding_vector: List[float]) -> float:
+    def add_member(
+        self,
+        news_url_id: str,
+        embedding_vector: List[float],
+        news_fact_id: Optional[str] = None,
+    ) -> float:
         """
         Add a member to the group.
         
@@ -122,6 +127,7 @@ class StoryGroup:
         # Add member
         member = {
             "news_url_id": news_url_id,
+            "news_fact_id": news_fact_id,
             "embedding_vector": embedding_vector,
             "similarity": similarity,
         }
@@ -234,13 +240,14 @@ class StoryGrouper:
         self,
         news_url_id: str,
         embedding_vector: List[float],
+        news_fact_id: Optional[str] = None,
     ) -> AssignmentResult:
         """Assign a story to the most similar group or create a new group."""
 
         # If no groups exist, create the first one
         if not self.groups:
             group = StoryGroup()
-            similarity = group.add_member(news_url_id, embedding_vector)
+            similarity = group.add_member(news_url_id, embedding_vector, news_fact_id)
             self.groups.append(group)
 
             logger.debug("Created first group for story %s", news_url_id)
@@ -282,6 +289,22 @@ class StoryGrouper:
             group_index = candidate_groups[best_idx][0]
             group = self.groups[group_index]
 
+            if news_fact_id and any(
+                m.get("news_fact_id") == news_fact_id for m in group.members
+            ):
+                logger.debug(
+                    "Fact %s already pending in group %s, skipping duplicate",
+                    news_fact_id,
+                    group.group_id,
+                )
+                return AssignmentResult(
+                    group=group,
+                    similarity=1.0,
+                    created_new_group=False,
+                    added_to_group=False,
+                    previous_member_count=group.member_count,
+                )
+
             if news_url_id in group.get_member_news_url_ids():
                 logger.debug(
                     "Story %s already pending in group %s, skipping duplicate",
@@ -297,7 +320,9 @@ class StoryGrouper:
                 )
 
             previous_member_count = group.member_count
-            similarity = group.add_member(news_url_id, embedding_vector)
+            similarity = group.add_member(
+                news_url_id, embedding_vector, news_fact_id
+            )
 
             logger.debug(
                 "Added story %s to existing group %s (similarity: %.4f)",
@@ -315,7 +340,7 @@ class StoryGrouper:
 
         # Otherwise, create new group
         group = StoryGroup()
-        similarity = group.add_member(news_url_id, embedding_vector)
+        similarity = group.add_member(news_url_id, embedding_vector, news_fact_id)
         self.groups.append(group)
 
         logger.debug(
@@ -355,6 +380,7 @@ class StoryGrouper:
         for story in story_embeddings:
             news_url_id = story["news_url_id"]
             embedding_vector = story["embedding_vector"]
+            news_fact_id = story.get("news_fact_id")
             
             # Validate embedding
             if not embedding_vector or not isinstance(embedding_vector, list):
@@ -364,7 +390,7 @@ class StoryGrouper:
                 continue
             
             # Assign to group
-            self.assign_story(news_url_id, embedding_vector)
+            self.assign_story(news_url_id, embedding_vector, news_fact_id)
             grouped_count += 1
 
             # Log progress every 100 stories

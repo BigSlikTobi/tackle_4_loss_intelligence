@@ -66,18 +66,22 @@ COMMENT ON COLUMN story_groups.status IS
 -- story_group_members
 -- =============================================================================
 -- Maps news URLs to story groups with similarity scores.
--- This is a many-to-one relationship: each story belongs to one group.
+-- This is now fact-driven: multiple facts from the same story can map to
+-- different groups (or enrich the same group).
 
 CREATE TABLE IF NOT EXISTS story_group_members (
     -- Unique identifier for the membership record
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    
+
     -- Foreign key to story_groups
     group_id UUID NOT NULL REFERENCES story_groups(id) ON DELETE CASCADE,
-    
+
     -- Foreign key to news_urls (from news_extraction module)
     news_url_id UUID NOT NULL REFERENCES news_urls(id) ON DELETE CASCADE,
-    
+
+    -- Optional foreign key to news_facts so grouping can happen per fact
+    news_fact_id UUID REFERENCES news_facts(id) ON DELETE CASCADE,
+
     -- Cosine similarity score between story embedding and group centroid
     -- Range: 0.0 (completely dissimilar) to 1.0 (identical)
     similarity_score REAL NOT NULL,
@@ -85,8 +89,8 @@ CREATE TABLE IF NOT EXISTS story_group_members (
     -- Timestamp when story was added to group
     added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    -- Ensure a story can only be in a group once
-    CONSTRAINT story_group_members_unique UNIQUE (group_id, news_url_id)
+    -- Ensure a fact can only be added once per group
+    CONSTRAINT story_group_members_unique UNIQUE (group_id, news_fact_id)
 );
 
 -- Add index on group_id for efficient member lookups
@@ -94,8 +98,12 @@ CREATE INDEX IF NOT EXISTS idx_story_group_members_group_id
 ON story_group_members(group_id);
 
 -- Add index on news_url_id for checking if a story is grouped
-CREATE INDEX IF NOT EXISTS idx_story_group_members_news_url_id 
+CREATE INDEX IF NOT EXISTS idx_story_group_members_news_url_id
 ON story_group_members(news_url_id);
+
+-- Add index on news_fact_id for fact-level grouping lookups
+CREATE INDEX IF NOT EXISTS idx_story_group_members_news_fact_id
+ON story_group_members(news_fact_id);
 
 -- Add index on similarity_score for quality analysis
 CREATE INDEX IF NOT EXISTS idx_story_group_members_similarity_score 

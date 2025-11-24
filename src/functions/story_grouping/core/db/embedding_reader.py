@@ -46,7 +46,7 @@ def parse_vector(vector_data) -> Optional[List[float]]:
 
 
 class EmbeddingReader:
-    """Reads story embeddings from the story_embeddings table."""
+    """Reads fact-level embeddings joined with their parent news URLs."""
 
     def __init__(self, days_lookback: int = 14):
         """
@@ -68,28 +68,77 @@ class EmbeddingReader:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.days_lookback)
         return cutoff.isoformat()
 
+    @staticmethod
+    def _normalize_fact_embedding(record: Dict) -> Optional[Dict]:
+        """Normalize a facts_embeddings record into a grouping-ready dict."""
+
+        vector = parse_vector(record.get("embedding_vector"))
+        news_fact = record.get("news_facts") or {}
+        news_url_id = news_fact.get("news_url_id")
+
+        if vector is None or news_url_id is None:
+            return None
+
+        return {
+            "id": record.get("id"),
+            "news_fact_id": record.get("news_fact_id"),
+            "news_url_id": news_url_id,
+            "embedding_vector": vector,
+            "created_at": news_fact.get("created_at")
+            or record.get("created_at"),
+        }
+
+    def _get_grouped_fact_ids(self) -> set:
+        """Collect fact IDs that are already assigned to story groups."""
+
+        grouped_fact_ids: set = set()
+        page_size = 1000
+        offset = 0
+        max_batches = 15
+        batches = 0
+
+        while batches < max_batches:
+            response = (
+                self.client.table("story_group_members")
+                .select("news_fact_id")
+                .not_.is_("news_fact_id", "null")
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+
+            if not response.data:
+                break
+
+            grouped_fact_ids.update(
+                item.get("news_fact_id") for item in response.data if item.get("news_fact_id")
+            )
+
+            if len(response.data) < page_size:
+                break
+
+            offset += page_size
+            batches += 1
+
+        logger.info("Found %s already grouped facts", len(grouped_fact_ids))
+        return grouped_fact_ids
+
 
     def fetch_ungrouped_embeddings(
         self,
         limit: Optional[int] = None
     ) -> List[Dict]:
         """
-        Fetch embeddings for stories not yet assigned to a group.
-        
-        Uses an efficient LEFT JOIN approach at the database level to avoid
-        fetching all embeddings and filtering in Python.
-        
+        Fetch fact embeddings for stories not yet assigned to a group.
+
         Args:
             limit: Optional maximum number of embeddings to fetch
-            
+
         Returns:
             List of dicts with keys: id, news_url_id, embedding_vector, created_at
         """
-        logger.info("Fetching ungrouped story embeddings...")
-        
+        logger.info("Fetching ungrouped fact embeddings...")
+
         try:
-            # Use a more efficient approach with LEFT JOIN
-            # Instead of NOT IN which is slow for large datasets
             embeddings: List[Dict] = []
 
             for batch in self._iter_ungrouped_embedding_batches(
@@ -98,10 +147,10 @@ class EmbeddingReader:
             ):
                 embeddings.extend(batch)
 
-            logger.info(f"Fetched {len(embeddings)} ungrouped embeddings")
+            logger.info(f"Fetched {len(embeddings)} ungrouped fact embeddings")
 
             return embeddings
-            
+
         except Exception as e:
             logger.error(f"Error fetching ungrouped embeddings: {e}")
             raise
@@ -109,13 +158,14 @@ class EmbeddingReader:
     def fetch_embeddings_by_news_url_ids(
         self, news_url_ids: List[str]
     ) -> List[Dict]:
-        """Fetch embeddings for a specific list of news_url IDs."""
+        """Fetch fact embeddings for a specific list of news_url IDs."""
 
         if not news_url_ids:
             return []
 
         logger.info(
-            "Fetching embeddings for %s requested news_url_ids", len(news_url_ids)
+            "Fetching fact embeddings for %s requested news_url_ids",
+            len(news_url_ids),
         )
 
         unique_ids: List[str] = []
@@ -128,246 +178,76 @@ class EmbeddingReader:
         if not unique_ids:
             return []
 
-        chunk_size = 200
-        embeddings: Dict[str, Dict] = {}
+        chunk_size = 100
+        embeddings: List[Dict] = []
 
         for start in range(0, len(unique_ids), chunk_size):
             chunk = unique_ids[start : start + chunk_size]
             try:
                 response = (
-                    self.client.table("story_embeddings")
-                    .select("id, news_url_id, embedding_vector, created_at")
+                    self.client.table("news_facts")
+                    .select(
+                        "id, news_url_id, created_at, facts_embeddings!inner(id, embedding_vector, created_at)"
+                    )
                     .in_("news_url_id", chunk)
                     .execute()
                 )
 
-                for item in response.data or []:
-                    vector = parse_vector(item.get("embedding_vector"))
-                    if vector is not None:
-                        item["embedding_vector"] = vector
-                        embeddings[item["news_url_id"]] = item
-                    else:
-                        logger.warning(
-                            "Embedding vector missing for news_url_id=%s",
-                            item.get("news_url_id"),
+                for fact in response.data or []:
+                    for embedding in fact.get("facts_embeddings", []) or []:
+                        normalized = self._normalize_fact_embedding(
+                            {
+                                "id": embedding.get("id"),
+                                "news_fact_id": fact.get("id"),
+                                "embedding_vector": embedding.get("embedding_vector"),
+                                "created_at": embedding.get("created_at"),
+                                "news_facts": {
+                                    "news_url_id": fact.get("news_url_id"),
+                                    "created_at": fact.get("created_at"),
+                                },
+                            }
                         )
+                        if normalized:
+                            embeddings.append(normalized)
 
             except Exception as exc:
                 logger.error(
-                    "Error fetching embeddings for IDs %s-%s: %s",
+                    "Error fetching fact embeddings for IDs %s-%s: %s",
                     start,
                     start + len(chunk) - 1,
                     exc,
                 )
                 raise
 
-        ordered_results = [
-            embeddings[news_id]
-            for news_id in news_url_ids
-            if news_id in embeddings
-        ]
-
         logger.info(
-            "Fetched %s/%s embeddings for requested IDs",
-            len(ordered_results),
-            len(unique_ids),
+            "Fetched %s fact embeddings for requested IDs", len(embeddings)
         )
 
-        return ordered_results
+        return embeddings
     
-    def _iter_ungrouped_fallback_batches(
-        self,
-        limit: Optional[int],
-        batch_size: int,
-    ):
-        """
-        Fallback method that fetches grouped IDs first, then filters embeddings.
-        Used when database-level filtering isn't available.
-        
-        Optimized to:
-        - Reduce initial scan time by limiting batches checked
-        - Remove ORDER BY to speed up queries
-        - Use smaller fetch batches to avoid timeouts
-        
-        Args:
-            limit: Optional maximum number of embeddings to fetch
-            
-        Yields:
-            Lists of dicts with keys: id, news_url_id, embedding_vector, created_at
-        """
-        logger.info("Using fallback method to fetch ungrouped embeddings...")
-        
-        try:
-            cutoff_date = self._get_cutoff_date()
-            logger.info(f"Filtering stories created after {cutoff_date} ({self.days_lookback} days)")
-            
-            # First, get all grouped news_url_ids in smaller batches
-            # Optimize: fetch only IDs, no other columns
-            grouped_ids = set()
-            page_size = 1000
-            offset = 0
-            max_grouped_batches = 15  # Safety limit for grouped IDs
-            grouped_batches_fetched = 0
-            
-            while grouped_batches_fetched < max_grouped_batches:
-                try:
-                    grouped_response = self.client.table("story_group_members").select(
-                        "news_url_id"
-                    ).range(offset, offset + page_size - 1).execute()
-                    
-                    if not grouped_response.data:
-                        break
-                        
-                    grouped_ids.update(item["news_url_id"] for item in grouped_response.data)
-                    grouped_batches_fetched += 1
-                    
-                    if len(grouped_response.data) < page_size:
-                        break
-                        
-                    offset += page_size
-                    
-                except Exception as grouped_error:
-                    if "timeout" in str(grouped_error).lower():
-                        logger.warning(
-                            f"Timeout fetching grouped IDs at offset {offset}, "
-                            f"using {len(grouped_ids)} IDs collected so far"
-                        )
-                        break
-                    raise
-            
-            logger.info(f"Found {len(grouped_ids)} already grouped stories")
-            
-            # Then fetch embeddings in batches, filtering as we go
-            # OPTIMIZATION: Use smaller batches and no ORDER BY
-            yielded = 0
-            offset = 0
-            fetch_batch_size = 500  # Reduced from 1000
-            
-            # Calculate reasonable max batches based on limit
-            # With DESC order and indexes, we can check more batches safely
-            if limit and limit <= 100:
-                max_batches_to_check = 10  # Increased - DESC order finds ungrouped faster
-            elif limit and limit <= 500:
-                max_batches_to_check = 20
-            else:
-                max_batches_to_check = 30  # Increased to scan more data
-
-            batches_checked = 0
-
-            while batches_checked < max_batches_to_check:
-                try:
-                    # OPTIMIZATION: Use DESC order to get newest stories first
-                    # These are most likely to be ungrouped
-                    # With the new idx_story_embeddings_with_vectors index, this should be fast
-                    query = self.client.table("story_embeddings").select(
-                        "id, news_url_id, embedding_vector, created_at"
-                    ).not_.is_("embedding_vector", "null").gte(
-                        "created_at", cutoff_date
-                    ).order("created_at", desc=True).range(offset, offset + fetch_batch_size - 1)
-
-                    logger.info(
-                        f"Fetching embeddings batch at offset {offset} "
-                        f"(batch {batches_checked + 1}/{max_batches_to_check})..."
-                    )
-                    response = query.execute()
-
-                    if not response.data:
-                        logger.info("No more data, stopping")
-                        break
-
-                    # Filter this batch for ungrouped stories
-                    batch_ungrouped = [
-                        emb for emb in response.data
-                        if emb["news_url_id"] not in grouped_ids
-                    ]
-                    logger.info(
-                        f"Found {len(batch_ungrouped)} ungrouped in batch "
-                        f"(out of {len(response.data)} total)"
-                    )
-
-                    parsed_batch = []
-                    for emb in batch_ungrouped:
-                        emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
-                        if emb["embedding_vector"] is not None:
-                            parsed_batch.append(emb)
-
-                    batch_index = 0
-                    while batch_index < len(parsed_batch):
-                        if limit is not None and yielded >= limit:
-                            logger.info(f"Reached limit of {limit} ungrouped embeddings")
-                            return
-
-                        remaining = (
-                            limit - yielded if limit is not None else batch_size
-                        )
-                        current_size = min(batch_size, remaining)
-                        chunk = parsed_batch[batch_index: batch_index + current_size]
-
-                        if not chunk:
-                            break
-
-                        yield chunk
-                        yielded += len(chunk)
-                        batch_index += current_size
-
-                    # Stop if we have enough ungrouped embeddings
-                    if limit is not None and yielded >= limit:
-                        logger.info(f"Reached limit of {limit} ungrouped embeddings")
-                        return
-
-                    # Stop if we got less than a full page
-                    if len(response.data) < fetch_batch_size:
-                        logger.info("Partial page received, stopping")
-                        break
-
-                    batches_checked += 1
-                    offset += fetch_batch_size
-
-                except Exception as batch_error:
-                    logger.error(f"Error fetching batch at offset {offset}: {batch_error}")
-                    # If we hit a timeout, return what we have so far
-                    if "timeout" in str(batch_error).lower():
-                        logger.warning(
-                            f"Timeout at offset {offset}, returning {yielded} ungrouped embeddings"
-                        )
-                        return
-                    raise
-
-            if batches_checked >= max_batches_to_check:
-                logger.warning(
-                    f"Checked {max_batches_to_check} batches, "
-                    f"yielded {yielded} ungrouped embeddings"
-                )
-
-            logger.info(
-                f"Completed: yielded {yielded} ungrouped embeddings with valid vectors"
-            )
-
-            return
-
-        except Exception as e:
-            logger.error(f"Error fetching ungrouped embeddings: {e}")
-            raise
 
     def fetch_all_embeddings(
-        self, 
+        self,
         limit: Optional[int] = None
     ) -> List[Dict]:
         """
-        Fetch all story embeddings regardless of grouping status.
+        Fetch all fact embeddings regardless of grouping status.
         Only fetches embeddings from the last N days (configured via days_lookback).
         
         Args:
             limit: Optional maximum number of embeddings to fetch
             
         Returns:
-            List of dicts with keys: id, news_url_id, embedding_vector, created_at
+            List of dicts with keys: id, news_url_id, news_fact_id, embedding_vector,
+            created_at
         """
-        logger.info("Fetching all story embeddings...")
+        logger.info("Fetching all fact embeddings...")
         
         try:
             cutoff_date = self._get_cutoff_date()
-            logger.info(f"Filtering stories created after {cutoff_date} ({self.days_lookback} days)")
+            logger.info(
+                f"Filtering facts created after {cutoff_date} ({self.days_lookback} days)"
+            )
             
             embeddings: List[Dict] = []
 
@@ -377,7 +257,7 @@ class EmbeddingReader:
             ):
                 embeddings.extend(batch)
 
-            logger.info(f"Fetched {len(embeddings)} total embeddings")
+            logger.info(f"Fetched {len(embeddings)} total fact embeddings")
 
             return embeddings
             
@@ -390,67 +270,54 @@ class EmbeddingReader:
         news_url_ids: List[str]
     ) -> List[Dict]:
         """
-        Fetch embeddings for specific news URLs.
+        Fetch fact embeddings for specific news URLs.
         
         Args:
             news_url_ids: List of news URL IDs to fetch
             
         Returns:
-            List of dicts with keys: id, news_url_id, embedding_vector, created_at
+            List of dicts with keys: id, news_fact_id, news_url_id,
+            embedding_vector, created_at
         """
         if not news_url_ids:
             return []
-        
-        logger.debug(f"Fetching embeddings for {len(news_url_ids)} news URLs")
-        
+
+        logger.debug(f"Fetching fact embeddings for {len(news_url_ids)} news URLs")
+
         try:
-            response = self.client.table("story_embeddings").select(
-                "id, news_url_id, embedding_vector, created_at"
-            ).in_("news_url_id", news_url_ids).execute()
-            
-            embeddings = response.data
-            
-            # Parse vector format for each embedding
-            for emb in embeddings:
-                emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
-            
-            return embeddings
-            
+            return self.fetch_embeddings_by_news_url_ids(news_url_ids)
         except Exception as e:
             logger.error(f"Error fetching embeddings by news URL IDs: {e}")
             raise
 
     def get_embedding_stats(self) -> Dict:
         """
-        Get statistics about story embeddings.
-        
+        Get statistics about fact embeddings used for grouping.
+
         Returns:
-            Dict with keys: total_embeddings, embeddings_with_vectors, 
+            Dict with keys: total_embeddings, embeddings_with_vectors,
             grouped_count, ungrouped_count
         """
         logger.info("Fetching embedding statistics...")
-        
+
         try:
-            # Total embeddings
-            total_response = self.client.table("story_embeddings").select(
+            total_response = self.client.table("facts_embeddings").select(
                 "id", count="exact"
             ).execute()
             total_count = total_response.count or 0
-            
-            # Embeddings with vectors
-            vector_response = self.client.table("story_embeddings").select(
+
+            vector_response = self.client.table("facts_embeddings").select(
                 "id", count="exact"
             ).not_.is_("embedding_vector", "null").execute()
             vector_count = vector_response.count or 0
-            
-            # Grouped embeddings
+
             grouped_response = self.client.table("story_group_members").select(
-                "news_url_id", count="exact"
-            ).execute()
+                "news_fact_id", count="exact"
+            ).not_.is_("news_fact_id", "null").execute()
             grouped_count = grouped_response.count or 0
-            
+
             ungrouped_count = vector_count - grouped_count
-            
+
             stats = {
                 "total_embeddings": total_count,
                 "embeddings_with_vectors": vector_count,
@@ -492,109 +359,43 @@ class EmbeddingReader:
         limit: Optional[int],
         batch_size: int,
     ):
-        logger.info("Streaming ungrouped story embeddings from database...")
+        logger.info("Streaming ungrouped fact embeddings from database...")
 
-        page_size = max(batch_size, 1000)
+        page_size = max(batch_size, 500)
         offset = 0
         yielded = 0
         cutoff_date = self._get_cutoff_date()
+        grouped_fact_ids = self._get_grouped_fact_ids()
 
         while True:
-            try:
-                logger.info(
-                    f"Fetching ungrouped embeddings at offset {offset} (page size {page_size})..."
+            logger.info(
+                "Fetching ungrouped fact embeddings at offset %s (page size %s)...",
+                offset,
+                page_size,
+            )
+
+            response = (
+                self.client.table("facts_embeddings")
+                .select(
+                    "id, news_fact_id, embedding_vector, created_at, news_facts!inner(news_url_id, created_at)"
                 )
-                # Use the proper database function instead of exec_sql
-                response = self.client.rpc(
-                    'get_ungrouped_embeddings',
-                    {
-                        'p_limit': page_size,
-                        'p_offset': offset,
-                        'p_cutoff_date': cutoff_date
-                    }
-                ).execute()
-
-                if not response.data:
-                    break
-
-                parsed_batch = []
-                for emb in response.data:
-                    emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
-                    if emb["embedding_vector"] is not None:
-                        parsed_batch.append(emb)
-
-                batch_index = 0
-                while batch_index < len(parsed_batch):
-                    if limit is not None and yielded >= limit:
-                        return
-
-                    remaining = limit - yielded if limit is not None else batch_size
-                    current_size = min(batch_size, remaining)
-                    chunk = parsed_batch[batch_index: batch_index + current_size]
-
-                    if not chunk:
-                        break
-
-                    yield chunk
-                    yielded += len(chunk)
-                    batch_index += current_size
-
-                if limit is not None and yielded >= limit:
-                    return
-
-                if len(response.data) < page_size:
-                    break
-
-                offset += page_size
-
-            except Exception as batch_error:
-                logger.error(
-                    f"Error fetching batch at offset {offset}: {batch_error}"
-                )
-                if "get_ungrouped_embeddings" in str(batch_error).lower() or "pgrst" in str(batch_error).lower():
-                    logger.warning(
-                        "Database function not available, falling back to fetch-all-and-filter approach"
-                    )
-                    yield from self._iter_ungrouped_fallback_batches(
-                        limit=limit,
-                        batch_size=batch_size,
-                    )
-                    return
-                raise
-
-        logger.info(f"Yielded {yielded} ungrouped embeddings")
-
-    def _iter_all_embedding_batches(
-        self,
-        limit: Optional[int],
-        batch_size: int,
-    ):
-        logger.info("Streaming all story embeddings from database...")
-
-        cutoff_date = self._get_cutoff_date()
-        page_size = max(batch_size, 1000)
-        offset = 0
-        yielded = 0
-
-        while True:
-            query = self.client.table("story_embeddings").select(
-                "id, news_url_id, embedding_vector, created_at"
-            ).not_.is_("embedding_vector", "null").gte(
-                "created_at", cutoff_date
-            ).order(
-                "created_at", desc=False
-            ).range(offset, offset + page_size - 1)
-
-            response = query.execute()
+                .gte("created_at", cutoff_date)
+                .order("created_at", desc=True)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
 
             if not response.data:
                 break
 
             parsed_batch = []
-            for emb in response.data:
-                emb["embedding_vector"] = parse_vector(emb["embedding_vector"])
-                if emb["embedding_vector"] is not None:
-                    parsed_batch.append(emb)
+            for record in response.data:
+                if record.get("news_fact_id") in grouped_fact_ids:
+                    continue
+
+                normalized = self._normalize_fact_embedding(record)
+                if normalized:
+                    parsed_batch.append(normalized)
 
             batch_index = 0
             while batch_index < len(parsed_batch):
@@ -620,4 +421,63 @@ class EmbeddingReader:
 
             offset += page_size
 
-        logger.info(f"Yielded {yielded} total embeddings")
+        logger.info(f"Yielded {yielded} ungrouped fact embeddings")
+
+    def _iter_all_embedding_batches(
+        self,
+        limit: Optional[int],
+        batch_size: int,
+    ):
+        logger.info("Streaming all fact embeddings from database...")
+
+        cutoff_date = self._get_cutoff_date()
+        page_size = max(batch_size, 500)
+        offset = 0
+        yielded = 0
+
+        while True:
+            response = (
+                self.client.table("facts_embeddings")
+                .select(
+                    "id, news_fact_id, embedding_vector, created_at, news_facts!inner(news_url_id, created_at)"
+                )
+                .gte("created_at", cutoff_date)
+                .order("created_at", desc=False)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+
+            if not response.data:
+                break
+
+            parsed_batch = []
+            for record in response.data:
+                normalized = self._normalize_fact_embedding(record)
+                if normalized:
+                    parsed_batch.append(normalized)
+
+            batch_index = 0
+            while batch_index < len(parsed_batch):
+                if limit is not None and yielded >= limit:
+                    return
+
+                remaining = limit - yielded if limit is not None else batch_size
+                current_size = min(batch_size, remaining)
+                chunk = parsed_batch[batch_index: batch_index + current_size]
+
+                if not chunk:
+                    break
+
+                yield chunk
+                yielded += len(chunk)
+                batch_index += current_size
+
+            if limit is not None and yielded >= limit:
+                return
+
+            if len(response.data) < page_size:
+                break
+
+            offset += page_size
+
+        logger.info(f"Yielded {yielded} total fact embeddings")
