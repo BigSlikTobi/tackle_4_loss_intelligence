@@ -1,24 +1,24 @@
 # Story Grouping Module
 
-**Clusters similar NFL news stories** based on embedding vectors using cosine similarity and centroid-based clustering.
+**Clusters similar NFL news stories** based on fact-level embedding vectors using cosine similarity and centroid-based clustering.
 
 ---
 
 ## Overview
 
-**What it does:** Identifies similar news content and groups related stories together based on their embedding vectors.
+**What it does:** Identifies similar news content and groups related stories together based on their fact embeddings, allowing a single story to participate in multiple thematic clusters.
 
 **Status:** ✅ Production Ready
 
 **Key Features:**
 - Cosine similarity-based clustering (default threshold: 0.8)
-- Dynamic centroid calculation (stories can join existing groups)
+- Dynamic centroid calculation using per-fact vectors (stories can join multiple groups)
 - Batch processing with pagination support
 - Dry-run mode for testing
 - Progress tracking and comprehensive logging
 
 **Prerequisites:**
-- ✅ Story embeddings generated (see `story_embeddings` module)
+- ✅ Fact embeddings generated in `facts_embeddings` (see `content_summarization` + `story_embeddings` modules)
 - ✅ Supabase database configured
 - ✅ Python 3.10+
 
@@ -62,7 +62,7 @@ python scripts/group_stories_cli.py --progress
 # Test with dry run
 python scripts/group_stories_cli.py --dry-run --limit 10
 
-# Process all ungrouped stories
+# Process all ungrouped fact embeddings
 python scripts/group_stories_cli.py
 
 # With custom threshold
@@ -75,24 +75,24 @@ python scripts/group_stories_cli.py --threshold 0.85 --verbose
 
 ### Algorithm Overview
 
-1. **Load Embeddings**: Fetch story embeddings from `story_embeddings` table (with pagination)
+1. **Load Embeddings**: Fetch fact embeddings from `facts_embeddings` joined with `news_facts`/`news_urls` (with pagination)
 2. **Load Existing Groups**: Fetch current groups and their centroids from `story_groups` (with pagination)
-3. **Similarity Check**: For each story:
+3. **Similarity Check**: For each fact:
    - Calculate cosine similarity with all existing group centroids
    - If similarity ≥ threshold, assign to most similar group
    - Otherwise, create a new group
-4. **Update Centroids**: Recalculate centroid for groups with new members
-5. **Write Results**: Save groups and memberships to database
+4. **Update Centroids**: Recalculate centroid for groups with new members (centroids represent fact vectors)
+5. **Write Results**: Save groups and memberships to database (memberships now include `news_fact_id` so stories can land in multiple groups)
 
 ### Data Flow
 
 ```
 ┌──────────────┐         ┌──────────────────┐         ┌──────────────┐
-│story_        │         │                  │         │story_        │
+│facts_        │         │                  │         │story_        │
 │embeddings    │────────▶│  StoryGrouper    │────────▶│groups        │
-│              │         │  (core logic)    │         │              │
-│- embedding   │         │                  │         │- centroid    │
-│  _vector     │         │  - similarity    │         │- member_count│
+│+ news_url_id │         │  (core logic)    │         │              │
+│+ news_fact_id│         │                  │         │- centroid    │
+│              │         │  - similarity    │         │- member_count│
 └──────────────┘         │  - clustering    │         └──────────────┘
                          │  - centroid calc │                │
 ┌──────────────┐         │                  │         ┌──────────────┐

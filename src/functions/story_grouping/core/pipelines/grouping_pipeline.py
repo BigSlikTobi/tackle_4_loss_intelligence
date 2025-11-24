@@ -188,6 +188,7 @@ class GroupingPipeline:
                         {
                             "group_id": group.group_id,
                             "news_url_id": member["news_url_id"],
+                            "news_fact_id": member.get("news_fact_id"),
                             "similarity_score": member.get("similarity", 1.0),
                         }
                         for member in pending_members

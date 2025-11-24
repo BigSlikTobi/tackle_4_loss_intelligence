@@ -508,14 +508,16 @@ class GroupMemberWriter:
         group_id: str,
         news_url_id: str,
         similarity_score: float,
+        news_fact_id: Optional[str] = None,
     ) -> Optional[str]:
         """
-        Add a story to a group.
+        Add a story fact to a group.
         
         Args:
             group_id: ID of the group
             news_url_id: ID of the news URL
             similarity_score: Similarity score with group centroid
+            news_fact_id: ID of the news fact used for grouping (optional)
             
         Returns:
             Membership ID if created, None if dry_run
@@ -534,6 +536,7 @@ class GroupMemberWriter:
                 "id": member_id,
                 "group_id": group_id,
                 "news_url_id": news_url_id,
+                "news_fact_id": news_fact_id,
                 "similarity_score": similarity_score,
                 "added_at": datetime.utcnow().isoformat(),
             }
@@ -559,11 +562,11 @@ class GroupMemberWriter:
         memberships: List[Dict[str, any]],
     ) -> int:
         """
-        Add multiple stories to groups in a batch.
+        Add multiple story facts to groups in a batch.
         
         Args:
-            memberships: List of dicts with keys: group_id, news_url_id, 
-                        similarity_score
+            memberships: List of dicts with keys: group_id, news_url_id,
+                        similarity_score, and optional news_fact_id
             
         Returns:
             Number of memberships created
@@ -585,6 +588,7 @@ class GroupMemberWriter:
                     "id": str(uuid.uuid4()),
                     "group_id": m["group_id"],
                     "news_url_id": m["news_url_id"],
+                    "news_fact_id": m.get("news_fact_id"),
                     "similarity_score": m["similarity_score"],
                     "added_at": now,
                 }
