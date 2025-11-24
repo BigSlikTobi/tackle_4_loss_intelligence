@@ -65,7 +65,7 @@ COMMENT ON COLUMN story_groups.status IS
 -- =============================================================================
 -- story_group_members
 -- =============================================================================
--- Maps news URLs to story groups with similarity scores.
+-- Maps news facts to story groups with similarity scores.
 -- This is now fact-driven: multiple facts from the same story can map to
 -- different groups (or enrich the same group).
 
