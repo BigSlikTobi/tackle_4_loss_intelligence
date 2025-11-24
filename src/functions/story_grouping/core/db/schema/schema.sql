@@ -93,6 +93,23 @@ CREATE TABLE IF NOT EXISTS story_group_members (
     CONSTRAINT story_group_members_unique UNIQUE (group_id, news_fact_id)
 );
 
+-- Backfill column for legacy deployments where news_fact_id was missing
+ALTER TABLE story_group_members
+    ADD COLUMN IF NOT EXISTS news_fact_id UUID REFERENCES news_facts(id) ON DELETE CASCADE;
+
+-- Ensure the unique constraint exists when migrating older schemas
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname = 'story_group_members_unique'
+    ) THEN
+        ALTER TABLE story_group_members
+            ADD CONSTRAINT story_group_members_unique UNIQUE (group_id, news_fact_id);
+    END IF;
+END;
+$$;
+
 -- Add index on group_id for efficient member lookups
 CREATE INDEX IF NOT EXISTS idx_story_group_members_group_id 
 ON story_group_members(group_id);
