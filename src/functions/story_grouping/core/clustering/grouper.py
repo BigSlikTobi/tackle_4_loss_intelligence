@@ -305,7 +305,9 @@ class StoryGrouper:
                     previous_member_count=group.member_count,
                 )
 
-            if news_url_id in group.get_member_news_url_ids():
+            # Allow multiple facts from the same article; only skip duplicates
+            # when the incoming story has no fact id and the URL is already pending.
+            if news_fact_id is None and news_url_id in group.get_member_news_url_ids():
                 logger.debug(
                     "Story %s already pending in group %s, skipping duplicate",
                     news_url_id,
