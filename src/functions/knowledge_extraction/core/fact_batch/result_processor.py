@@ -29,6 +29,10 @@ class FactBatchResult:
     facts_processed: int = 0
     topics_written: int = 0
     entities_written: int = 0
+    facts_in_output: int = 0
+    facts_skipped_missing: int = 0
+    facts_skipped_existing: int = 0
+    facts_skipped_no_data: int = 0
     errors: List[str] = None
     missing_fact_ids: List[str] = None
 
@@ -121,11 +125,14 @@ class FactBatchResultProcessor:
                 if not fact_ids:
                     continue
 
+                result.facts_in_output += len(fact_ids)
+
                 # Filter out fact_ids that don't exist to avoid FK errors
                 existing_fact_ids = set(self.reader.filter_existing_fact_ids(fact_ids))
                 missing_ids = set(fact_ids) - existing_fact_ids
                 if missing_ids:
                     result.missing_fact_ids.extend(sorted(missing_ids))
+                    result.facts_skipped_missing += len(missing_ids)
                 if not existing_fact_ids:
                     logger.warning("No existing fact ids found in batch chunk for %s", custom_id)
                     continue
@@ -135,6 +142,8 @@ class FactBatchResultProcessor:
                         existing_ids = set(self.reader.get_existing_topic_fact_ids(existing_fact_ids))
                     else:
                         existing_ids = set(self.reader.get_existing_entity_fact_ids(existing_fact_ids))
+                    if existing_ids:
+                        result.facts_skipped_existing += len(existing_ids)
                 else:
                     existing_ids = set()
 
@@ -144,7 +153,7 @@ class FactBatchResultProcessor:
                         logger.warning("Skipping row without news_fact_id in %s", custom_id)
                         continue
                     if fact_id not in existing_fact_ids:
-                        logger.warning("Skipping row for missing fact_id %s", fact_id)
+                        # Already counted in facts_skipped_missing
                         continue
                     if fact_id in existing_ids:
                         logger.debug("Skipping existing %s row for fact %s", task, fact_id)
@@ -157,6 +166,15 @@ class FactBatchResultProcessor:
                                 {"news_fact_id": fact_id, "topics": topics, "llm_model": model}
                             )
                             facts_with_writes.add(fact_id)
+                        else:
+                            # Mark fact as processed with no topics found
+                            pending_topics.append({
+                                "news_fact_id": fact_id,
+                                "topics": [ExtractedTopic(topic="NO_TOPICS_FOUND", confidence=1.0, rank=1)],
+                                "llm_model": model
+                            })
+                            facts_with_writes.add(fact_id)
+                            result.facts_skipped_no_data += 1
                     else:
                         entities = self._parse_entities(row)
                         resolved = self._resolve_entities(entities)
@@ -165,6 +183,23 @@ class FactBatchResultProcessor:
                                 {"news_fact_id": fact_id, "entities": resolved, "llm_model": model}
                             )
                             facts_with_writes.add(fact_id)
+                        else:
+                            # Mark fact as processed with no entities found
+                            # This creates a marker record so the fact won't be reprocessed
+                            no_entity_marker = ResolvedEntity(
+                                entity_type="none",
+                                entity_id="NO_ENTITIES_FOUND",
+                                mention_text="[no entities extracted]",
+                                matched_name="[no entities extracted]",
+                                confidence=0.0,  # Zero confidence indicates marker
+                            )
+                            pending_entities.append({
+                                "news_fact_id": fact_id,
+                                "entities": [no_entity_marker],
+                                "llm_model": model
+                            })
+                            facts_with_writes.add(fact_id)
+                            result.facts_skipped_no_data += 1
 
         # Bulk writes
         if pending_topics:
@@ -322,8 +357,45 @@ class FactBatchResultProcessor:
         return entities
 
     def _resolve_entities(self, extracted_entities: List[ExtractedEntity]) -> List[ResolvedEntity]:
+        # Mentions to reject (not NFL-related or too generic)
+        REJECTED_MENTIONS = {
+            "nfl", "league", "football", "sports", "espn", "fox", "cbs", "nbc",
+            "museum", "hall of fame", "super bowl",  # Generic terms
+        }
+        
+        # Non-NFL team patterns (colleges, other sports leagues)
+        NON_NFL_PATTERNS = [
+            "tech", "college", "university", "state", "tigers", "blue jays",
+            "yankees", "red sox", "dodgers", "cubs", "mets", "braves",  # MLB
+            "lakers", "celtics", "warriors", "heat", "knicks", "bulls",  # NBA
+            "bruins", "penguins", "blackhawks", "rangers", "maple leafs",  # NHL
+            "barcelona", "madrid", "manchester", "liverpool", "arsenal",  # Soccer
+            "motors", "racing", "nascar",  # Racing
+            "notre dame", "alabama", "ohio state", "michigan", "clemson",  # College
+            "georgia", "lsu", "texas", "oklahoma", "usc", "oregon",  # More college
+            "syracuse", "boston college", "miami hurricanes", "florida state",
+        ]
+        
         resolved: List[ResolvedEntity] = []
         for entity in extracted_entities:
+            mention_lower = entity.mention_text.lower().strip()
+            
+            # Skip rejected mentions
+            if mention_lower in REJECTED_MENTIONS:
+                logger.debug("Skipping rejected mention: %s", entity.mention_text)
+                continue
+            
+            # Skip non-NFL patterns for team entities
+            if entity.entity_type == "team":
+                skip = False
+                for pattern in NON_NFL_PATTERNS:
+                    if pattern in mention_lower:
+                        logger.debug("Skipping non-NFL team pattern '%s': %s", pattern, entity.mention_text)
+                        skip = True
+                        break
+                if skip:
+                    continue
+            
             try:
                 resolved_entity = None
                 if entity.entity_type == "player":
@@ -334,6 +406,20 @@ class FactBatchResultProcessor:
                         team_abbr=entity.team_abbr,
                         team_name=entity.team_name,
                     )
+                    # If player not found in DB, create an unresolved entity
+                    # This allows storing mentions of retired players, etc.
+                    if not resolved_entity:
+                        # Use normalized mention as pseudo-ID
+                        pseudo_id = f"UNRESOLVED:{mention_lower.replace(' ', '_')}"
+                        resolved_entity = ResolvedEntity(
+                            entity_type="player",
+                            entity_id=pseudo_id,
+                            mention_text=entity.mention_text,
+                            matched_name=entity.mention_text,  # No canonical match
+                            confidence=0.0,  # Zero confidence = unresolved
+                        )
+                        logger.debug("Created unresolved player entity: %s -> %s", entity.mention_text, pseudo_id)
+                        
                 elif entity.entity_type == "team":
                     resolved_entity = self.resolver.resolve_team(
                         entity.mention_text,

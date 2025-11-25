@@ -51,6 +51,7 @@ htmlcov/
 # Batch files
 src/functions/knowledge_extraction/batch_files
 src/functions/knowledge_extraction/scripts/batch_files
+src/batch_files/
 
 #node_modules
 node_modules/
