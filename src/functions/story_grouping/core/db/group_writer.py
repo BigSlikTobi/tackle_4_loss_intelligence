@@ -630,6 +630,70 @@ class GroupMemberWriter:
             logger.error(f"Error fetching group members: {e}")
             raise
 
+    def iter_members_by_group(
+        self,
+        group_id: str,
+        page_size: int = 1000,
+    ):
+        """
+        Stream members of a group in pages to avoid large responses.
+        """
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
+
+        offset = 0
+        while True:
+            response = (
+                self.client.table("story_group_members")
+                .select("*")
+                .eq("group_id", group_id)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+
+            if not response.data:
+                break
+
+            for row in response.data:
+                yield row
+
+            if len(response.data) < page_size:
+                break
+
+            offset += page_size
+
+    def delete_members_by_group(self, group_id: str) -> int:
+        """
+        Delete all memberships for a given group.
+        
+        Returns:
+            Number of memberships deleted (0 in dry-run)
+        """
+        if self.dry_run:
+            response = (
+                self.client.table("story_group_members")
+                .select("id", count="exact")
+                .eq("group_id", group_id)
+                .execute()
+            )
+            count = response.count or 0
+            logger.info("[DRY RUN] Would delete %s memberships from group %s", count, group_id)
+            return count
+
+        try:
+            response = (
+                self.client.table("story_group_members")
+                .delete()
+                .eq("group_id", group_id)
+                .execute()
+            )
+            deleted = len(response.data) if response.data else 0
+            logger.info("Deleted %s memberships from group %s", deleted, group_id)
+            return deleted
+        except Exception as e:
+            logger.error("Error deleting memberships for group %s: %s", group_id, e)
+            raise
+
     def clear_all_memberships(self) -> int:
         """
         Delete all group memberships (for regrouping).

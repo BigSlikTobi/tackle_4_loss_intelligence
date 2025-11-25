@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime
 from typing import Dict, List
@@ -52,7 +53,29 @@ def main():
         type=int,
         help="Maximum number of stories to process",
     )
-    
+
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Batch size for grouping/writes (default: env GROUPING_BATCH_SIZE or 200)",
+    )
+
+    parser.add_argument(
+        "--max-run-size",
+        type=int,
+        default=int(os.getenv("GROUPING_MAX_RUN_SIZE", "10000")),
+        help=(
+            "Safety cap for number of embeddings to process when not forced "
+            "(default: env GROUPING_MAX_RUN_SIZE or 10000)"
+        ),
+    )
+
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass safety cap and process all requested embeddings",
+    )
+
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -130,7 +153,49 @@ def main():
             member_writer=member_writer,
             similarity_threshold=args.threshold,
             continue_on_error=True,
+            batch_size=args.batch_size,
         )
+        effective_limit = args.limit
+
+        if not preview_ids and not args.progress:
+            try:
+                embedding_stats = embedding_reader.get_embedding_stats()
+                available = (
+                    embedding_stats["embeddings_with_vectors"]
+                    if args.regroup
+                    else embedding_stats["ungrouped_count"]
+                )
+                planned = effective_limit if effective_limit is not None else available
+
+                if planned > args.max_run_size and not args.force:
+                    if effective_limit is None:
+                        effective_limit = args.max_run_size
+                        logger.warning(
+                            "Capping run to %s embeddings to avoid overloading Supabase "
+                            "(available: %s). Use --limit for a smaller slice or "
+                            "--force to process everything.",
+                            args.max_run_size,
+                            available,
+                        )
+                    else:
+                        logger.error(
+                            "Requested limit %s exceeds safety cap %s. "
+                            "Lower the limit or pass --force to override.",
+                            planned,
+                            args.max_run_size,
+                        )
+                        sys.exit(1)
+                elif planned > args.max_run_size and args.force:
+                    logger.warning(
+                        "Force enabled: proceeding with %s embeddings (safety cap %s).",
+                        planned,
+                        args.max_run_size,
+                    )
+            except Exception as stats_error:
+                logger.warning(
+                    "Could not fetch embedding counts for safety guard: %s",
+                    stats_error,
+                )
 
         if preview_ids:
             logger.info("Running preview mode for %s news_url_ids", len(preview_ids))
@@ -251,8 +316,11 @@ def main():
         logger.info(f"  Similarity threshold: {pipeline.similarity_threshold}")
         logger.info(f"  Dry run:              {args.dry_run}")
         logger.info(f"  Regroup mode:         {args.regroup}")
-        if args.limit:
-            logger.info(f"  Limit:                {args.limit}")
+        logger.info(f"  Max run size:         {args.max_run_size}")
+        if effective_limit:
+            logger.info(f"  Limit:                {effective_limit}")
+        if args.batch_size:
+            logger.info(f"  Batch size:           {args.batch_size}")
         logger.info("")
         
         # Warning for regroup mode
@@ -271,7 +339,7 @@ def main():
         start_time = datetime.now()
         
         results = pipeline.run(
-            limit=args.limit,
+            limit=effective_limit,
             regroup=args.regroup,
         )
         

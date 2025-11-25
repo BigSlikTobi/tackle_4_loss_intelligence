@@ -54,6 +54,16 @@ def parse_args() -> argparse.Namespace:
         help="DB page size when streaming facts (lower to reduce DB timeouts)",
     )
     parser.add_argument(
+        "--skip-errors",
+        action="store_true",
+        help="Skip over fact pages that error even at minimum page size (best-effort mode)",
+    )
+    parser.add_argument(
+        "--include-completed-urls",
+        action="store_true",
+        help="Do not filter out URLs that already have knowledge_extracted_at set (useful for reprocessing)",
+    )
+    parser.add_argument(
         "--model",
         default="gpt-4.1-nano-2025-04-14",
         help="OpenAI model to use for knowledge extraction",
@@ -169,6 +179,8 @@ def main() -> None:
         chunk_size=args.chunk_size,
         output_dir=args.output_dir,
         page_size=args.page_size,
+        skip_errors=args.skip_errors,
+        pending_urls_only=not args.include_completed_urls,
     )
 
     if args.no_submit:
