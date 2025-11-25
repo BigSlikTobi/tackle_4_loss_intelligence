@@ -44,3 +44,65 @@ export interface NewsDetail extends NewsUrl {
         topics: NewsFactTopic[]
     })[]
 }
+
+export interface TeamNode {
+    team_abbr: string
+    team_name: string | null
+    conference: string | null
+    division: string | null
+    logo_url: string | null
+    primary_color: string | null
+    secondary_color: string | null
+}
+
+export interface PlayerProfile {
+    player_id: string
+    display_name: string
+    position: string | null
+    headshot?: string | null
+    latest_team?: string | null
+    jersey_number?: number | null
+    birth_date?: string | null
+    height?: number | null
+    weight?: number | null
+    draft_year?: number | null
+    draft_round?: number | null
+    draft_pick?: number | null
+    years_of_experience?: number | null
+    college_name?: string | null
+}
+
+export interface GameSummary {
+    game_id: string
+    season: number | null
+    game_type?: string | null
+    week: number | null
+    gameday?: string | null
+    gametime?: string | null
+    home_team: string | null
+    away_team: string | null
+    home_score?: number | null
+    away_score?: number | null
+    location?: string | null
+    stadium?: string | null
+    result?: number | null
+}
+
+export interface TeamTopic {
+    id: string
+    fact_text: string
+    news_url_id: string
+    publication_date: string | null
+    title: string | null
+    url: string | null
+    source_name: string | null
+}
+
+export interface KnowledgeGraphResponse {
+    generated_at: string
+    team_abbr: string | null
+    teams: TeamNode[]
+    players?: PlayerProfile[]
+    games?: GameSummary[]
+    topics?: TeamTopic[]
+}

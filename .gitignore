@@ -56,11 +56,13 @@ src/functions/knowledge_extraction/scripts/batch_files
 node_modules/
 functions/node_modules/
 
-#package-lock.json and package.json 
+#package-lock.json and package.json
 functions/package-lock.json
 functions/package.json
 package-lock.json
 package.json
+!src/apps/backoffice/package.json
+!src/apps/backoffice/package-lock.json
 
 # archived docs and files
 docs/game-analysis-package/archive
@@ -75,8 +77,10 @@ docs/game-analysis-package/archive
 src/functions/knowledge_extraction/scripts/test_content
 src/functions/article_validation/test_output
 
-# databse files 
-supabase
+# databse files
+supabase/*
+!supabase/functions/
+!supabase/functions/**
 
 # json checkpoint files
 src/functions/content_summarization/.backlog_checkpoint.json
