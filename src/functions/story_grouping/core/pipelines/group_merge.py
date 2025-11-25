@@ -200,7 +200,7 @@ class GroupMergeService:
         """
         logger.info(
             "Merging %s source groups into target %s",
-            len(list(source_group_ids)),
+            len(source_group_ids),
             target_group_id,
         )
 
