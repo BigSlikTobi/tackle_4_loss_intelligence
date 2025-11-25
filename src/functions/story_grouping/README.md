@@ -196,10 +196,40 @@ python scripts/group_stories_cli.py [OPTIONS]
 |--------|-------------|
 | `--dry-run` | Preview changes without writing to database |
 | `--limit N` | Process only N stories |
+| `--batch-size N` | Override grouping batch size (default: env `GROUPING_BATCH_SIZE` or 200) |
+| `--max-run-size N` | Safety cap on embeddings processed when not forced (default: env `GROUPING_MAX_RUN_SIZE` or 10,000) |
+| `--force` | Bypass the safety cap to process all requested embeddings |
 | `--verbose` | Enable DEBUG logging |
 | `--progress` | Show statistics and exit (no processing) |
 | `--threshold FLOAT` | Override similarity threshold (0.0-1.0) |
 | `--regroup` | Clear existing groups and regroup all stories |
+
+The CLI now guards against accidental full-database runs. If the planned workload
+exceeds `--max-run-size`, it will cap the run or abort unless you explicitly pass
+`--force`. Use `--limit` to process the backlog in smaller slices.
+
+### Merging near-duplicate groups
+
+If multiple grouping runs produced very similar groups, you can merge them by
+centroid similarity:
+
+```bash
+# Preview merges (no writes)
+python scripts/merge_story_groups_cli.py --dry-run --threshold 0.93 --days 14
+
+# Execute merges (moves memberships, archives merged groups)
+python scripts/merge_story_groups_cli.py --threshold 0.93 --days 14 --max-pairs 200
+```
+
+Key flags:
+- `--threshold`: centroid similarity required to merge (default: 0.92)
+- `--group-limit`: cap how many recent groups to analyze (helps keep memory + DB load predictable)
+- `--max-pairs`: limit the number of centroid pairs considered (sorted by similarity)
+- `--dry-run`: inspect the plan before writing
+
+The merger de-duplicates memberships (by `news_fact_id` or `news_url_id` when no
+fact id), moves remaining memberships to the primary group, and archives merged
+groups. Use a conservative threshold and inspect results in `--dry-run` first.
 
 ### Examples
 
