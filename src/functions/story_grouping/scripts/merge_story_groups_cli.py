@@ -69,14 +69,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if not 0.0 <= args.threshold <= 1.0:
-        logger.error("Threshold must be between 0.0 and 1.0")
-        sys.exit(1)
-
     load_env()
     log_level = "DEBUG" if args.verbose else "INFO"
     setup_logging(level=log_level)
 
+    if not 0.0 <= args.threshold <= 1.0:
+        logger.error("Threshold must be between 0.0 and 1.0")
+        sys.exit(1)
     group_writer = GroupWriter(dry_run=args.dry_run, days_lookback=args.days)
     member_writer = GroupMemberWriter(dry_run=args.dry_run)
 
