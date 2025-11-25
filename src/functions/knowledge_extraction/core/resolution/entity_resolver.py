@@ -40,12 +40,14 @@ class EntityResolver:
     Uses fuzzy matching and caching to efficiently match players, teams, and games.
     """
     
-    def __init__(self, confidence_threshold: float = 0.7):
+    def __init__(self, confidence_threshold: float = 0.6):
         """
         Initialize the entity resolver.
         
         Args:
             confidence_threshold: Minimum confidence score for matches (0.0-1.0)
+                                  Default is 0.6 (60%) to allow partial name matches
+                                  like "Washington" -> "Washington Commanders"
         """
         self.confidence_threshold = confidence_threshold
         self.client = get_supabase_client()
@@ -55,9 +57,46 @@ class EntityResolver:
         self._teams_cache: Optional[Dict[str, Dict]] = None
         self._games_cache: Optional[Dict[str, Dict]] = None
         
-        # Common team abbreviations and aliases
+        # Common team abbreviations and aliases - including city names
         self._team_aliases = {
-            # Full names to abbreviations
+            # City names to abbreviations
+            "arizona": "ARI",
+            "atlanta": "ATL",
+            "baltimore": "BAL",
+            "buffalo": "BUF",
+            "carolina": "CAR",
+            "chicago": "CHI",
+            "cincinnati": "CIN",
+            "cleveland": "CLE",
+            "dallas": "DAL",
+            "denver": "DEN",
+            "detroit": "DET",
+            "green bay": "GB",
+            "houston": "HOU",
+            "indianapolis": "IND",
+            "jacksonville": "JAX",
+            "kansas city": "KC",
+            "las vegas": "LV",
+            "los angeles rams": "LA",
+            "los angeles chargers": "LAC",
+            "los angeles": "LA",  # Default to Rams for ambiguous "Los Angeles"
+            "miami": "MIA",
+            "minnesota": "MIN",
+            "new england": "NE",
+            "new orleans": "NO",
+            "new york giants": "NYG",
+            "new york jets": "NYJ",
+            "new york": "NYG",  # Default to Giants for ambiguous "New York"
+            "philadelphia": "PHI",
+            "pittsburgh": "PIT",
+            "san francisco": "SF",
+            "seattle": "SEA",
+            "tampa bay": "TB",
+            "tampa": "TB",
+            "tennessee": "TEN",
+            "washington": "WAS",
+            
+            # Full team names
             "kansas city chiefs": "KC",
             "los angeles chargers": "LAC",
             "san francisco 49ers": "SF",
@@ -65,16 +104,80 @@ class EntityResolver:
             "green bay packers": "GB",
             "dallas cowboys": "DAL",
             "pittsburgh steelers": "PIT",
-            # Add more as needed...
+            "arizona cardinals": "ARI",
+            "atlanta falcons": "ATL",
+            "baltimore ravens": "BAL",
+            "buffalo bills": "BUF",
+            "carolina panthers": "CAR",
+            "chicago bears": "CHI",
+            "cincinnati bengals": "CIN",
+            "cleveland browns": "CLE",
+            "denver broncos": "DEN",
+            "detroit lions": "DET",
+            "houston texans": "HOU",
+            "indianapolis colts": "IND",
+            "jacksonville jaguars": "JAX",
+            "las vegas raiders": "LV",
+            "los angeles rams": "LA",
+            "miami dolphins": "MIA",
+            "minnesota vikings": "MIN",
+            "new orleans saints": "NO",
+            "new york giants": "NYG",
+            "new york jets": "NYJ",
+            "philadelphia eagles": "PHI",
+            "seattle seahawks": "SEA",
+            "tampa bay buccaneers": "TB",
+            "tennessee titans": "TEN",
+            "washington commanders": "WAS",
             
-            # Nicknames
+            # Nicknames only
+            "cardinals": "ARI",
+            "falcons": "ATL",
+            "ravens": "BAL",
+            "bills": "BUF",
+            "panthers": "CAR",
+            "bears": "CHI",
+            "bengals": "CIN",
+            "browns": "CLE",
+            "cowboys": "DAL",
+            "broncos": "DEN",
+            "lions": "DET",
+            "packers": "GB",
+            "texans": "HOU",
+            "colts": "IND",
+            "jaguars": "JAX",
+            "jags": "JAX",
+            "chiefs": "KC",
+            "raiders": "LV",
+            "rams": "LA",
+            "chargers": "LAC",
+            "dolphins": "MIA",
+            "vikings": "MIN",
+            "patriots": "NE",
+            "saints": "NO",
+            "giants": "NYG",
+            "jets": "NYJ",
+            "eagles": "PHI",
+            "steelers": "PIT",
+            "49ers": "SF",
+            "seahawks": "SEA",
+            "buccaneers": "TB",
+            "bucs": "TB",
+            "titans": "TEN",
+            "commanders": "WAS",
+            "redskins": "WAS",  # Former name, still referenced
+            
+            # Common nicknames/slang
             "niners": "SF",
             "pack": "GB",
             "pats": "NE",
             "hawks": "SEA",
-            "birds": "PHI",  # Could be multiple teams, handle with context
+            "birds": "PHI",
             "fins": "MIA",
             "bolts": "LAC",
+            "big blue": "NYG",
+            "america's team": "DAL",
+            "g-men": "NYG",
         }
         
         logger.info(f"Initialized EntityResolver with threshold={confidence_threshold}")
@@ -629,7 +732,7 @@ class EntityResolver:
             choices,
             scorer=fuzz.token_sort_ratio,
             processor=lambda x: x[1],  # Use normalized name for matching
-            score_cutoff=70,  # Minimum score
+            score_cutoff=int(self.confidence_threshold * 100),  # Use configurable threshold
         )
         
         if result:
@@ -679,7 +782,7 @@ class EntityResolver:
                 choices,
                 scorer=fuzz.token_sort_ratio,
                 processor=lambda x: x[1],
-                score_cutoff=70,
+                score_cutoff=int(self.confidence_threshold * 100),  # Use configurable threshold
             )
         except Exception as e:
             logger.debug(f"Fuzzy match failed for '{mention}': {e}")

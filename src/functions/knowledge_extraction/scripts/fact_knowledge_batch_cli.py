@@ -157,16 +157,26 @@ def main() -> None:
         print(f"Output: {summary['output_path']}")
         if summary.get("error_path"):
             print(f"Errors: {summary['error_path']}")
-        print(f"Facts processed: {summary['facts_processed']}")
-        print(f"Topics written: {summary['topics_written']}")
-        print(f"Entities written: {summary['entities_written']}")
+        
+        # Statistics summary
+        print("\n--- Processing Statistics ---")
+        print(f"Facts in output:        {summary.get('facts_in_output', 'N/A')}")
+        print(f"Facts processed:        {summary['facts_processed']}")
+        print(f"Facts skipped (missing): {summary.get('facts_skipped_missing', 0)}")
+        print(f"Facts skipped (existing): {summary.get('facts_skipped_existing', 0)}")
+        print(f"Facts skipped (no data): {summary.get('facts_skipped_no_data', 0)}")
+        print(f"Topics written:         {summary['topics_written']}")
+        print(f"Entities written:       {summary['entities_written']}")
+        
         missing = summary.get("missing_fact_ids") or []
         if missing:
-            print(f"Missing facts (not in DB): {len(missing)}")
-            for fact_id in missing:
+            print(f"\nMissing fact IDs (first 10 of {len(missing)}):")
+            for fact_id in missing[:10]:
                 print(f"  - {fact_id}")
+            if len(missing) > 10:
+                print(f"  ... and {len(missing) - 10} more")
         if summary.get("errors"):
-            print(f"Errors encountered: {len(summary['errors'])}")
+            print(f"\nErrors encountered: {len(summary['errors'])}")
         return
 
     # Creation flow
