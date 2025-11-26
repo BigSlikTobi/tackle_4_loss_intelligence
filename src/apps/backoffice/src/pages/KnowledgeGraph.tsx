@@ -1,31 +1,45 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import ForceGraph3D, { ForceGraphMethods } from 'react-force-graph-3d'
+import ForceGraph3D from 'react-force-graph-3d'
+import type { ForceGraphMethods } from 'react-force-graph-3d'
 import * as THREE from 'three'
 import { CalendarClock, Compass, Globe2, Loader2, Moon, Network, RefreshCcw, Sparkles, SunMedium, Users } from 'lucide-react'
 import { useKnowledgeGraph } from '../hooks/useKnowledgeGraph'
 import type { GameSummary, KnowledgeGraphResponse, PlayerProfile, TeamNode, TeamTopic } from '../types'
 
-const DIVISION_ANGLES: Record<string, number> = {
-  'AFC East': Math.PI * 0.2,
-  'AFC North': Math.PI * 0.4,
-  'AFC South': Math.PI * 0.6,
-  'AFC West': Math.PI * 0.8,
-  'NFC East': -Math.PI * 0.2,
-  'NFC North': -Math.PI * 0.4,
-  'NFC South': -Math.PI * 0.6,
-  'NFC West': -Math.PI * 0.8,
+// Supabase storage bucket base URL for logos
+const LOGO_BUCKET_URL = 'https://yqtiuzhedkfacwgormhn.supabase.co/storage/v1/object/public/team_logos'
+
+// Logo URLs for NFL and conferences
+const LEAGUE_LOGOS: Record<string, string> = {
+  'NFL': `${LOGO_BUCKET_URL}/nfl.png`,
+  'AFC': `${LOGO_BUCKET_URL}/afc.png`,
+  'NFC': `${LOGO_BUCKET_URL}/nfc.png`,
 }
 
-const DIVISION_LATITUDE: Record<string, number> = {
-  East: 55,
-  North: 20,
-  South: -10,
-  West: -45,
+const CONFERENCE_COLORS: Record<string, string> = {
+  'AFC': '#d50a0a',  // AFC Red
+  'NFC': '#013369',  // NFC Blue
+}
+
+const NFL_COLOR = '#013369' // NFL Blue
+
+// Positions for conferences (left/right of center)
+const CONFERENCE_POSITIONS: Record<string, { x: number; z: number }> = {
+  'NFC': { x: -80, z: 0 },
+  'AFC': { x: 80, z: 0 },
+}
+
+// Positions for divisions relative to their conference
+const DIVISION_OFFSETS: Record<string, { x: number; y: number; z: number }> = {
+  'East': { x: 60, y: 40, z: 0 },
+  'North': { x: 60, y: -40, z: 0 },
+  'South': { x: 30, y: 40, z: 50 },
+  'West': { x: 30, y: -40, z: 50 },
 }
 
 type GraphNode = {
   id: string
-  type: 'league' | 'division' | 'team'
+  type: 'league' | 'conference' | 'division' | 'team'
   label: string
   division?: string
   conference?: string
@@ -34,6 +48,9 @@ type GraphNode = {
   x?: number
   y?: number
   z?: number
+  fx?: number
+  fy?: number
+  fz?: number
   team?: TeamNode
 }
 
@@ -41,73 +58,95 @@ type GraphLink = { source: string; target: string }
 
 type GraphData = { nodes: GraphNode[]; links: GraphLink[] }
 
-const metallicMaterial = (color: string, theme: 'dark' | 'light') => new THREE.MeshStandardMaterial({
-  color,
-  metalness: 0.8,
-  roughness: theme === 'dark' ? 0.3 : 0.4,
-  emissive: theme === 'dark' ? new THREE.Color('#0a251a') : new THREE.Color('#9ac7b0'),
-})
-
 function buildGraphData(teams: TeamNode[]): GraphData {
   const nodes: GraphNode[] = [
-    { id: 'NFL', type: 'league', label: 'NFL', x: 0, y: 0, z: 0, color: '#22c55e' }
+    { id: 'NFL', type: 'league', label: 'NFL', fx: 0, fy: 0, fz: 0, color: '#22c55e' }
   ]
   const links: GraphLink[] = []
-  const grouped = new Map<string, TeamNode[]>()
-
+  
+  // Group teams by conference and division
+  const conferences = new Map<string, Map<string, TeamNode[]>>()
+  
   teams.forEach(team => {
-    const division = team.division || 'Unknown'
     const conference = team.conference || 'Unknown'
-    const key = `${conference} ${division}`
-    grouped.set(key, [...(grouped.get(key) || []), team])
+    const division = team.division || 'Unknown' // This is the full division name like "AFC East"
+    
+    if (!conferences.has(conference)) {
+      conferences.set(conference, new Map())
+    }
+    const divisionMap = conferences.get(conference)!
+    if (!divisionMap.has(division)) {
+      divisionMap.set(division, [])
+    }
+    divisionMap.get(division)!.push(team)
   })
 
-  const radius = 170
-
-  grouped.forEach((groupTeams, key) => {
-    const [conference, division] = key.split(' ')
-    const lat = DIVISION_LATITUDE[division as keyof typeof DIVISION_LATITUDE] ?? 0
-    const theta = DIVISION_ANGLES[key] ?? 0
-    const phi = (90 - lat) * (Math.PI / 180)
-
-    const divisionX = radius * Math.sin(phi) * Math.cos(theta)
-    const divisionY = radius * Math.cos(phi)
-    const divisionZ = radius * Math.sin(phi) * Math.sin(theta)
-
+  // Add conference nodes
+  conferences.forEach((divisions, conference) => {
+    const confPos = CONFERENCE_POSITIONS[conference] || { x: 0, z: 0 }
+    const confColor = CONFERENCE_COLORS[conference] || '#1c3529'
+    
     nodes.push({
-      id: key,
-      type: 'division',
-      label: key,
+      id: conference,
+      type: 'conference',
+      label: conference,
       conference,
-      division,
-      x: divisionX,
-      y: divisionY,
-      z: divisionZ,
-      color: '#1c3529',
+      fx: confPos.x,
+      fy: 0,
+      fz: confPos.z,
+      color: confColor,
     })
-    links.push({ source: 'NFL', target: key })
+    links.push({ source: 'NFL', target: conference })
 
-    const orbitRadius = 32
-    groupTeams.forEach((team, index) => {
-      const angle = (2 * Math.PI * index) / groupTeams.length
-      const x = divisionX + orbitRadius * Math.cos(angle)
-      const y = divisionY + orbitRadius * Math.sin(angle) * 0.25
-      const z = divisionZ + orbitRadius * Math.sin(angle)
-
+    // Add division nodes
+    divisions.forEach((divisionTeams, divisionFullName) => {
+      // Extract short division name (East, North, South, West) from full name
+      const divisionShort = divisionFullName.replace('AFC ', '').replace('NFC ', '')
+      const divOffset = DIVISION_OFFSETS[divisionShort] || { x: 50, y: 0, z: 0 }
+      
+      // Mirror x offset for NFC (left side)
+      const xMultiplier = conference === 'NFC' ? -1 : 1
+      
+      const divX = confPos.x + (divOffset.x * xMultiplier)
+      const divY = divOffset.y
+      const divZ = confPos.z + divOffset.z
+      
       nodes.push({
-        id: team.team_abbr,
-        type: 'team',
-        label: team.team_name || team.team_abbr,
+        id: divisionFullName,
+        type: 'division',
+        label: divisionShort,
         conference,
-        division,
-        logo_url: team.logo_url,
-        color: team.primary_color || '#22c55e',
-        x,
-        y,
-        z,
-        team,
+        division: divisionShort,
+        fx: divX,
+        fy: divY,
+        fz: divZ,
+        color: '#1c3529',
       })
-      links.push({ source: key, target: team.team_abbr })
+      links.push({ source: conference, target: divisionFullName })
+
+      // Add team nodes orbiting around the division
+      const orbitRadius = 25
+      divisionTeams.forEach((team, index) => {
+        const angle = (2 * Math.PI * index) / divisionTeams.length
+        const teamX = divX + orbitRadius * Math.cos(angle)
+        const teamY = divY + orbitRadius * Math.sin(angle) * 0.5
+        const teamZ = divZ + orbitRadius * Math.sin(angle) * 0.5
+
+        nodes.push({
+          id: team.team_abbr,
+          type: 'team',
+          label: team.team_name || team.team_abbr,
+          conference,
+          division: divisionShort,
+          logo_url: team.logo_url,
+          color: team.primary_color || '#22c55e',
+          fx: teamX,
+          fy: teamY,
+          fz: teamZ,
+          team,
+        })
+        links.push({ source: divisionFullName, target: team.team_abbr })
+      })
     })
   })
 
@@ -115,23 +154,96 @@ function buildGraphData(teams: TeamNode[]): GraphData {
 }
 
 function nodeRenderer(theme: 'dark' | 'light') {
-  const textureCache = new Map<string, THREE.Texture>()
-  const loader = new THREE.TextureLoader()
+  // Use a simple approach: colored spheres with text overlays rendered via CSS
+  // The 3D graph will show spheres, labels show on hover
+  
+  const createColoredSphere = (color: string, radius: number) => {
+    const geometry = new THREE.SphereGeometry(radius, 32, 32)
+    const material = new THREE.MeshLambertMaterial({
+      color: new THREE.Color(color),
+      transparent: false,
+    })
+    return new THREE.Mesh(geometry, material)
+  }
+
+  // Create a sprite with text/logo drawn on canvas
+  const createLabelSprite = (text: string, bgColor: string, size: number, logoUrl?: string) => {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')!
+    canvas.width = 128
+    canvas.height = 128
+    
+    // Draw circular background
+    ctx.beginPath()
+    ctx.arc(64, 64, 60, 0, Math.PI * 2)
+    ctx.fillStyle = bgColor
+    ctx.fill()
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 3
+    ctx.stroke()
+    
+    // Draw text
+    ctx.fillStyle = '#ffffff'
+    ctx.font = 'bold 32px Arial'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(text, 64, 64)
+    
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.needsUpdate = true
+    
+    const spriteMaterial = new THREE.SpriteMaterial({ 
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    })
+    const sprite = new THREE.Sprite(spriteMaterial)
+    sprite.scale.set(size, size, 1)
+    
+    // If logo URL provided, load it and update the sprite
+    if (logoUrl) {
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.onload = () => {
+        // Clear and redraw with image
+        ctx.clearRect(0, 0, 128, 128)
+        ctx.drawImage(img, 4, 4, 120, 120)
+        texture.needsUpdate = true
+      }
+      img.onerror = () => {
+        console.warn('Failed to load logo:', logoUrl)
+      }
+      img.src = logoUrl
+    }
+    
+    return sprite
+  }
 
   return (node: GraphNode) => {
-    if (node.type === 'team' && node.logo_url) {
-      if (!textureCache.has(node.logo_url)) {
-        textureCache.set(node.logo_url, loader.load(node.logo_url))
-      }
-      const material = new THREE.SpriteMaterial({ map: textureCache.get(node.logo_url)!, depthWrite: false })
-      const sprite = new THREE.Sprite(material)
-      sprite.scale.set(18, 18, 1)
-      return sprite
+    // NFL node
+    if (node.type === 'league') {
+      return createLabelSprite('NFL', '#013369', 30, LEAGUE_LOGOS['NFL'])
     }
 
-    const geometry = new THREE.SphereGeometry(node.type === 'division' ? 9 : 11, 32, 32)
-    const material = metallicMaterial(node.color || '#1c3529', theme)
-    return new THREE.Mesh(geometry, material)
+    // Conference nodes
+    if (node.type === 'conference') {
+      const color = node.conference === 'AFC' ? '#d50a0a' : '#013369'
+      return createLabelSprite(node.label, color, 24, LEAGUE_LOGOS[node.label])
+    }
+
+    // Division nodes
+    if (node.type === 'division') {
+      return createLabelSprite(node.label.charAt(0), '#1c3529', 12)
+    }
+
+    // Team nodes
+    if (node.type === 'team') {
+      return createLabelSprite(node.id, node.color || '#22c55e', 16, node.logo_url || undefined)
+    }
+
+    // Default
+    return createColoredSphere('#1c3529', 4)
   }
 }
 
@@ -197,9 +309,11 @@ export default function KnowledgeGraph() {
             </h1>
             <p>Dark-green metallic sphere with 360° rotation and expandable team intelligence.</p>
             <div className="graph-legend">
-              <span className="legend-item"><span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }}></span> NFL Core</span>
+              <span className="legend-item"><span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }}></span> NFL</span>
+              <span className="legend-item"><span style={{ width: 10, height: 10, borderRadius: '50%', background: '#013369', display: 'inline-block' }}></span> NFC</span>
+              <span className="legend-item"><span style={{ width: 10, height: 10, borderRadius: '50%', background: '#d50a0a', display: 'inline-block' }}></span> AFC</span>
               <span className="legend-item"><span style={{ width: 10, height: 10, borderRadius: '50%', background: '#1c3529', display: 'inline-block' }}></span> Divisions</span>
-              <span className="legend-item"><Sparkles size={14} /> Team Logos on Orbit</span>
+              <span className="legend-item"><Sparkles size={14} /> Teams</span>
             </div>
           </div>
           <button className="theme-toggle" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
@@ -218,15 +332,30 @@ export default function KnowledgeGraph() {
               graphData={graphData}
               backgroundColor={theme === 'dark' ? '#050d0a' : '#f6fbf7'}
               nodeThreeObject={renderNode as any}
-              linkColor={() => theme === 'dark' ? '#2c5c46' : '#6bb28f'}
-              linkOpacity={0.7}
-              linkWidth={1}
+              nodeThreeObjectExtend={false}
+              linkColor={() => theme === 'dark' ? '#2c5c46' : '#4a7c5c'}
+              linkOpacity={0.8}
+              linkWidth={2}
               linkCurvature={0.15}
               showNavInfo={false}
               enableNodeDrag={false}
-              cooldownTicks={0}
-              nodeLabel={(node: GraphNode) => `${node.label}${node.division ? ` • ${node.division}` : ''}`}
+              warmupTicks={100}
+              cooldownTicks={100}
+              d3AlphaDecay={0.02}
+              d3VelocityDecay={0.3}
+              nodeLabel={(node: GraphNode) => {
+                if (node.type === 'league') return 'NFL'
+                if (node.type === 'conference') return `${node.conference} Conference`
+                if (node.type === 'division') return `${node.conference} ${node.division}`
+                return `${node.label}${node.conference ? ` • ${node.conference} ${node.division}` : ''}`
+              }}
               onNodeClick={handleNodeClick as any}
+              onEngineStop={() => {
+                // Zoom to fit after the graph settles
+                if (fgRef.current) {
+                  fgRef.current.zoomToFit(400, 50)
+                }
+              }}
             />
           )}
           <div className="graph-caption">Rotate freely, then click a team logo to expand players, games, and topics.</div>
@@ -241,6 +370,7 @@ export default function KnowledgeGraph() {
             <div className="chips">
               <span className="chip active"><Compass size={14} /> 32 teams</span>
               <span className="chip"><Globe2 size={14} /> 8 divisions</span>
+              <span className="chip"><Network size={14} /> 2 conferences</span>
             </div>
           </div>
 

@@ -128,9 +128,7 @@ function normaliseLogo(row: TeamRow): string | null {
 async function fetchTeams(): Promise<GraphResponse["teams"]> {
   const { data, error } = await supabase
     .from("teams")
-    .select(
-      "team_abbr,team_name,team_conference,team_division,logo_url,logo,team_logo,primary_color,secondary_color",
-    )
+    .select("team_abbr,team_name,team_conference,team_division,logo_url")
     .order("team_conference", { ascending: true })
     .order("team_division", { ascending: true })
     .order("team_abbr", { ascending: true });
@@ -145,9 +143,10 @@ async function fetchTeams(): Promise<GraphResponse["teams"]> {
     team_name: row.team_name,
     conference: row.team_conference,
     division: row.team_division,
-    logo_url: normaliseLogo(row),
-    primary_color: row.primary_color ?? null,
-    secondary_color: row.secondary_color ?? null,
+    // Use logo_url from database (Supabase storage bucket)
+    logo_url: row.logo_url || null,
+    primary_color: null,
+    secondary_color: null,
   }));
 }
 
@@ -204,49 +203,67 @@ async function fetchGames(teamAbbr: string): Promise<GameRow[]> {
 }
 
 async function fetchTopics(teamAbbr: string): Promise<GraphResponse["topics"]> {
-  const { data: factLinks, error: linkError } = await supabase
-    .from("news_fact_entities")
-    .select("news_fact_id")
-    .eq("entity_type", "team")
-    .eq("entity_id", teamAbbr);
+  try {
+    const { data: factLinks, error: linkError } = await supabase
+      .from("news_fact_entities")
+      .select("news_fact_id")
+      .eq("entity_type", "team")
+      .eq("entity_id", teamAbbr)
+      .limit(500);
 
-  if (linkError) {
-    console.error("Failed to fetch fact links", { teamAbbr, linkError });
-    throw new Error("Unable to fetch topics for the requested team.");
+    if (linkError) {
+      console.error("Failed to fetch fact links", { teamAbbr, linkError });
+      return []; // Return empty instead of throwing
+    }
+
+    const factIds = Array.from(
+      new Set((factLinks || []).map((row: { news_fact_id: string }) => row.news_fact_id)),
+    ).slice(0, 100); // Limit to 100 fact IDs to avoid query limits
+
+    if (factIds.length === 0) return [];
+
+    const sinceDate = new Date(Date.now() - 1000 * 60 * 60 * 24 * 2).toISOString();
+
+    // Fetch facts with their related news_urls
+    const { data, error } = await supabase
+      .from("news_facts")
+      .select(
+        "id,fact_text,news_url_id,news_urls(publication_date,title,url,source_name)",
+      )
+      .in("id", factIds)
+      .limit(200);
+
+    if (error) {
+      console.error("Failed to fetch topics", { teamAbbr, error });
+      return []; // Return empty instead of throwing
+    }
+
+    // Filter and sort in JavaScript since Supabase doesn't support filtering on foreign table fields
+    const filtered = (data || [])
+      .filter((row: TopicRow) => {
+        const pubDate = row.news_urls?.publication_date;
+        return pubDate && pubDate >= sinceDate;
+      })
+      .sort((a: TopicRow, b: TopicRow) => {
+        const dateA = a.news_urls?.publication_date || "";
+        const dateB = b.news_urls?.publication_date || "";
+        return dateB.localeCompare(dateA); // descending
+      })
+      .slice(0, 100);
+
+    return filtered.map((row: TopicRow) => ({
+      id: row.id,
+      fact_text: row.fact_text,
+      news_url_id: row.news_url_id,
+      publication_date: row.news_urls?.publication_date ?? null,
+      title: row.news_urls?.title ?? null,
+      url: row.news_urls?.url ?? null,
+      source_name: row.news_urls?.source_name ?? null,
+    }));
+  } catch (err) {
+    console.error("Unexpected error in fetchTopics", { teamAbbr, err });
+    return []; // Return empty on any unexpected error
   }
-
-  const factIds = Array.from(
-    new Set((factLinks || []).map((row: { news_fact_id: string }) => row.news_fact_id)),
-  );
-
-  if (factIds.length === 0) return [];
-
-  const sinceDate = new Date(Date.now() - 1000 * 60 * 60 * 24 * 2).toISOString();
-
-  const { data, error } = await supabase
-    .from("news_facts")
-    .select(
-      "id,fact_text,news_url_id,news_urls!inner(publication_date,title,url,source_name)",
-    )
-    .in("id", factIds)
-    .gte("news_urls.publication_date", sinceDate)
-    .order("news_urls.publication_date", { ascending: false })
-    .limit(100);
-
-  if (error) {
-    console.error("Failed to fetch topics", { teamAbbr, error });
-    throw new Error("Unable to fetch recent facts for the requested team.");
-  }
-
-  return (data || []).map((row: TopicRow) => ({
-    id: row.id,
-    fact_text: row.fact_text,
-    news_url_id: row.news_url_id,
-    publication_date: row.news_urls?.publication_date ?? null,
-    title: row.news_urls?.title ?? null,
-    url: row.news_urls?.url ?? null,
-    source_name: row.news_urls?.source_name ?? null,
-  }));
 }
 
 async function buildResponse(teamAbbr?: string | null): Promise<GraphResponse> {
