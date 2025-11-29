@@ -120,6 +120,12 @@ def setup_cli_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--output-ids-file",
+        type=str,
+        help="Save inserted URL IDs to a file (one ID per line, for pipeline chaining)",
+    )
+
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print JSON output in dry-run mode",
@@ -316,6 +322,20 @@ def main() -> int:
         # Save detailed metrics if requested
         if args.metrics_file:
             save_metrics_to_file(result.get("metrics", {}), args.metrics_file)
+        
+        # Save inserted URL IDs if requested (for pipeline chaining)
+        if args.output_ids_file:
+            inserted_ids = result.get("inserted_ids", [])
+            if inserted_ids:
+                with open(args.output_ids_file, "w") as f:
+                    for url_id in inserted_ids:
+                        f.write(f"{url_id}\n")
+                logger.info(f"Saved {len(inserted_ids)} URL IDs to {args.output_ids_file}")
+            else:
+                # Create empty file to indicate no new URLs
+                with open(args.output_ids_file, "w") as f:
+                    pass
+                logger.info(f"No new URLs - created empty file {args.output_ids_file}")
         
         # Performance summary
         if result.get("performance"):

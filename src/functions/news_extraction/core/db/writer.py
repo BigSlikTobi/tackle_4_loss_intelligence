@@ -72,7 +72,7 @@ class NewsUrlWriter:
 
         if not records:
             logger.info("No records to write")
-            return {"success": True, "records_written": 0}
+            return {"success": True, "records_written": 0, "inserted_ids": []}
 
         start_time = time.time()
         logger.info(f"Starting batch insert of {len(records)} records to {self.table_name}")
@@ -82,6 +82,7 @@ class NewsUrlWriter:
         total_new = 0
         total_skipped = 0
         failed_batches = 0
+        all_inserted_ids = []
         batch_count = (len(records) + self.batch_size - 1) // self.batch_size
 
         for i in range(0, len(records), self.batch_size):
@@ -96,6 +97,7 @@ class NewsUrlWriter:
                 total_written += batch_result["records_written"]
                 total_new += batch_result.get("new_records", 0)
                 total_skipped += batch_result.get("skipped_records", 0)
+                all_inserted_ids.extend(batch_result.get("inserted_ids", []))
             else:
                 failed_batches += 1
                 logger.error(f"Batch {batch_num} failed: {batch_result.get('error', 'Unknown error')}")
@@ -108,6 +110,7 @@ class NewsUrlWriter:
             "records_written": total_written,
             "new_records": total_new,
             "skipped_records": total_skipped,
+            "inserted_ids": all_inserted_ids,
             "total_records": len(records),
             "batches_processed": batch_count,
             "failed_batches": failed_batches,
@@ -188,12 +191,15 @@ class NewsUrlWriter:
                 )
 
                 inserted_count = len(response.data or [])
+                # Extract inserted IDs from response
+                inserted_ids = [row.get("id") for row in (response.data or []) if row.get("id")]
 
                 return {
                     "success": True,
                     "records_written": inserted_count,
                     "new_records": inserted_count,
                     "skipped_records": skipped_count,
+                    "inserted_ids": inserted_ids,
                     "attempt": attempt + 1,
                 }
 

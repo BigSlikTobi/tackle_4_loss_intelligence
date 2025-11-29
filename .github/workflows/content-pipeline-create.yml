@@ -40,6 +40,7 @@ jobs:
     if: ${{ github.event.inputs.skip_news_extraction != 'true' }}
     outputs:
       urls_extracted: ${{ steps.extract.outputs.urls_extracted }}
+      new_url_count: ${{ steps.extract.outputs.new_url_count }}
     
     steps:
       - name: Checkout code
@@ -64,8 +65,26 @@ jobs:
         run: |
           echo "Extracting news URLs..."
           python src/functions/news_extraction/scripts/extract_news_cli.py \
-            --days-back 1
+            --days-back 1 \
+            --output-ids-file /tmp/new_url_ids.txt
+          
+          # Count new URLs and set outputs
+          if [ -f /tmp/new_url_ids.txt ]; then
+            NEW_COUNT=$(wc -l < /tmp/new_url_ids.txt | tr -d ' ')
+            echo "new_url_count=$NEW_COUNT" >> $GITHUB_OUTPUT
+            echo "Extracted $NEW_COUNT new URLs"
+          else
+            echo "new_url_count=0" >> $GITHUB_OUTPUT
+          fi
           echo "urls_extracted=true" >> $GITHUB_OUTPUT
+      
+      - name: Upload URL IDs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-url-ids
+          path: /tmp/new_url_ids.txt
+          retention-days: 1
+          if-no-files-found: ignore
 
   fetch-content:
     runs-on: ubuntu-latest
@@ -96,6 +115,13 @@ jobs:
           # Install playwright for browser-based extraction
           playwright install chromium
       
+      - name: Download URL IDs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: new-url-ids
+          path: /tmp
+        continue-on-error: true
+      
       - name: Fetch article content
         id: fetch
         env:
@@ -103,10 +129,24 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           echo "Fetching article content..."
-          python src/functions/url_content_extraction/scripts/content_batch_processor.py \
-            --limit 500 \
-            --workers 10 \
-            --timeout 45
+          
+          # Check if we have specific URL IDs from the previous step
+          if [ -f /tmp/new_url_ids.txt ] && [ -s /tmp/new_url_ids.txt ]; then
+            # Convert newline-separated IDs to comma-separated
+            URL_IDS=$(cat /tmp/new_url_ids.txt | tr '\n' ',' | sed 's/,$//')
+            echo "Processing ${URL_IDS:0:100}... ($(wc -l < /tmp/new_url_ids.txt) URLs)"
+            
+            python src/functions/url_content_extraction/scripts/content_batch_processor.py \
+              --url-ids "$URL_IDS" \
+              --workers 10 \
+              --timeout 45
+          else
+            echo "No new URL IDs from extraction step, fetching from database..."
+            python src/functions/url_content_extraction/scripts/content_batch_processor.py \
+              --limit 500 \
+              --workers 10 \
+              --timeout 45
+          fi
           echo "content_fetched=true" >> $GITHUB_OUTPUT
 
   create-facts-batch:

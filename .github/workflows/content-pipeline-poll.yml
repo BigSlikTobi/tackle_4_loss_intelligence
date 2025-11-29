@@ -5,12 +5,13 @@ name: Content Pipeline - Poll and Process
 #
 # When a batch completes, it:
 # 1. Processes the batch results (writes to database)
-# 2. Creates the next stage's batch (facts → knowledge → summary)
+# 2. Creates the next stage's batch
 # 3. Updates the tracking table
 #
-# The pipeline stages flow:
-# facts (completed) → create knowledge batch
-# knowledge (completed) → create summary batch
+# The pipeline stages flow sequentially:
+# facts (completed) → create knowledge/topics batch
+# knowledge/topics (completed) → create knowledge/entities batch
+# knowledge/entities (completed) → create summary batch
 # summary (completed) → done
 
 on:
@@ -132,8 +133,15 @@ jobs:
                   create_embeddings=True,
               )
 
-          def create_knowledge_batch() -> str | None:
-              """Create a knowledge extraction batch for pending facts."""
+          def create_knowledge_batch(task: str = "topics") -> str | None:
+              """Create a knowledge extraction batch for pending facts.
+              
+              Args:
+                  task: Either 'topics' or 'entities'
+                  
+              Returns:
+                  batch_id if created, None if no pending items
+              """
               from src.functions.knowledge_extraction.core.fact_batch import (
                   FactBatchPipeline,
                   FactBatchRequestGenerator,
@@ -145,8 +153,7 @@ jobs:
                   )
                   pipeline = FactBatchPipeline(generator=generator)
                   
-                  # Create topics batch first (entities can be a separate run)
-                  result = pipeline.create_batch(task="topics", limit=500)
+                  result = pipeline.create_batch(task=task, limit=500)
                   
                   # Register in tracking
                   tracker = BatchTracker()
@@ -155,14 +162,14 @@ jobs:
                       stage=BatchStage.KNOWLEDGE,
                       request_count=result.total_requests,
                       model="gpt-4.1-nano-2025-04-14",
-                      metadata={"task": "topics", "total_facts": result.total_facts},
+                      metadata={"task": task, "total_facts": result.total_facts},
                   )
                   
-                  logger.info(f"Created knowledge batch: {result.batch_id}")
+                  logger.info(f"Created knowledge ({task}) batch: {result.batch_id}")
                   return result.batch_id
               except ValueError as e:
                   if "No" in str(e) and "found" in str(e):
-                      logger.info("No facts pending knowledge extraction")
+                      logger.info(f"No facts pending knowledge extraction ({task})")
                       return None
                   raise
 
@@ -247,8 +254,8 @@ jobs:
                               )
                               batches_processed += 1
                               
-                              # Create next stage batch (knowledge)
-                              next_batch = create_knowledge_batch()
+                              # After facts → create topics batch (first knowledge step)
+                              next_batch = create_knowledge_batch(task="topics")
                               if next_batch:
                                   next_stage_batches_created += 1
                           
@@ -263,10 +270,19 @@ jobs:
                               )
                               batches_processed += 1
                               
-                              # Create next stage batch (summary)
-                              next_batch = create_summary_batch()
-                              if next_batch:
-                                  next_stage_batches_created += 1
+                              # Sequential: topics → entities → summary
+                              if task == "topics":
+                                  # After topics → create entities batch
+                                  next_batch = create_knowledge_batch(task="entities")
+                                  if next_batch:
+                                      next_stage_batches_created += 1
+                                      logger.info("Topics complete → created entities batch")
+                              elif task == "entities":
+                                  # After entities → create summary batch
+                                  next_batch = create_summary_batch()
+                                  if next_batch:
+                                      next_stage_batches_created += 1
+                                      logger.info("Entities complete → created summary batch")
                           
                           elif stage == BatchStage.SUMMARY:
                               result = process_summary_batch(batch_id)
