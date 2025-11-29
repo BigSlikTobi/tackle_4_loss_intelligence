@@ -15,7 +15,8 @@ This platform uses **function-based isolation** to separate different problem do
 src/
 ├── shared/                    # Minimal shared utilities ONLY
 │   ├── utils/                 # Generic logging, env loading
-│   └── db/                    # Generic database helpers
+│   ├── db/                    # Generic database helpers
+│   └── batch/                 # Batch processing infrastructure
 │
 └── functions/                 # Independent functional modules
     ├── data_loading/          # Module 1: NFL data ingestion
@@ -32,13 +33,38 @@ src/
     │   ├── functions/         # Cloud Function deployment
     │   └── requirements.txt
     │
-    ├── content_summarization/ # Module 3: AI content summarization
+    ├── url_content_extraction/ # Module 3: Content + Fact extraction
     │   ├── core/              # Business logic
+    │   │   ├── extractors/    # Content extractors
+    │   │   ├── facts/         # Fact extraction logic
+    │   │   └── facts_batch/   # Batch API for facts
     │   ├── scripts/           # CLI tools
+    │   │   ├── content_batch_processor.py  # Sync content fetching
+    │   │   └── facts_batch_cli.py          # Batch API for facts
     │   ├── functions/         # Cloud Function deployment
     │   └── requirements.txt
     │
-    ├── story_embeddings/      # Module 4: Vector embeddings for stories
+    ├── knowledge_extraction/  # Module 4: Entity and topic extraction
+    │   ├── core/              # Business logic
+    │   │   ├── batch/         # Batch API for knowledge
+    │   │   ├── extraction/    # Topic/entity extractors
+    │   │   └── resolution/    # Entity resolution to DB IDs
+    │   ├── scripts/           # CLI tools (extract_knowledge_cli.py)
+    │   ├── functions/         # Cloud Function deployment (future)
+    │   ├── requirements.txt   # Module dependencies
+    │   ├── .env.example       # Configuration template
+    │   ├── schema.sql         # Database schema
+    │   └── README.md          # Module documentation
+    │
+    ├── content_summarization/ # Module 5: AI summary generation (SUMMARY ONLY)
+    │   ├── core/              # Business logic
+    │   │   └── summary_batch/ # Batch API for summaries
+    │   ├── scripts/           # CLI tools
+    │   │   └── summary_batch_cli.py  # Batch API for summaries
+    │   ├── functions/         # Cloud Function deployment
+    │   └── requirements.txt
+    │
+    ├── story_embeddings/      # Module 6: Vector embeddings for stories
     │   ├── core/              # Business logic
     │   ├── scripts/           # CLI tools (generate_embeddings_cli.py)
     │   ├── functions/         # Cloud Function deployment (future)
@@ -47,20 +73,11 @@ src/
     │   ├── schema.sql         # Database schema
     │   └── README.md          # Module documentation
     │
-    ├── story_grouping/        # Module 5: Clustering similar stories
-    │   ├── core/              # Business logic
-    │   ├── scripts/           # CLI tools (group_stories_cli.py)
-    │   ├── functions/         # Cloud Function deployment (future)
-    │   ├── requirements.txt   # Module dependencies
-    │   ├── schema.sql         # Database schema
-    │   └── README.md          # Module documentation
-    │
-    └── knowledge_extraction/  # Module 6: Entity and topic extraction
+    └── story_grouping/        # Module 7: Clustering similar stories
         ├── core/              # Business logic
-        ├── scripts/           # CLI tools (extract_knowledge_cli.py)
+        ├── scripts/           # CLI tools (group_stories_cli.py)
         ├── functions/         # Cloud Function deployment (future)
         ├── requirements.txt   # Module dependencies
-        ├── .env.example       # Configuration template
         ├── schema.sql         # Database schema
         └── README.md          # Module documentation
 ```
@@ -77,14 +94,71 @@ src/
 **Current Modules**:
 - **data_loading**: Source in `src/functions/data_loading/core/`, split into `data` loaders/transformers, `db` connection helpers, `providers` for on-demand data, and `utils` for CLI/logging code
 - **news_extraction**: Extracts news URLs from various sources for NFL content
-- **content_summarization**: AI-powered summarization of news articles using Google Gemini
+- **url_content_extraction**: Fetches article content AND extracts atomic facts using GPT-5-nano
+- **knowledge_extraction**: Extracts key topics and NFL entities (players, teams, games) from facts using GPT-5-mini with fuzzy entity resolution
+- **content_summarization**: AI-powered summarization of facts using GPT-5-nano (summary-only module)
 - **story_embeddings**: Generates vector embeddings for story summaries using OpenAI's text-embedding-3-small model for similarity search and clustering
 - **story_grouping**: Clusters similar stories based on embedding vectors using cosine similarity and centroid-based grouping
-- **knowledge_extraction**: Extracts key topics and NFL entities (players, teams, games) from story groups using GPT-5-mini with fuzzy entity resolution to database IDs for cross-referencing
 - On-demand accessors in `src/functions/data_loading/core/providers/`; e.g., `get_provider("pfr").list(season=2023, week=1)` returns weekly stats
 - Package contract defined in `src/functions/data_loading/core/contracts/package.py` with usage in `docs/package_contract.md`
 - Cloud Function in `src/functions/data_loading/functions/main.py` exposes package assembly as HTTP API (see `docs/cloud_function_api.md`)
 - Each module has its own virtualenv in `venv/`; keep it local and out of commits. Dependencies in each module's `requirements.txt`
+
+## Content Pipeline Flow
+
+The content processing pipeline consists of 4 distinct stages, each handled by a separate module:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         CONTENT PROCESSING PIPELINE                              │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│  Stage 1: Content Fetching       │ url_content_extraction                       │
+│  • Fetches raw article text      │ content_batch_processor.py                   │
+│  • Sets content_extracted_at     │ ThreadPoolExecutor, sync processing          │
+├──────────────────────────────────┼──────────────────────────────────────────────┤
+│  Stage 2: Fact Extraction        │ url_content_extraction                       │
+│  • Extracts atomic facts (GPT)   │ facts_batch_cli.py --task create/process     │
+│  • Creates fact embeddings       │ OpenAI Batch API (~50% cheaper)              │
+│  • Sets facts_extracted_at       │                                              │
+├──────────────────────────────────┼──────────────────────────────────────────────┤
+│  Stage 3: Knowledge Extraction   │ knowledge_extraction                         │
+│  • Extracts topics/entities      │ extract_knowledge_cli.py --batch             │
+│  • Resolves to database IDs      │ OpenAI Batch API (~50% cheaper)              │
+│  • Sets knowledge_extracted_at   │                                              │
+├──────────────────────────────────┼──────────────────────────────────────────────┤
+│  Stage 4: Summary Generation     │ content_summarization                        │
+│  • Generates summaries from facts│ summary_batch_cli.py --task all              │
+│  • Creates summary embeddings    │ OpenAI Batch API (~50% cheaper)              │
+│  • Sets summary_created_at       │                                              │
+└──────────────────────────────────┴──────────────────────────────────────────────┘
+```
+
+**Processing Commands (in order):**
+```bash
+# 1. Fetch content (synchronous, fast)
+cd src/functions/url_content_extraction
+python scripts/content_batch_processor.py --limit 500
+
+# 2. Extract facts (Batch API, ~24h, 50% cheaper)
+python scripts/facts_batch_cli.py --task create --limit 500
+# ... wait for completion ...
+python scripts/facts_batch_cli.py --task status --batch-id <ID>
+python scripts/facts_batch_cli.py --task process --batch-id <ID>
+
+# 3. Extract knowledge (Batch API)
+cd src/functions/knowledge_extraction
+python scripts/extract_knowledge_cli.py --batch --limit 500
+
+# 4. Generate summaries (Batch API)
+cd src/functions/content_summarization
+python scripts/summary_batch_cli.py --task all --limit 500
+```
+
+**Key Design Decisions:**
+- **No rate limiting**: Models self-rate-limit via API
+- **Batch API for LLM calls**: ~50% cost savings with 24h completion window
+- **GPT-5-nano**: Reasoning model (no temperature, uses reasoning_effort='low', max_completion_tokens)
+- **Separate content/facts**: Better retry handling for each stage
 
 **Import Patterns**:
 ```python
@@ -221,9 +295,11 @@ Replicating these steps keeps every new Cloud Function independently deployable 
 
 **Key Paths**:
 - Shared utilities: `src/shared/`
+- Shared batch infrastructure: `src/shared/batch/`
 - Data loading: `src/functions/data_loading/`
 - News extraction: `src/functions/news_extraction/`
+- URL content extraction: `src/functions/url_content_extraction/`
+- Knowledge extraction: `src/functions/knowledge_extraction/`
 - Content summarization: `src/functions/content_summarization/`
 - Story embeddings: `src/functions/story_embeddings/`
 - Story grouping: `src/functions/story_grouping/`
-- Knowledge extraction: `src/functions/knowledge_extraction/`

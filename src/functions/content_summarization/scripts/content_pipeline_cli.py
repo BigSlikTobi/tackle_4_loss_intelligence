@@ -19,9 +19,13 @@ WHEN TO USE THIS TOOL:
 
 FEATURES:
   - Multi-stage pipeline (content → facts → knowledge → summary)
-  - Batch mode with configurable limits
+  - Loop mode with configurable limits (--loop)
   - Per-stage processing
   - Basic error handling and logging
+  
+FOR BATCH API PROCESSING (50% cheaper):
+  Use summary_batch_cli.py for OpenAI Batch API support:
+    python summary_batch_cli.py --task all --limit 1000
 """
 
 from __future__ import annotations
@@ -57,7 +61,7 @@ FACT_PROMPT_VERSION = "facts-v1"
 SUMMARY_PROMPT_VERSION = "summary-from-facts-v1"
 TOPIC_SUMMARY_PROMPT_VERSION = "summary-from-facts-topic-v1"
 DEFAULT_FACT_MODEL = "gemma-3n-e4b-it"  # Use Gemini model for fact extraction
-DEFAULT_SUMMARY_MODEL = "gemma-3n-e4b-it"  # Chunking strategy for large fact sets
+DEFAULT_SUMMARY_MODEL = "gpt-5-nano"  # OpenAI GPT-5-nano with low reasoning for topic summaries
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 EDGE_FUNCTION_NAME = "get-pending-news-urls"
 
@@ -243,14 +247,14 @@ def main() -> None:
         help="Override batch size limit fetched from pending URL edge function.",
     )
     parser.add_argument(
-        "--batch-mode",
+        "--loop",
         action="store_true",
-        help="Enable batch processing mode (loops until no more URLs).",
+        help="Enable loop mode (processes batches until no more pending URLs).",
     )
     parser.add_argument(
         "--max-total",
         type=int,
-        help="Maximum total URLs to process across all batches (e.g., 5000 for most recent 5000).",
+        help="Maximum total URLs to process across all loop iterations (e.g., 5000 for most recent 5000).",
     )
     parser.add_argument(
         "--batch-delay",
@@ -274,15 +278,15 @@ def main() -> None:
         {
             "stage": args.stage,
             "limit": config.batch_limit,
-            "batch_mode": args.batch_mode,
+            "loop": args.loop,
             "max_total": args.max_total,
         }
     )
 
     client = get_supabase_client()
 
-    if args.batch_mode:
-        run_batch_mode(client, config, args)
+    if args.loop:
+        run_loop_mode(client, config, args)
     else:
         run_single_batch(client, config, args.stage)
 
@@ -305,15 +309,15 @@ def run_single_batch(client, config: PipelineConfig, stage: str) -> None:
         process_summary_stage(client, config)
 
 
-def run_batch_mode(client, config: PipelineConfig, args) -> None:
-    """Run pipeline in batch mode, processing multiple batches until complete."""
+def run_loop_mode(client, config: PipelineConfig, args) -> None:
+    """Run pipeline in loop mode, processing multiple batches until complete."""
     
     total_processed = 0
     batch_num = 0
     max_total = args.max_total if args.max_total else float('inf')
     
     logger.info(
-        "Starting batch mode",
+        "Starting loop mode",
         {
             "stage": args.stage,
             "batch_size": config.batch_limit,
@@ -379,7 +383,7 @@ def run_batch_mode(client, config: PipelineConfig, args) -> None:
             time.sleep(args.batch_delay)
     
     logger.info(
-        "Batch mode complete",
+        "Loop mode complete",
         {
             "total_batches": batch_num,
             "total_urls_processed": total_processed,
@@ -727,27 +731,74 @@ def extract_facts(article_text: str, config: PipelineConfig) -> List[str]:
 def call_llm_json(
     *, prompt: str, user_content: str, model: str, config: PipelineConfig
 ) -> Dict[str, Any]:
-    """Call the LLM endpoint and return parsed JSON content if possible."""
+    """Call the LLM endpoint and return parsed JSON content if possible.
+    
+    Supports both Gemini API (gemma-* models) and OpenAI API (gpt-* models).
+    For gpt-5-nano, uses reasoning_effort='low' for faster, cheaper inference.
+    """
 
-    # Build Gemini API URL with model
-    url = f"{config.llm_api_url}/{model}:generateContent?key={config.llm_api_key}"
+    # Detect if this is an OpenAI model
+    is_openai_model = model.startswith("gpt-") or model.startswith("o1") or model.startswith("o3")
     
-    headers = {
-        "Content-Type": "application/json",
-    }
-    
-    # Gemini API format - without JSON mode since gemma-3n-e4b-it doesn't support it
-    payload = {
-        "contents": [{
-            "parts": [{
-                "text": f"{prompt}\n\nArticle:\n{user_content}"
-            }]
-        }],
-        "generationConfig": {
-            "temperature": 0,
-            "maxOutputTokens": 32000,  # Increased significantly to handle large fact sets (109+ facts)
+    if is_openai_model:
+        # OpenAI API format
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config.embedding_api_key}",  # Use OpenAI key
         }
-    }
+        
+        # Check if this is a reasoning model (o1, o3, gpt-5-nano, etc.)
+        # Reasoning models don't support temperature or max_tokens parameters
+        is_reasoning_model = (
+            "nano" in model or 
+            model.startswith("o1") or 
+            model.startswith("o3") or
+            "o1" in model or
+            "o3" in model
+        )
+        
+        if is_reasoning_model:
+            # Reasoning models: no temperature, use max_completion_tokens, add reasoning_effort
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": f"{prompt}\n\n{user_content}"}
+                ],
+                "max_completion_tokens": 16000,
+                "reasoning_effort": "low",
+            }
+        else:
+            # Standard GPT models: temperature supported
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                "temperature": 0,
+                "max_completion_tokens": 16000,
+                "response_format": {"type": "json_object"},
+            }
+    else:
+        # Build Gemini API URL with model
+        url = f"{config.llm_api_url}/{model}:generateContent?key={config.llm_api_key}"
+        headers = {
+            "Content-Type": "application/json",
+        }
+        
+        # Gemini API format - without JSON mode since gemma-3n-e4b-it doesn't support it
+        payload = {
+            "contents": [{
+                "parts": [{
+                    "text": f"{prompt}\n\nArticle:\n{user_content}"
+                }]
+            }],
+            "generationConfig": {
+                "temperature": 0,
+                "maxOutputTokens": 32000,  # Increased significantly to handle large fact sets (109+ facts)
+            }
+        }
 
     try:
         response = requests.post(
@@ -768,6 +819,15 @@ def call_llm_json(
     except ValueError:
         logger.error("LLM response was not valid JSON", {"model": model})
         return {}
+
+    # Parse OpenAI API response format
+    if isinstance(data, dict) and "choices" in data:
+        try:
+            content = data["choices"][0]["message"]["content"]
+            return json.loads(content)
+        except (KeyError, IndexError, json.JSONDecodeError) as exc:
+            logger.error(f"Failed to parse OpenAI response: {exc}")
+            return {}
 
     # Parse Gemini API response format
     if isinstance(data, dict) and "candidates" in data:
