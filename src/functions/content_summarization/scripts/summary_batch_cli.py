@@ -42,6 +42,7 @@ from src.functions.content_summarization.core.summary_batch import (
     SummaryBatchPipeline,
     SummaryBatchRequestGenerator,
 )
+from src.shared.batch.tracking import BatchTracker, BatchStage
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         "--no-submit",
         action="store_true",
         help="Only write the JSONL file without creating a batch job",
+    )
+    parser.add_argument(
+        "--register",
+        action="store_true",
+        help="Register batch in tracking table for pipeline orchestration (used by GitHub Actions)",
     )
     return parser.parse_args()
 
@@ -224,6 +230,25 @@ def main() -> None:
     pipeline = SummaryBatchPipeline(generator=generator, output_dir=args.output_dir)
     result = pipeline.create_batch(task=args.task, limit=args.limit)
 
+    # Register batch in tracking table if requested
+    register = getattr(args, 'register', False)
+    if register:
+        try:
+            tracker = BatchTracker()
+            tracker.register_batch(
+                batch_id=result.batch_id,
+                stage=BatchStage.SUMMARY,
+                article_count=result.total_articles,
+                request_count=result.total_requests,
+                model=args.model,
+                metadata={
+                    "task": args.task,
+                },
+            )
+            logger.info(f"Registered batch {result.batch_id} in tracking table")
+        except Exception as e:
+            logger.warning(f"Failed to register batch in tracking table: {e}")
+
     print(f"\n{'='*50}")
     print("Batch submitted successfully!")
     print(f"Batch ID: {result.batch_id}")
@@ -231,6 +256,8 @@ def main() -> None:
     print(f"Requests: {result.total_requests}")
     print(f"Articles: {result.total_articles}")
     print(f"Model: {args.model}")
+    if register:
+        print(f"Tracking: ✅ Registered")
     print(f"\nInput file: {result.input_file_path}")
     print(f"Metadata: {result.metadata_path}")
     print(f"\nTo check status:")

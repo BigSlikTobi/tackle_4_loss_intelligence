@@ -22,6 +22,7 @@ from src.functions.knowledge_extraction.core.fact_batch import (
     FactBatchPipeline,
     FactBatchRequestGenerator,
 )
+from src.shared.batch.tracking import BatchTracker, BatchStage
 
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,11 @@ def parse_args() -> argparse.Namespace:
         "--no-submit",
         action="store_true",
         help="Only write the jsonl file without creating a batch job",
+    )
+    parser.add_argument(
+        "--register",
+        action="store_true",
+        help="Register batch in tracking table for pipeline orchestration (used by GitHub Actions)",
     )
     return parser.parse_args()
 
@@ -207,6 +213,43 @@ def main() -> None:
 
     pipeline = FactBatchPipeline(generator=generator, output_dir=args.output_dir)
     result = pipeline.create_batch(task=args.task, limit=args.limit)
+
+    # Register batch in tracking table if requested
+    register = getattr(args, 'register', False)
+    if register:
+        try:
+            tracker = BatchTracker()
+            tracker.register_batch(
+                batch_id=result.batch_id,
+                stage=BatchStage.KNOWLEDGE,
+                article_count=0,  # Knowledge batches work on facts, not articles
+                request_count=result.total_requests,
+                model=args.model,
+                metadata={
+                    "task": args.task,
+                    "total_facts": result.total_facts,
+                    "chunk_size": args.chunk_size,
+                },
+            )
+            logger.info(f"Registered batch {result.batch_id} in tracking table")
+        except Exception as e:
+            logger.warning(f"Failed to register batch in tracking table: {e}")
+
+    print("\n" + "=" * 60)
+    print("KNOWLEDGE BATCH CREATED SUCCESSFULLY")
+    print("=" * 60)
+    print(f"Batch ID:       {result.batch_id}")
+    print(f"Status:         {result.status}")
+    print(f"Task:           {args.task}")
+    print(f"Facts:          {result.total_facts}")
+    print(f"Requests:       {result.total_requests}")
+    if register:
+        print(f"Tracking:       ✅ Registered")
+    print("=" * 60)
+    print("\n💡 Check status with:")
+    print(f"   python fact_knowledge_batch_cli.py --status {result.batch_id}")
+    print("\n⏳ When complete, process with:")
+    print(f"   python fact_knowledge_batch_cli.py --process {result.batch_id} --task {args.task}")
 
     logger.info(
         "Batch submitted",
