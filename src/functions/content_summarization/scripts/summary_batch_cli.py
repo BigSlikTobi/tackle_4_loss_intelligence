@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
         "--limit",
         type=int,
         default=None,
-        help="Max articles to include (defaults to 500 youngest/newest articles)",
+        help="Max articles to include (defaults to 500 newest articles)",
     )
     parser.add_argument(
         "--model",
