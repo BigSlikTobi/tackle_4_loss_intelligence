@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Optional
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 from src.shared.db.connection import get_supabase_client
 
@@ -71,6 +71,14 @@ class GeneratedBatch:
     metadata: Dict
 
 
+@dataclass
+class PrefetchedArticleData:
+    """Container for pre-fetched article data used during batch generation."""
+
+    facts_by_article: Dict[str, List[str]]
+    topic_groups_by_article: Dict[str, List[Dict[str, Any]]]
+
+
 class SummaryBatchRequestGenerator:
     """Create JSONL payloads for the OpenAI Batch API for summary generation.
 
@@ -126,6 +134,8 @@ class SummaryBatchRequestGenerator:
 
         # Fetch pending articles
         articles = self._fetch_pending_articles(task=task, limit=limit)
+
+        prefetched_data = self._prefetch_article_data(articles)
         
         if not articles:
             raise ValueError("No eligible articles found for batch generation")
@@ -140,9 +150,11 @@ class SummaryBatchRequestGenerator:
                 difficulty = article.get("article_difficulty", "easy")
                 
                 if difficulty == "easy":
-                    requests = self._build_easy_article_requests(news_url_id)
+                    facts = prefetched_data.facts_by_article.get(news_url_id, [])
+                    requests = self._build_easy_article_requests(news_url_id, facts=facts)
                 else:
-                    requests = self._build_hard_article_requests(news_url_id)
+                    groups = prefetched_data.topic_groups_by_article.get(news_url_id, [])
+                    requests = self._build_hard_article_requests(news_url_id, groups=groups)
                 
                 for request in requests:
                     handle.write(json.dumps(request) + "\n")
@@ -230,125 +242,235 @@ class SummaryBatchRequestGenerator:
         
         return articles
 
-    def _fetch_facts_for_article(self, news_url_id: str) -> List[str]:
-        """Fetch all fact texts for an article."""
+    def _prefetch_article_data(self, articles: List[Dict[str, Any]]) -> PrefetchedArticleData:
+        """Preload facts, topics, and entities for the provided articles."""
 
-        facts: List[str] = []
-        offset = 0
+        article_ids = [article.get("id") for article in articles if article.get("id")]
+        if not article_ids:
+            return PrefetchedArticleData(facts_by_article={}, topic_groups_by_article={})
 
-        while True:
-            response = (
-                self.client.table("news_facts")
-                .select("fact_text")
-                .eq("news_url_id", news_url_id)
-                .order("id")
-                .range(offset, offset + self.page_size - 1)
-                .execute()
-            )
-            rows = getattr(response, "data", []) or []
-            
-            for row in rows:
-                fact_text = row.get("fact_text")
-                if isinstance(fact_text, str) and fact_text.strip():
-                    facts.append(fact_text.strip())
-            
-            if len(rows) < self.page_size:
-                break
-            offset += self.page_size
-
-        return facts
-
-    def _fetch_topic_groups_for_article(self, news_url_id: str) -> List[Dict[str, Any]]:
-        """Fetch topic-grouped facts for a hard article."""
-
-        # Get all facts with their topics and entities
-        facts_response = (
-            self.client.table("news_facts")
-            .select("id,fact_text")
-            .eq("news_url_id", news_url_id)
-            .execute()
+        facts_by_id, facts_by_article = self._fetch_facts_for_articles(article_ids)
+        logger.info(
+            "Prefetched facts for articles",
+            extra={"articles": len(article_ids), "facts": len(facts_by_id)},
         )
-        fact_rows = getattr(facts_response, "data", []) or []
-        
-        if not fact_rows:
-            return []
 
-        facts_by_id: Dict[str, str] = {}
-        for row in fact_rows:
-            fact_id = row.get("id")
-            fact_text = row.get("fact_text")
-            if fact_id and isinstance(fact_text, str):
-                facts_by_id[fact_id] = fact_text.strip()
+        if not facts_by_id:
+            return PrefetchedArticleData(
+                facts_by_article=facts_by_article,
+                topic_groups_by_article={},
+            )
 
         fact_ids = list(facts_by_id.keys())
+        topics_by_fact = self._fetch_topics_for_facts(fact_ids)
+        scope_by_fact = self._fetch_entities_for_facts(fact_ids)
 
-        # Get topics for facts
-        topics_response = (
-            self.client.table("news_fact_topics")
-            .select("news_fact_id,canonical_topic,is_primary")
-            .in_("news_fact_id", fact_ids)
-            .execute()
+        topic_groups_by_article = self._group_facts_by_topic_and_scope(
+            facts_by_id=facts_by_id,
+            topics_by_fact=topics_by_fact,
+            scope_by_fact=scope_by_fact,
         )
+
+        logger.info(
+            "Built topic groups for articles",
+            extra={
+                "articles": len(topic_groups_by_article),
+                "facts": len(facts_by_id),
+                "topics": len(topics_by_fact),
+                "entities": len(scope_by_fact),
+            },
+        )
+
+        return PrefetchedArticleData(
+            facts_by_article=facts_by_article,
+            topic_groups_by_article=topic_groups_by_article,
+        )
+
+    def _chunked_ids(self, values: List[str]) -> Iterable[List[str]]:
+        """Yield ID lists in chunks to avoid oversized queries."""
+
+        for idx in range(0, len(values), self.page_size):
+            yield values[idx: idx + self.page_size]
+
+    def _fetch_facts_for_articles(
+        self,
+        article_ids: List[str],
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[str]]]:
+        """Fetch facts for many articles in batches."""
+
+        facts_by_id: Dict[str, Dict[str, Any]] = {}
+        facts_by_article: Dict[str, List[str]] = {article_id: [] for article_id in article_ids}
+
+        for article_chunk in self._chunked_ids(article_ids):
+            offset = 0
+            while True:
+                response = (
+                    self.client.table("news_facts")
+                    .select("id,news_url_id,fact_text")
+                    .in_("news_url_id", article_chunk)
+                    .order("id")
+                    .range(offset, offset + self.page_size - 1)
+                    .execute()
+                )
+                rows = getattr(response, "data", []) or []
+
+                for row in rows:
+                    fact_id = row.get("id")
+                    article_id = row.get("news_url_id")
+                    fact_text = row.get("fact_text")
+                    if not fact_id or not article_id or not isinstance(fact_text, str):
+                        continue
+                    cleaned_text = fact_text.strip()
+                    if not cleaned_text:
+                        continue
+                    facts_by_id[fact_id] = {
+                        "news_url_id": article_id,
+                        "fact_text": cleaned_text,
+                    }
+                    facts_by_article.setdefault(article_id, []).append(cleaned_text)
+
+                if len(rows) < self.page_size:
+                    break
+                offset += self.page_size
+
+        return facts_by_id, facts_by_article
+
+    def _fetch_topics_for_facts(self, fact_ids: List[str]) -> Dict[str, str]:
+        """Fetch topics for all supplied fact IDs with pagination."""
+
         topics_by_fact: Dict[str, str] = {}
-        for row in getattr(topics_response, "data", []) or []:
-            fact_id = row.get("news_fact_id")
-            topic = row.get("canonical_topic") or "general"
-            # Skip NO_TOPICS_FOUND marker - use "general" instead
-            if topic == "NO_TOPICS_FOUND":
-                topic = "general"
-            # Prefer primary topic if available
-            if fact_id and (fact_id not in topics_by_fact or row.get("is_primary")):
-                topics_by_fact[fact_id] = topic
 
-        # Get entities for scope
-        entities_response = (
-            self.client.table("news_fact_entities")
-            .select("news_fact_id,entity_type,entity_id,team_abbr,matched_name,is_primary")
-            .in_("news_fact_id", fact_ids)
-            .execute()
-        )
+        for fact_chunk in self._chunked_ids(fact_ids):
+            offset = 0
+            while True:
+                response = (
+                    self.client.table("news_fact_topics")
+                    .select("news_fact_id,canonical_topic,is_primary")
+                    .in_("news_fact_id", fact_chunk)
+                    .order("news_fact_id")
+                    .range(offset, offset + self.page_size - 1)
+                    .execute()
+                )
+                rows = getattr(response, "data", []) or []
+                for row in rows:
+                    fact_id = row.get("news_fact_id")
+                    topic = row.get("canonical_topic") or "general"
+                    if topic == "NO_TOPICS_FOUND":
+                        topic = "general"
+                    if fact_id and (fact_id not in topics_by_fact or row.get("is_primary")):
+                        topics_by_fact[fact_id] = topic
+
+                if len(rows) < self.page_size:
+                    break
+                offset += self.page_size
+
+        return topics_by_fact
+
+    def _fetch_entities_for_facts(self, fact_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch entity scopes for all supplied fact IDs with pagination."""
+
         scope_by_fact: Dict[str, Dict[str, Any]] = {}
-        for row in getattr(entities_response, "data", []) or []:
-            fact_id = row.get("news_fact_id")
-            if not fact_id:
-                continue
-            entity_type = row.get("entity_type")
-            if entity_type == "team":
-                scope_by_fact[fact_id] = {
-                    "type": "team",
-                    "id": row.get("entity_id") or row.get("team_abbr"),
-                    "label": row.get("matched_name") or row.get("team_abbr"),
-                }
-            elif entity_type == "player" and fact_id not in scope_by_fact:
-                scope_by_fact[fact_id] = {
-                    "type": "player",
-                    "id": row.get("entity_id"),
-                    "label": row.get("matched_name"),
-                    "team": row.get("team_abbr"),
-                }
 
-        # Group by topic + scope
-        groups: Dict[str, Dict[str, Any]] = {}
-        for fact_id, fact_text in facts_by_id.items():
+        for fact_chunk in self._chunked_ids(fact_ids):
+            offset = 0
+            while True:
+                response = (
+                    self.client.table("news_fact_entities")
+                    .select("news_fact_id,entity_type,entity_id,team_abbr,matched_name,is_primary")
+                    .in_("news_fact_id", fact_chunk)
+                    .order("news_fact_id")
+                    .range(offset, offset + self.page_size - 1)
+                    .execute()
+                )
+                rows = getattr(response, "data", []) or []
+                for row in rows:
+                    fact_id = row.get("news_fact_id")
+                    if not fact_id:
+                        continue
+                    entity_type = row.get("entity_type")
+                    if entity_type == "team":
+                        scope_by_fact[fact_id] = {
+                            "type": "team",
+                            "id": row.get("entity_id") or row.get("team_abbr"),
+                            "label": row.get("matched_name") or row.get("team_abbr"),
+                        }
+                    elif entity_type == "player" and fact_id not in scope_by_fact:
+                        scope_by_fact[fact_id] = {
+                            "type": "player",
+                            "id": row.get("entity_id"),
+                            "label": row.get("matched_name"),
+                            "team": row.get("team_abbr"),
+                        }
+
+                if len(rows) < self.page_size:
+                    break
+                offset += self.page_size
+
+        return scope_by_fact
+
+    def _group_facts_by_topic_and_scope(
+        self,
+        *,
+        facts_by_id: Dict[str, Dict[str, Any]],
+        topics_by_fact: Dict[str, str],
+        scope_by_fact: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Group facts by topic/scope for each article."""
+
+        groups_by_article: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for fact_id, fact_data in facts_by_id.items():
+            article_id = fact_data["news_url_id"]
+            fact_text = fact_data["fact_text"]
             topic = topics_by_fact.get(fact_id, "general")
             scope = scope_by_fact.get(fact_id, {})
             scope_key = f"{scope.get('type', 'none')}:{scope.get('id', 'none')}"
             group_key = f"{topic}|{scope_key}"
 
-            if group_key not in groups:
-                groups[group_key] = {
+            article_groups = groups_by_article.setdefault(article_id, {})
+            if group_key not in article_groups:
+                article_groups[group_key] = {
                     "topic": topic,
                     "scope": scope,
                     "facts": [],
                 }
-            groups[group_key]["facts"].append(fact_text)
+            article_groups[group_key]["facts"].append(fact_text)
 
-        return list(groups.values())
+        return {article_id: list(group_map.values()) for article_id, group_map in groups_by_article.items()}
 
-    def _build_easy_article_requests(self, news_url_id: str) -> List[Dict]:
+    def _fetch_facts_for_article(self, news_url_id: str) -> List[str]:
+        """Fetch all fact texts for an article."""
+
+        _, facts_by_article = self._fetch_facts_for_articles([news_url_id])
+        return facts_by_article.get(news_url_id, [])
+
+    def _fetch_topic_groups_for_article(self, news_url_id: str) -> List[Dict[str, Any]]:
+        """Fetch topic-grouped facts for a hard article."""
+
+        facts_by_id, _ = self._fetch_facts_for_articles([news_url_id])
+        if not facts_by_id:
+            return []
+
+        fact_ids = list(facts_by_id.keys())
+        topics_by_fact = self._fetch_topics_for_facts(fact_ids)
+        scope_by_fact = self._fetch_entities_for_facts(fact_ids)
+
+        groups_by_article = self._group_facts_by_topic_and_scope(
+            facts_by_id=facts_by_id,
+            topics_by_fact=topics_by_fact,
+            scope_by_fact=scope_by_fact,
+        )
+
+        return groups_by_article.get(news_url_id, [])
+
+    def _build_easy_article_requests(
+        self,
+        news_url_id: str,
+        *,
+        facts: Optional[List[str]] = None,
+    ) -> List[Dict]:
         """Build batch request(s) for an easy article (single summary)."""
 
-        facts = self._fetch_facts_for_article(news_url_id)
+        facts = facts if facts is not None else self._fetch_facts_for_article(news_url_id)
         if not facts:
             logger.warning("No facts for easy article %s", news_url_id)
             return []
@@ -363,10 +485,15 @@ class SummaryBatchRequestGenerator:
             user_content=facts_payload,
         )]
 
-    def _build_hard_article_requests(self, news_url_id: str) -> List[Dict]:
+    def _build_hard_article_requests(
+        self,
+        news_url_id: str,
+        *,
+        groups: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict]:
         """Build batch requests for a hard article (multiple topic summaries)."""
 
-        groups = self._fetch_topic_groups_for_article(news_url_id)
+        groups = groups if groups is not None else self._fetch_topic_groups_for_article(news_url_id)
         if not groups:
             logger.warning("No topic groups for hard article %s", news_url_id)
             return []
