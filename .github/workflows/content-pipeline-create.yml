@@ -1,0 +1,205 @@
+name: Content Pipeline - Create Batches
+
+# This workflow creates OpenAI Batch API jobs for the content processing pipeline.
+# It runs every 6 hours to create new batches, which are then processed by the
+# content-pipeline-poll.yml workflow.
+#
+# Pipeline stages:
+# 1. Extract news URLs (synchronous)
+# 2. Fetch article content (synchronous) 
+# 3. Create facts extraction batch (async, 24h)
+# 4. Create knowledge extraction batch (async, 24h) - triggered by poll workflow
+# 5. Create summary generation batch (async, 24h) - triggered by poll workflow
+
+on:
+  schedule:
+    # Every 6 hours at :00
+    - cron: '0 */6 * * *'
+  
+  workflow_dispatch:
+    inputs:
+      skip_news_extraction:
+        description: 'Skip news URL extraction step'
+        type: boolean
+        default: false
+      skip_content_fetch:
+        description: 'Skip content fetching step'
+        type: boolean
+        default: false
+      facts_limit:
+        description: 'Limit for facts batch (default: 500)'
+        type: number
+        default: 500
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  extract-news:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_news_extraction != 'true' }}
+    outputs:
+      urls_extracted: ${{ steps.extract.outputs.urls_extracted }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/functions/news_extraction/requirements.txt
+      
+      - name: Extract news URLs
+        id: extract
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "Extracting news URLs..."
+          python src/functions/news_extraction/scripts/extract_news_cli.py \
+            --days-back 1
+          echo "urls_extracted=true" >> $GITHUB_OUTPUT
+
+  fetch-content:
+    runs-on: ubuntu-latest
+    needs: [extract-news]
+    if: |
+      always() && 
+      (needs.extract-news.result == 'success' || needs.extract-news.result == 'skipped') &&
+      github.event.inputs.skip_content_fetch != 'true'
+    outputs:
+      content_fetched: ${{ steps.fetch.outputs.content_fetched }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/functions/url_content_extraction/requirements.txt
+          # Install playwright for browser-based extraction
+          playwright install chromium
+      
+      - name: Fetch article content
+        id: fetch
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "Fetching article content..."
+          python src/functions/url_content_extraction/scripts/content_batch_processor.py \
+            --limit 500 \
+            --workers 10 \
+            --timeout 45
+          echo "content_fetched=true" >> $GITHUB_OUTPUT
+
+  create-facts-batch:
+    runs-on: ubuntu-latest
+    needs: [fetch-content]
+    if: |
+      always() && 
+      (needs.fetch-content.result == 'success' || needs.fetch-content.result == 'skipped')
+    outputs:
+      batch_id: ${{ steps.create.outputs.batch_id }}
+      batch_created: ${{ steps.create.outputs.batch_created }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/functions/url_content_extraction/requirements.txt
+          # OpenAI is needed for Batch API (not in url_content_extraction requirements)
+          pip install openai>=1.12.0 supabase>=2.3.0
+      
+      - name: Create facts extraction batch
+        id: create
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          LIMIT=${{ github.event.inputs.facts_limit || 500 }}
+          echo "Creating facts batch with limit $LIMIT..."
+          
+          # Run the batch creation and capture output
+          OUTPUT=$(python src/functions/url_content_extraction/scripts/facts_batch_cli.py \
+            --task create \
+            --limit $LIMIT \
+            --only-validated \
+            --register \
+            2>&1) || {
+            # Check if error is "no articles" - that's OK
+            if echo "$OUTPUT" | grep -q "No eligible articles"; then
+              echo "No articles pending fact extraction"
+              echo "batch_created=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "$OUTPUT"
+            exit 1
+          }
+          
+          echo "$OUTPUT"
+          
+          # Extract batch ID from output
+          BATCH_ID=$(echo "$OUTPUT" | grep "Batch ID:" | head -1 | awk '{print $3}')
+          if [ -n "$BATCH_ID" ]; then
+            echo "batch_id=$BATCH_ID" >> $GITHUB_OUTPUT
+            echo "batch_created=true" >> $GITHUB_OUTPUT
+            echo "✅ Created facts batch: $BATCH_ID"
+          else
+            echo "batch_created=false" >> $GITHUB_OUTPUT
+          fi
+
+  report-status:
+    runs-on: ubuntu-latest
+    needs: [extract-news, fetch-content, create-facts-batch]
+    if: always()
+    
+    steps:
+      - name: Report pipeline status
+        run: |
+          echo "=== Content Pipeline Create Summary ==="
+          echo ""
+          echo "News Extraction: ${{ needs.extract-news.result }}"
+          echo "Content Fetch: ${{ needs.fetch-content.result }}"
+          echo "Facts Batch: ${{ needs.create-facts-batch.result }}"
+          
+          if [ "${{ needs.create-facts-batch.outputs.batch_created }}" == "true" ]; then
+            echo ""
+            echo "✅ Facts batch created: ${{ needs.create-facts-batch.outputs.batch_id }}"
+            echo "   Batch will be processed within 24 hours."
+            echo "   The content-pipeline-poll workflow will check status and process when ready."
+          elif [ "${{ needs.create-facts-batch.result }}" == "success" ]; then
+            echo ""
+            echo "ℹ️ No new articles to process"
+          fi
+          
+          # Fail if critical steps failed
+          if [ "${{ needs.create-facts-batch.result }}" == "failure" ]; then
+            echo ""
+            echo "❌ Pipeline failed at facts batch creation"
+            exit 1
+          fi

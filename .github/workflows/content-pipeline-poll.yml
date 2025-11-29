@@ -1,0 +1,329 @@
+name: Content Pipeline - Poll and Process
+
+# This workflow polls for completed OpenAI Batch API jobs and processes them.
+# It runs every 30 minutes to check batch status and process completed batches.
+#
+# When a batch completes, it:
+# 1. Processes the batch results (writes to database)
+# 2. Creates the next stage's batch (facts → knowledge → summary)
+# 3. Updates the tracking table
+#
+# The pipeline stages flow:
+# facts (completed) → create knowledge batch
+# knowledge (completed) → create summary batch
+# summary (completed) → done
+
+on:
+  schedule:
+    # Every 30 minutes
+    - cron: '*/30 * * * *'
+  
+  workflow_dispatch:
+    inputs:
+      force_check_all:
+        description: 'Force check all pending batches regardless of status'
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  poll-and-process:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install all pipeline dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install dependencies for all stages
+          pip install -r src/functions/url_content_extraction/requirements.txt
+          pip install -r src/functions/knowledge_extraction/requirements.txt
+          pip install -r src/functions/content_summarization/requirements.txt
+      
+      - name: Poll and process batches
+        id: poll
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python << 'EOF'
+          import os
+          import sys
+          import logging
+          from pathlib import Path
+
+          # Add project root to path
+          project_root = Path(__file__).resolve().parents[0] if '__file__' in dir() else Path.cwd()
+          sys.path.insert(0, str(project_root))
+
+          from src.shared.utils.env import load_env
+          from src.shared.utils.logging import setup_logging
+          from src.shared.batch.tracking import (
+              BatchTracker, BatchStage, BatchStatus, get_next_stage
+          )
+
+          # Import the batch pipelines
+          from src.functions.url_content_extraction.core.facts_batch import FactsBatchPipeline
+          from src.functions.knowledge_extraction.core.fact_batch import FactBatchPipeline
+          from src.functions.content_summarization.core.summary_batch import SummaryBatchPipeline
+
+          setup_logging(level="INFO")
+          load_env()
+
+          logger = logging.getLogger(__name__)
+
+          def check_openai_batch_status(batch_id: str) -> dict:
+              """Check batch status directly from OpenAI API."""
+              import openai
+              try:
+                  batch = openai.batches.retrieve(batch_id)
+                  return {
+                      "status": batch.status,
+                      "output_file_id": batch.output_file_id,
+                      "error_file_id": batch.error_file_id,
+                      "request_counts": {
+                          "total": batch.request_counts.total if batch.request_counts else 0,
+                          "completed": batch.request_counts.completed if batch.request_counts else 0,
+                          "failed": batch.request_counts.failed if batch.request_counts else 0,
+                      } if batch.request_counts else None,
+                  }
+              except Exception as e:
+                  logger.error(f"Failed to check batch {batch_id}: {e}")
+                  return {"status": "error", "error": str(e)}
+
+          def process_facts_batch(batch_id: str) -> dict:
+              """Process a completed facts batch."""
+              pipeline = FactsBatchPipeline()
+              return pipeline.process_batch(
+                  batch_id,
+                  dry_run=False,
+                  skip_existing=True,
+                  create_embeddings=True,
+              )
+
+          def process_knowledge_batch(batch_id: str, task: str) -> dict:
+              """Process a completed knowledge batch."""
+              pipeline = FactBatchPipeline()
+              return pipeline.process_batch(
+                  batch_id,
+                  task=task,
+                  dry_run=False,
+                  skip_existing=True,
+              )
+
+          def process_summary_batch(batch_id: str) -> dict:
+              """Process a completed summary batch."""
+              pipeline = SummaryBatchPipeline()
+              return pipeline.process_batch(
+                  batch_id,
+                  dry_run=False,
+                  skip_existing=True,
+                  create_embeddings=True,
+              )
+
+          def create_knowledge_batch() -> str | None:
+              """Create a knowledge extraction batch for pending facts."""
+              from src.functions.knowledge_extraction.core.fact_batch import (
+                  FactBatchPipeline,
+                  FactBatchRequestGenerator,
+              )
+              try:
+                  generator = FactBatchRequestGenerator(
+                      model="gpt-4.1-nano-2025-04-14",
+                      chunk_size=25,
+                  )
+                  pipeline = FactBatchPipeline(generator=generator)
+                  
+                  # Create topics batch first (entities can be a separate run)
+                  result = pipeline.create_batch(task="topics", limit=500)
+                  
+                  # Register in tracking
+                  tracker = BatchTracker()
+                  tracker.register_batch(
+                      batch_id=result.batch_id,
+                      stage=BatchStage.KNOWLEDGE,
+                      request_count=result.total_requests,
+                      model="gpt-4.1-nano-2025-04-14",
+                      metadata={"task": "topics", "total_facts": result.total_facts},
+                  )
+                  
+                  logger.info(f"Created knowledge batch: {result.batch_id}")
+                  return result.batch_id
+              except ValueError as e:
+                  if "No" in str(e) and "found" in str(e):
+                      logger.info("No facts pending knowledge extraction")
+                      return None
+                  raise
+
+          def create_summary_batch() -> str | None:
+              """Create a summary generation batch for pending articles."""
+              from src.functions.content_summarization.core.summary_batch import (
+                  SummaryBatchPipeline,
+                  SummaryBatchRequestGenerator,
+              )
+              try:
+                  generator = SummaryBatchRequestGenerator(model="gpt-5-nano")
+                  pipeline = SummaryBatchPipeline(generator=generator)
+                  result = pipeline.create_batch(task="all", limit=500)
+                  
+                  # Register in tracking
+                  tracker = BatchTracker()
+                  tracker.register_batch(
+                      batch_id=result.batch_id,
+                      stage=BatchStage.SUMMARY,
+                      article_count=result.total_articles,
+                      request_count=result.total_requests,
+                      model="gpt-5-nano",
+                      metadata={"task": "all"},
+                  )
+                  
+                  logger.info(f"Created summary batch: {result.batch_id}")
+                  return result.batch_id
+              except ValueError as e:
+                  if "No" in str(e) and "found" in str(e):
+                      logger.info("No articles pending summarization")
+                      return None
+                  raise
+
+          def main():
+              tracker = BatchTracker()
+              
+              # Get pending batches
+              pending_batches = tracker.get_pending_batches(limit=50)
+              logger.info(f"Found {len(pending_batches)} pending batches to check")
+              
+              batches_processed = 0
+              batches_still_pending = 0
+              next_stage_batches_created = 0
+              
+              for batch in pending_batches:
+                  batch_id = batch.batch_id
+                  stage = batch.stage
+                  current_status = batch.status
+                  
+                  logger.info(f"Checking {stage.value} batch {batch_id} (status: {current_status.value})")
+                  
+                  # Check OpenAI status
+                  openai_status = check_openai_batch_status(batch_id)
+                  
+                  if openai_status.get("status") == "error":
+                      logger.error(f"Error checking batch {batch_id}")
+                      continue
+                  
+                  openai_batch_status = openai_status["status"]
+                  
+                  # Handle based on OpenAI status
+                  if openai_batch_status == "completed":
+                      # Update tracking to completed if it was pending
+                      if current_status == BatchStatus.PENDING:
+                          tracker.mark_completed(
+                              batch_id,
+                              output_file_id=openai_status.get("output_file_id"),
+                          )
+                      
+                      # Mark as processing
+                      tracker.mark_processing(batch_id)
+                      
+                      try:
+                          # Process based on stage
+                          if stage == BatchStage.FACTS:
+                              result = process_facts_batch(batch_id)
+                              tracker.mark_processed(
+                                  batch_id,
+                                  items_processed=result.get("articles_processed", 0),
+                                  items_skipped=result.get("articles_skipped_existing", 0),
+                                  items_failed=result.get("articles_with_errors", 0),
+                              )
+                              batches_processed += 1
+                              
+                              # Create next stage batch (knowledge)
+                              next_batch = create_knowledge_batch()
+                              if next_batch:
+                                  next_stage_batches_created += 1
+                          
+                          elif stage == BatchStage.KNOWLEDGE:
+                              task = batch.metadata.get("task", "topics")
+                              result = process_knowledge_batch(batch_id, task)
+                              tracker.mark_processed(
+                                  batch_id,
+                                  items_processed=result.get("facts_processed", 0),
+                                  items_skipped=result.get("facts_skipped_existing", 0),
+                                  items_failed=len(result.get("errors", [])),
+                              )
+                              batches_processed += 1
+                              
+                              # Create next stage batch (summary)
+                              next_batch = create_summary_batch()
+                              if next_batch:
+                                  next_stage_batches_created += 1
+                          
+                          elif stage == BatchStage.SUMMARY:
+                              result = process_summary_batch(batch_id)
+                              tracker.mark_processed(
+                                  batch_id,
+                                  items_processed=result.get("articles_processed", 0),
+                                  items_skipped=result.get("articles_skipped_existing", 0),
+                                  items_failed=len(result.get("errors", [])),
+                              )
+                              batches_processed += 1
+                              # Summary is the final stage
+                          
+                          logger.info(f"✅ Successfully processed {stage.value} batch {batch_id}")
+                          
+                      except Exception as e:
+                          error_msg = str(e)[:500]
+                          logger.error(f"Failed to process batch {batch_id}: {error_msg}")
+                          tracker.mark_failed(batch_id, error_msg)
+                  
+                  elif openai_batch_status in ["failed", "expired", "cancelled"]:
+                      logger.warning(f"Batch {batch_id} ended with status: {openai_batch_status}")
+                      tracker.mark_failed(batch_id, f"OpenAI batch {openai_batch_status}")
+                  
+                  elif openai_batch_status in ["validating", "in_progress", "finalizing"]:
+                      batches_still_pending += 1
+                      logger.info(f"Batch {batch_id} still {openai_batch_status}")
+                  
+                  else:
+                      logger.warning(f"Unknown batch status: {openai_batch_status}")
+              
+              # Check for failed batches eligible for retry
+              failed_batches = tracker.get_failed_batches_for_retry(limit=5)
+              for batch in failed_batches:
+                  logger.info(f"Retrying failed batch {batch.batch_id} (attempt {batch.retry_count + 1})")
+                  tracker.reset_for_retry(batch.batch_id)
+              
+              # Summary
+              print("\n" + "=" * 50)
+              print("CONTENT PIPELINE POLL SUMMARY")
+              print("=" * 50)
+              print(f"Batches checked:        {len(pending_batches)}")
+              print(f"Batches processed:      {batches_processed}")
+              print(f"Batches still pending:  {batches_still_pending}")
+              print(f"Next stage batches:     {next_stage_batches_created}")
+              print(f"Failed batches retried: {len(failed_batches)}")
+              print("=" * 50)
+
+          if __name__ == "__main__":
+              main()
+          EOF
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ steps.poll.outcome }}" == "success" ]; then
+            echo "✅ Pipeline poll completed successfully"
+          else
+            echo "❌ Pipeline poll failed"
+            exit 1
+          fi

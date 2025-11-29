@@ -38,6 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.shared.utils.logging import setup_logging
 from src.shared.utils.env import load_env
 from src.functions.url_content_extraction.core.facts_batch import FactsBatchPipeline
+from src.shared.batch.tracking import BatchTracker, BatchStage
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,12 @@ Configuration:
         help="Set logging level explicitly",
     )
 
+    parser.add_argument(
+        "--register",
+        action="store_true",
+        help="Register batch in tracking table for pipeline orchestration (used by GitHub Actions)",
+    )
+
     return parser
 
 
@@ -179,6 +186,7 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
     """Create a new batch job."""
     high_fact_count = getattr(args, 'high_fact_count', None)
     only_validated = getattr(args, 'only_validated', False)
+    register = getattr(args, 'register', False)
     
     if high_fact_count:
         logger.info(f"Creating batch job for re-extraction of high fact count articles (> {high_fact_count})...")
@@ -189,6 +197,7 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
     logger.info(f"  Model: {args.model}")
     logger.info(f"  Skip existing: {args.skip_existing}")
     logger.info(f"  Only validated: {only_validated}")
+    logger.info(f"  Register in tracking: {register}")
     if high_fact_count:
         logger.info(f"  High fact count threshold: > {high_fact_count}")
 
@@ -199,6 +208,27 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
             high_fact_count_threshold=high_fact_count,
             include_unextracted=not only_validated,
         )
+
+        # Register batch in tracking table if requested
+        if register:
+            try:
+                tracker = BatchTracker()
+                tracker.register_batch(
+                    batch_id=result.batch_id,
+                    stage=BatchStage.FACTS,
+                    article_count=result.total_articles,
+                    request_count=result.total_requests,
+                    model=args.model,
+                    metadata={
+                        "high_fact_count_threshold": high_fact_count,
+                        "only_validated": only_validated,
+                        "skip_existing": args.skip_existing,
+                    },
+                )
+                logger.info(f"Registered batch {result.batch_id} in tracking table")
+            except Exception as e:
+                logger.warning(f"Failed to register batch in tracking table: {e}")
+                # Don't fail the whole operation if tracking fails
 
         print("\n" + "=" * 60)
         if high_fact_count:
@@ -211,6 +241,8 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
         print(f"Articles:       {result.total_articles}")
         print(f"Requests:       {result.total_requests}")
         print(f"Input file:     {result.input_file_path}")
+        if register:
+            print(f"Tracking:       ✅ Registered")
         if high_fact_count:
             print(f"\n⚠️  NOTE: When processing this batch, existing facts will be DELETED")
             print(f"   for articles with facts_count > {high_fact_count}")

@@ -8,12 +8,14 @@ Provides generic utilities for batch processing pipelines:
 - MemoryMonitor: Daemon thread for memory pressure monitoring
 - TaskPingHandle: Per-task heartbeat tracking
 - retry_on_network_error: Decorator for network retry with exponential backoff
+- BatchTracker: Track OpenAI Batch API jobs for pipeline orchestration
 
 Usage:
     from src.shared.batch import CheckpointManager, FailureTracker, ProgressTracker
     from src.shared.batch import BrowserPool, MemoryMonitor
     from src.shared.batch import TaskPingHandle, send_ping, ping_keepalive
     from src.shared.batch import retry_on_network_error
+    from src.shared.batch import BatchTracker, BatchStage, BatchStatus, get_next_stage
 """
 
 from .checkpoint import CheckpointManager
@@ -23,6 +25,7 @@ from .browser_pool import BrowserPool
 from .memory_monitor import MemoryMonitor
 from .task_ping import TaskPingHandle, TaskPingManager, send_ping, ping_keepalive
 from .retry import retry_on_network_error
+from .tracking import BatchTracker, BatchStage, BatchStatus, BatchJob, get_next_stage
 
 __all__ = [
     "CheckpointManager",
@@ -36,4 +39,9 @@ __all__ = [
     "send_ping",
     "ping_keepalive",
     "retry_on_network_error",
+    "BatchTracker",
+    "BatchStage",
+    "BatchStatus",
+    "BatchJob",
+    "get_next_stage",
 ]
