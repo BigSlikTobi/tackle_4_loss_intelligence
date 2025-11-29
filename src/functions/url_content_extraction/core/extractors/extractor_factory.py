@@ -24,6 +24,11 @@ _HEAVY_HOSTS = {
     "www.nfl.com",
     "sports.yahoo.com",
     "www.cbssports.com",
+    "www.nbcsportsphiladelphia.com",
+    "www.nbcsportschicago.com",
+    "www.nbcsportsbayarea.com",
+    "www.nbcsportsboston.com",
+    "www.nbcsportswashington.com",
 }
 
 _LIGHT_HOSTS = {

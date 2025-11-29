@@ -138,6 +138,7 @@ class SummaryBatchResultProcessor:
                         "topic": parsed.get("topic", "general"),
                         "scope_type": parsed.get("scope_type"),
                         "scope_id": parsed.get("scope_id"),
+                        "scope_label": parsed.get("scope_label"),
                         "summary": summary,
                     })
 
@@ -294,19 +295,32 @@ class SummaryBatchResultProcessor:
         """Bulk insert topic-level summaries."""
         
         records = []
+        skipped = 0
         for news_url_id, topic_list in hard_summaries.items():
             for topic_data in topic_list:
+                topic = topic_data["topic"]
                 scope_type = topic_data.get("scope_type")
                 scope_id = topic_data.get("scope_id")
+                scope_label = topic_data.get("scope_label") or scope_id
+                
+                # Skip corrupted records with malformed data
+                if self._is_corrupted_topic_summary(topic, scope_type, scope_id):
+                    logger.warning(
+                        "Skipping corrupted topic summary: topic=%s, scope_type=%s, scope_id=%s",
+                        topic, scope_type, scope_id
+                    )
+                    skipped += 1
+                    continue
+                
                 primary_team = scope_id if scope_type == "team" else None
                 
                 records.append({
                     "news_url_id": news_url_id,
-                    "primary_topic": topic_data["topic"],
+                    "primary_topic": topic,
                     "primary_team": primary_team,
                     "primary_scope_type": scope_type if scope_type != "none" else None,
                     "primary_scope_id": scope_id if scope_id != "none" else None,
-                    "primary_scope_label": scope_id if scope_id != "none" else None,
+                    "primary_scope_label": scope_label if scope_label != "none" else None,
                     "summary_text": topic_data["summary"],
                     "llm_model": model,
                     "prompt_version": TOPIC_SUMMARY_PROMPT_VERSION,
@@ -481,16 +495,77 @@ class SummaryBatchResultProcessor:
             return {"type": "easy", "news_url_id": news_url_id}
         
         elif custom_id.startswith("hard_"):
-            # Format: hard_{news_url_id}_{idx}_{topic}_{scope_type}_{scope_id}
-            parts = custom_id.split("_", 5)
-            if len(parts) >= 5:
-                return {
-                    "type": "hard",
-                    "news_url_id": parts[1],
-                    "index": parts[2],
-                    "topic": parts[3] if len(parts) > 3 else "general",
-                    "scope_type": parts[4] if len(parts) > 4 else None,
-                    "scope_id": parts[5] if len(parts) > 5 else None,
-                }
+            # New format: hard_{news_url_id}_{idx}|{topic}|{scope_type}|{scope_id}|{scope_label}
+            # Old format: hard_{news_url_id}_{idx}_{topic}_{scope_type}_{scope_id} (deprecated)
+            
+            # Check for new pipe-delimited format
+            if "|" in custom_id:
+                # Split prefix from pipe-delimited parts
+                prefix_end = custom_id.find("|")
+                prefix = custom_id[:prefix_end]  # hard_{news_url_id}_{idx}
+                rest = custom_id[prefix_end + 1:]  # topic|scope_type|scope_id|scope_label
+                
+                prefix_parts = prefix.split("_")
+                if len(prefix_parts) >= 3:
+                    news_url_id = prefix_parts[1]
+                    idx = prefix_parts[2]
+                    
+                    rest_parts = rest.split("|")
+                    topic = rest_parts[0] if len(rest_parts) > 0 else "general"
+                    scope_type = rest_parts[1] if len(rest_parts) > 1 else None
+                    scope_id = rest_parts[2] if len(rest_parts) > 2 else None
+                    scope_label = rest_parts[3] if len(rest_parts) > 3 else scope_id
+                    
+                    return {
+                        "type": "hard",
+                        "news_url_id": news_url_id,
+                        "index": idx,
+                        "topic": topic,
+                        "scope_type": scope_type,
+                        "scope_id": scope_id,
+                        "scope_label": scope_label,
+                    }
+            else:
+                # Fallback: old underscore-delimited format (deprecated)
+                parts = custom_id.split("_", 5)
+                if len(parts) >= 5:
+                    return {
+                        "type": "hard",
+                        "news_url_id": parts[1],
+                        "index": parts[2],
+                        "topic": parts[3] if len(parts) > 3 else "general",
+                        "scope_type": parts[4] if len(parts) > 4 else None,
+                        "scope_id": parts[5] if len(parts) > 5 else None,
+                        "scope_label": parts[5] if len(parts) > 5 else None,
+                    }
 
         return None
+
+    def _is_corrupted_topic_summary(
+        self,
+        topic: Optional[str],
+        scope_type: Optional[str],
+        scope_id: Optional[str],
+    ) -> bool:
+        """Check if topic summary data appears corrupted from parsing issues."""
+        
+        # Check for known corruption patterns
+        corruption_patterns = [
+            # scope_type should be team/player/game/none, not 'topics' or '&'
+            scope_type == "topics",
+            scope_type == "&",
+            # scope_id should not contain 'found_player', 'found_team', etc.
+            scope_id and "found_player" in str(scope_id),
+            scope_id and "found_team" in str(scope_id),
+            scope_id and "found_none" in str(scope_id),
+            # scope_id should not start with '&_'
+            scope_id and str(scope_id).startswith("&_"),
+            # scope_id should not contain '_&_'
+            scope_id and "_&_" in str(scope_id),
+            # topic 'no' is likely from parsing 'no_topics_found' incorrectly
+            topic == "no",
+            # UNRESOLVED markers shouldn't be stored
+            scope_id and "UNRESOLVED:" in str(scope_id),
+        ]
+        
+        return any(corruption_patterns)

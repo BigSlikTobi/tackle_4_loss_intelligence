@@ -48,11 +48,8 @@ htmlcov/
 # Project specific
 .kiro/
 
-# Batch files
-src/functions/knowledge_extraction/batch_files
-src/functions/knowledge_extraction/scripts/batch_files
-src/functions/content_summarization/scripts/batch_files
-src/batch_files/
+# Batch files (all batch_files directories anywhere in the project)
+**/batch_files/
 
 #node_modules
 node_modules/
@@ -83,3 +80,5 @@ supabase
 # json checkpoint files
 src/functions/content_summarization/.backlog_checkpoint.json
 src/functions/content_summarization/.backlog_failures.json
+src/functions/url_content_extraction/scripts/checkpoints
+src/functions/url_content_extraction/checkpoints

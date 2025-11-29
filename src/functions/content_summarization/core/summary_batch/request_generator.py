@@ -293,6 +293,9 @@ class SummaryBatchRequestGenerator:
         for row in getattr(topics_response, "data", []) or []:
             fact_id = row.get("news_fact_id")
             topic = row.get("canonical_topic") or "general"
+            # Skip NO_TOPICS_FOUND marker - use "general" instead
+            if topic == "NO_TOPICS_FOUND":
+                topic = "general"
             # Prefer primary topic if available
             if fact_id and (fact_id not in topics_by_fact or row.get("is_primary")):
                 topics_by_fact[fact_id] = topic
@@ -382,9 +385,12 @@ class SummaryBatchRequestGenerator:
             facts_payload = json.dumps({"facts": facts}, ensure_ascii=False)
 
             # Encode scope info in custom_id for processing
+            # Use pipe delimiter for topic/scope to avoid conflicts with underscores in values
             scope_type = scope.get("type", "none")
             scope_id = scope.get("id", "none")
-            custom_id = f"hard_{news_url_id}_{idx}_{topic}_{scope_type}_{scope_id}"
+            scope_label = scope.get("label") or scope_id
+            # Format: hard_{news_url_id}_{idx}|{topic}|{scope_type}|{scope_id}|{scope_label}
+            custom_id = f"hard_{news_url_id}_{idx}|{topic}|{scope_type}|{scope_id}|{scope_label}"
 
             requests.append(self._build_request(
                 custom_id=custom_id,

@@ -58,8 +58,17 @@ class PlaywrightExtractor:
         "div[data-testid='StoryBody']",
         "div[class*='article-body']",
         "div[class*='StoryBody']",
+        "div[class*='ArticleBody']",
         ".contentItem__padding",  # ESPN
         ".contentItem",  # ESPN fallback
+        # NBC Sports selectors
+        "div.article-content",
+        "div.article__content",
+        "div.post-content",
+        "div.entry-content",
+        ".article-body",
+        ".post-body",
+        "[data-module='article-body']",
     )
 
     _PARAGRAPH_SELECTORS: tuple[str, ...] = (
@@ -274,9 +283,10 @@ class PlaywrightExtractor:
                 
                 # Give ESPN's JavaScript time to populate content
                 is_espn = "espn.com" in str(options.url).lower()
-                if is_espn:
-                    self._logger.debug("Detected ESPN - waiting for JS content")
-                    await page.wait_for_timeout(2000)
+                is_nbc_sports = "nbcsports" in str(options.url).lower()
+                if is_espn or is_nbc_sports:
+                    self._logger.debug("Detected %s - waiting for JS content", "ESPN" if is_espn else "NBC Sports")
+                    await page.wait_for_timeout(3000)  # Longer wait for JS-heavy sites
                 
                 html = await page.content()
                 
@@ -486,7 +496,7 @@ class PlaywrightExtractor:
         return [str(entry) for entry in result if isinstance(entry, str)]
 
     async def _extract_with_tree_walker(self, page: Any) -> list[str]:
-        """Tree walker extraction (like the JS grab() function) - more robust for ESPN."""
+        """Tree walker extraction (like the JS grab() function) - more robust for ESPN and NBC Sports."""
         
         script = """() => {
             const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
@@ -498,6 +508,12 @@ class PlaywrightExtractor:
                 '[itemprop="articleBody"]',
                 '[data-testid="Article"]',
                 '.article-body',
+                '.article-content',
+                '.article__content',
+                '.post-content',
+                '.entry-content',
+                '.post-body',
+                '[data-module="article-body"]',
                 'main', '[role="main"]'
             ];
             
@@ -507,20 +523,30 @@ class PlaywrightExtractor:
             }
             if (!scopes.length) scopes.push(document.body);
             
-            const bad = new Set(['NAV', 'ASIDE', 'FOOTER', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'FORM', 'HEADER']);
+            const bad = new Set(['NAV', 'ASIDE', 'FOOTER', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'FORM', 'HEADER', 'FIGURE', 'FIGCAPTION']);
             const blocks = [];
             const MIN = 50;
+            const seen = new Set();
             
             const pushFrom = (root) => {
                 const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
                 while (walker.nextNode()) {
                     const el = walker.currentNode;
                     if (bad.has(el.tagName)) continue;
+                    // Skip elements with bad classes
+                    const className = el.className || '';
+                    if (typeof className === 'string' && 
+                        (className.includes('social') || className.includes('share') || 
+                         className.includes('ad-') || className.includes('sidebar') ||
+                         className.includes('related') || className.includes('newsletter'))) {
+                        continue;
+                    }
                     if (['P', 'LI', 'BLOCKQUOTE', 'DIV'].includes(el.tagName)) {
                         const t = norm(el.innerText);
                         // Only take text from leaf-like elements (few children)
                         const childCount = el.querySelectorAll('p, li, div').length;
-                        if (t && t.length > 20 && childCount < 3) {
+                        if (t && t.length > 20 && childCount < 3 && !seen.has(t)) {
+                            seen.add(t);
                             blocks.push(t);
                         }
                     }
