@@ -220,12 +220,12 @@ jobs:
               # Get pending batches (excluding ones currently being processed)
               pending_batches = tracker.get_pending_batches(limit=50)
               
-              # Filter out batches that are already being processed (race condition protection)
-              # A batch in PROCESSING state means another workflow run is handling it
-              pending_batches = [
-                  b for b in pending_batches 
-                  if b.status != BatchStatus.PROCESSING
-              ]
+              # No need to filter out PROCESSING batches; get_pending_batches() already excludes them
+              
+              
+              
+              
+              
               
               logger.info(f"Found {len(pending_batches)} pending batches to check")
               
