@@ -182,7 +182,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r src/functions/url_content_extraction/requirements.txt
           # OpenAI is needed for Batch API (not in url_content_extraction requirements)
-          pip install openai>=1.12.0 supabase>=2.3.0
+          pip install openai>=1.12.0 supabase>=2.3.0 python-dotenv>=1.0.0
+          # Install playwright for content extraction during batch creation
+          playwright install --with-deps chromium
       
       - name: Create facts extraction batch
         id: create
