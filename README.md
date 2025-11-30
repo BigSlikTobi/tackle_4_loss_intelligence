@@ -185,6 +185,127 @@ python scripts/extract_knowledge_cli.py
 
 ---
 
+## 🤖 Automated Content Pipeline
+
+The platform includes **fully automated GitHub Actions workflows** that process NFL news content every 30 minutes. This pipeline runs autonomously, requiring no manual intervention.
+
+### How It Works
+
+The pipeline uses **two complementary workflows** that work together:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    AUTOMATED CONTENT PIPELINE                               │
+│                    Runs every 30 minutes                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  WORKFLOW 1: content-pipeline-create.yml                            │   │
+│  │  "The Creator" - Finds new content and starts processing            │   │
+│  ├─────────────────────────────────────────────────────────────────────┤   │
+│  │  Step 1: Extract News URLs                                          │   │
+│  │    └─ Scans RSS feeds & sitemaps for new NFL articles               │   │
+│  │    └─ Saves new URLs to database                                    │   │
+│  │                                                                      │   │
+│  │  Step 2: Fetch Article Content                                      │   │
+│  │    └─ Downloads full article text from URLs                         │   │
+│  │    └─ Uses Playwright browser for heavy sites (ESPN, NFL.com)       │   │
+│  │    └─ Only processes articles from last 24 hours                    │   │
+│  │                                                                      │   │
+│  │  Step 3: Create Facts Batch                                         │   │
+│  │    └─ Sends articles to OpenAI Batch API for fact extraction        │   │
+│  │    └─ OpenAI processes in background (up to 24h, 50% cheaper)       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│                              ⬇️  Batch queued with OpenAI                   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  WORKFLOW 2: content-pipeline-poll.yml                              │   │
+│  │  "The Processor" - Checks on batches and processes results          │   │
+│  ├─────────────────────────────────────────────────────────────────────┤   │
+│  │  Polls OpenAI for completed batches and processes them:             │   │
+│  │                                                                      │   │
+│  │  When FACTS batch completes:                                        │   │
+│  │    └─ Saves extracted facts to database                             │   │
+│  │    └─ Creates KNOWLEDGE/TOPICS batch (extracts key topics)          │   │
+│  │                                                                      │   │
+│  │  When TOPICS batch completes:                                       │   │
+│  │    └─ Saves topics to database                                      │   │
+│  │    └─ Creates KNOWLEDGE/ENTITIES batch (extracts NFL entities)      │   │
+│  │                                                                      │   │
+│  │  When ENTITIES batch completes:                                     │   │
+│  │    └─ Saves entities (players, teams, games) to database            │   │
+│  │    └─ Creates SUMMARY batch (generates article summaries)           │   │
+│  │                                                                      │   │
+│  │  When SUMMARY batch completes:                                      │   │
+│  │    └─ Saves summaries and embeddings to database                    │   │
+│  │    └─ Pipeline complete! ✅                                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Pipeline Stages Explained
+
+| Stage | What It Does | How Long |
+|-------|--------------|----------|
+| **1. News Extraction** | Scans RSS feeds and sitemaps from ESPN, NFL.com, Yahoo Sports, etc. to find new article URLs | ~30 seconds |
+| **2. Content Fetching** | Downloads full article text using browser automation for JavaScript-heavy sites | ~2-5 minutes |
+| **3. Facts Extraction** | AI extracts atomic facts from each article (e.g., "Patrick Mahomes threw 3 touchdowns") | Up to 24 hours* |
+| **4. Topic Extraction** | AI identifies key topics discussed in the facts | Up to 24 hours* |
+| **5. Entity Extraction** | AI identifies NFL entities (players, teams, games) and links to database | Up to 24 hours* |
+| **6. Summary Generation** | AI generates concise summaries from the extracted facts | Up to 24 hours* |
+
+*Uses OpenAI Batch API for 50% cost savings - typically completes much faster
+
+### Key Features
+
+- **🔄 Runs Every 30 Minutes**: Both workflows run on a cron schedule
+- **🚫 No Overlap**: Concurrency controls prevent duplicate runs
+- **💰 50% Cost Savings**: Uses OpenAI Batch API instead of real-time API
+- **🔁 Automatic Retries**: Failed batches are retried automatically
+- **📊 Race Condition Protection**: Batches are locked during processing
+- **✅ Partial Success**: Pipeline continues even if some articles fail
+
+### Workflow Files
+
+| File | Purpose |
+|------|---------|
+| [`.github/workflows/content-pipeline-create.yml`](.github/workflows/content-pipeline-create.yml) | Creates new batches (extract news → fetch content → create facts batch) |
+| [`.github/workflows/content-pipeline-poll.yml`](.github/workflows/content-pipeline-poll.yml) | Polls and processes completed batches, creates next-stage batches |
+
+### Required Secrets
+
+Configure these in your GitHub repository settings (Settings → Secrets → Actions):
+
+| Secret | Description |
+|--------|-------------|
+| `SUPABASE_URL` | Your Supabase project URL |
+| `SUPABASE_KEY` | Your Supabase service role key |
+| `OPENAI_API_KEY` | OpenAI API key for Batch API access |
+
+### Manual Triggers
+
+You can manually trigger either workflow from GitHub Actions:
+
+```
+GitHub → Actions → Content Pipeline - Create Batches → Run workflow
+```
+
+Optional inputs for manual runs:
+- **Skip news extraction**: Jump straight to content fetching
+- **Skip content fetch**: Only create facts batch
+- **Facts limit**: Control batch size (default: 500)
+
+### Monitoring
+
+Check workflow status in GitHub Actions. Each run shows:
+- ✅ Steps completed successfully
+- ❌ Steps that failed (with logs)
+- ℹ️ Informational messages (e.g., "No new articles to process")
+
+---
+
 ## 🏗️ Architecture
 
 **Function-Based Isolation** - Each module operates independently:
