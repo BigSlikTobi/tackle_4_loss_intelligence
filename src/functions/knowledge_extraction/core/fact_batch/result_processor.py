@@ -225,19 +225,32 @@ class FactBatchResultProcessor:
         result.facts_processed += len(facts_with_writes)
 
         # Update knowledge_extracted_at on URLs that had facts processed
-        if processed_fact_ids and not dry_run:
-            urls_updated = self._update_url_timestamps(processed_fact_ids, task)
+        # IMPORTANT: Only set this flag after ENTITIES task completes (the final step)
+        # If we set it after topics, the entities batch won't find any pending facts
+        # because it filters on knowledge_extracted_at IS NULL
+        if task == "entities" and processed_fact_ids and not dry_run:
+            urls_updated = self._update_url_timestamps(processed_fact_ids)
             result.urls_updated = urls_updated
-        elif dry_run and processed_fact_ids:
+        elif task == "entities" and dry_run and processed_fact_ids:
             logger.info("[DRY RUN] Would update knowledge_extracted_at on URLs for %d processed facts", len(processed_fact_ids))
+        elif task == "topics":
+            logger.info(
+                "Topics task completed for %d facts - NOT setting knowledge_extracted_at "
+                "(will be set after entities task)",
+                len(processed_fact_ids),
+            )
 
         return result
 
-    def _update_url_timestamps(self, fact_ids: Set[str], task: str) -> int:
+    def _update_url_timestamps(self, fact_ids: Set[str]) -> int:
         """Update knowledge_extracted_at on news_urls for processed facts.
         
         This marks the URL as having completed knowledge extraction so it
         won't be picked up again by future batch runs.
+        
+        NOTE: This should only be called after the ENTITIES task completes,
+        as it's the final step in knowledge extraction. Setting this after
+        topics would prevent entities from being extracted.
         """
         if not fact_ids:
             return 0
@@ -282,9 +295,8 @@ class FactBatchResultProcessor:
                 updated_count = 0
             
             logger.info(
-                "Updated knowledge_extracted_at for %d URLs (%s task, %d facts)",
+                "Updated knowledge_extracted_at for %d URLs (entities task, %d facts)",
                 updated_count,
-                task,
                 len(fact_ids),
             )
             return updated_count
