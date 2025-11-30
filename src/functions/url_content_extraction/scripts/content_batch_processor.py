@@ -30,7 +30,7 @@ import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -82,37 +82,82 @@ def fetch_pending_urls(
     client,
     limit: int = 100,
     url_ids: Optional[List[str]] = None,
+    max_age_hours: Optional[int] = 24,
 ) -> List[Dict[str, Any]]:
-    """Fetch URLs pending content extraction.
+    """Fetch URLs pending content extraction with pagination.
     
     Args:
         client: Supabase client
         limit: Maximum URLs to fetch
         url_ids: Specific URL IDs to fetch (overrides limit)
+        max_age_hours: Only fetch URLs created within this many hours (None for no limit)
         
     Returns:
-        List of URL records with id and url
+        List of URL records with id and url, ordered by created_at DESC (newest first)
     """
     if url_ids:
-        response = (
-            client.table("news_urls")
-            .select("id,url")
-            .in_("id", url_ids)
-            .execute()
-        )
+        # For specific URL IDs, fetch in paginated chunks to handle large lists
+        all_urls = []
+        page_size = 500
+        for i in range(0, len(url_ids), page_size):
+            chunk = url_ids[i:i + page_size]
+            response = (
+                client.table("news_urls")
+                .select("id,url,created_at")
+                .in_("id", chunk)
+                .execute()
+            )
+            all_urls.extend(getattr(response, "data", []) or [])
+        
+        # Sort by created_at DESC to ensure newest first
+        all_urls.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        logger.info("Fetched %d URLs by ID for content extraction", len(all_urls))
+        return all_urls
     else:
-        response = (
-            client.table("news_urls")
-            .select("id,url")
-            .is_("content_extracted_at", "null")
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-
-    urls = getattr(response, "data", []) or []
-    logger.info("Fetched %d pending URLs for content extraction", len(urls))
-    return urls
+        # Paginate to ensure we get all results up to the limit
+        # Supabase has a default limit of 1000 rows per request
+        all_urls = []
+        page_size = min(500, limit)  # Use smaller pages for reliability
+        offset = 0
+        
+        # Calculate cutoff time once
+        cutoff_iso = None
+        if max_age_hours is not None:
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+            cutoff_iso = cutoff_time.isoformat()
+            logger.info("Filtering to URLs created after %s (max age: %d hours)", cutoff_iso, max_age_hours)
+        
+        while len(all_urls) < limit:
+            remaining = limit - len(all_urls)
+            fetch_count = min(page_size, remaining)
+            
+            query = (
+                client.table("news_urls")
+                .select("id,url,created_at")
+                .is_("content_extracted_at", "null")
+                .order("created_at", desc=True)  # Newest first
+            )
+            
+            if cutoff_iso is not None:
+                query = query.gte("created_at", cutoff_iso)
+            
+            # Use range for pagination (0-indexed, inclusive)
+            response = query.range(offset, offset + fetch_count - 1).execute()
+            
+            rows = getattr(response, "data", []) or []
+            if not rows:
+                # No more data
+                break
+            
+            all_urls.extend(rows)
+            offset += len(rows)
+            
+            # If we got fewer rows than requested, we've reached the end
+            if len(rows) < fetch_count:
+                break
+        
+        logger.info("Fetched %d pending URLs for content extraction (limit: %d)", len(all_urls), limit)
+        return all_urls
 
 
 def extract_content(url: str, timeout: int = 45) -> str:
@@ -260,6 +305,7 @@ def run_batch_processor(
     workers: int = 4,
     timeout: int = 45,
     flush_interval: int = 10,
+    max_age_hours: Optional[int] = 24,
 ) -> Dict[str, Any]:
     """Run the content batch processor.
     
@@ -270,6 +316,7 @@ def run_batch_processor(
         workers: Number of concurrent workers
         timeout: Request timeout per URL
         flush_interval: Checkpoint flush interval
+        max_age_hours: Only process URLs created within this many hours (None for no limit)
         
     Returns:
         Summary dict with statistics
@@ -287,7 +334,7 @@ def run_batch_processor(
 
     try:
         # Fetch pending URLs
-        urls = fetch_pending_urls(client, limit=limit, url_ids=url_ids)
+        urls = fetch_pending_urls(client, limit=limit, url_ids=url_ids, max_age_hours=max_age_hours)
 
         if not urls:
             logger.info("No pending URLs to process")
@@ -470,6 +517,13 @@ Examples:
     )
 
     parser.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=24,
+        help="Only process URLs created within this many hours (default: 24, use 0 for no limit)",
+    )
+
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose logging",
@@ -521,12 +575,15 @@ def main():
             sys.exit(1)
 
     # Run processor
+    # max_age_hours=0 means no limit
+    max_age = args.max_age_hours if args.max_age_hours > 0 else None
     result = run_batch_processor(
         limit=args.limit,
         url_ids=url_ids,
         checkpoint_file=args.checkpoint,
         workers=args.workers,
         timeout=args.timeout,
+        max_age_hours=max_age,
     )
 
     # Print summary

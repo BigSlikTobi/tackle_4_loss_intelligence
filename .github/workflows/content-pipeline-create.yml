@@ -148,8 +148,10 @@ jobs:
               --timeout 45
           else
             echo "No new URL IDs from extraction step, fetching from database..."
+            # Only process URLs from the last 24 hours (newest first with pagination)
             python src/functions/url_content_extraction/scripts/content_batch_processor.py \
               --limit 500 \
+              --max-age-hours 24 \
               --workers 10 \
               --timeout 45
           fi
