@@ -189,7 +189,7 @@ def run_summary_processor(args) -> None:
     client = get_supabase_client()
     checkpoint = CheckpointManager(args.checkpoint_file)
     failure_tracker = FailureTracker()
-    memory_monitor = MemoryMonitor(max_percent=args.max_memory_percent)
+    memory_monitor = MemoryMonitor(warning_threshold=args.max_memory_percent)
     memory_monitor.start()
     
     try:

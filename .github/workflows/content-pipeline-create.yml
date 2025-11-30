@@ -1,7 +1,7 @@
 name: Content Pipeline - Create Batches
 
 # This workflow creates OpenAI Batch API jobs for the content processing pipeline.
-# It runs every 6 hours to create new batches, which are then processed by the
+# It runs every 30 minutes to create new batches, which are then processed by the
 # content-pipeline-poll.yml workflow.
 #
 # Pipeline stages:
@@ -13,8 +13,8 @@ name: Content Pipeline - Create Batches
 
 on:
   schedule:
-    # Every 6 hours at :00
-    - cron: '0 */6 * * *'
+    # Every 30 minutes
+    - cron: '*/30 * * * *'
   
   workflow_dispatch:
     inputs:
@@ -30,6 +30,11 @@ on:
         description: 'Limit for facts batch (default: 500)'
         type: number
         default: 500
+
+# Prevent concurrent runs - if a run is in progress, skip the new one
+concurrency:
+  group: content-pipeline-create
+  cancel-in-progress: false
 
 env:
   PYTHON_VERSION: '3.11'
@@ -112,8 +117,8 @@ jobs:
           pip install -r src/functions/url_content_extraction/requirements.txt
           # Supabase and python-dotenv needed for database access
           pip install supabase>=2.3.0 python-dotenv>=1.0.0
-          # Install playwright for browser-based extraction
-          playwright install chromium
+          # Install playwright for browser-based extraction (with system deps for Ubuntu)
+          playwright install --with-deps chromium
       
       - name: Download URL IDs artifact
         uses: actions/download-artifact@v4
@@ -132,12 +137,13 @@ jobs:
           
           # Check if we have specific URL IDs from the previous step
           if [ -f /tmp/new_url_ids.txt ] && [ -s /tmp/new_url_ids.txt ]; then
-            # Convert newline-separated IDs to comma-separated
-            URL_IDS=$(cat /tmp/new_url_ids.txt | tr '\n' ',' | sed 's/,$//')
-            echo "Processing ${URL_IDS:0:100}... ($(wc -l < /tmp/new_url_ids.txt) URLs)"
+            URL_COUNT=$(wc -l < /tmp/new_url_ids.txt | tr -d ' ')
+            echo "Processing $URL_COUNT URLs from extraction step"
             
+            # Use file-based approach to avoid command line length limits
+            # The script reads from the file directly
             python src/functions/url_content_extraction/scripts/content_batch_processor.py \
-              --url-ids "$URL_IDS" \
+              --url-ids-file /tmp/new_url_ids.txt \
               --workers 10 \
               --timeout 45
           else

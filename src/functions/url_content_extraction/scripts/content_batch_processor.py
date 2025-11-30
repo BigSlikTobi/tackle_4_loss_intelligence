@@ -444,6 +444,12 @@ Examples:
     )
 
     parser.add_argument(
+        "--url-ids-file",
+        type=Path,
+        help="Path to file containing URL IDs (one per line)",
+    )
+
+    parser.add_argument(
         "--checkpoint",
         type=Path,
         help="Path to checkpoint file",
@@ -501,10 +507,18 @@ def main():
     logger.info("Content Batch Processor")
     logger.info("=" * 60)
 
-    # Parse URL IDs if provided
+    # Parse URL IDs if provided (either from --url-ids or --url-ids-file)
     url_ids = None
     if args.url_ids:
         url_ids = [uid.strip() for uid in args.url_ids.split(",") if uid.strip()]
+    elif args.url_ids_file:
+        if args.url_ids_file.exists():
+            with args.url_ids_file.open() as f:
+                url_ids = [line.strip() for line in f if line.strip()]
+            logger.info(f"Loaded {len(url_ids)} URL IDs from {args.url_ids_file}")
+        else:
+            logger.error(f"URL IDs file not found: {args.url_ids_file}")
+            sys.exit(1)
 
     # Run processor
     result = run_batch_processor(

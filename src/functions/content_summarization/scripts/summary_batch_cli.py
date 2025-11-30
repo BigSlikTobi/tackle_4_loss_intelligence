@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         help="Max articles to include (defaults to 500 newest articles)",
     )
     parser.add_argument(
+        "--page-size",
+        type=int,
+        default=25,
+        help="DB page size when fetching facts/topics (lower to reduce DB timeouts, default: 25)",
+    )
+    parser.add_argument(
         "--model",
         default="gpt-5-nano",
         help="OpenAI model to use for summary generation",
@@ -201,6 +207,7 @@ def main() -> None:
     generator = SummaryBatchRequestGenerator(
         model=args.model,
         output_dir=args.output_dir,
+        page_size=args.page_size,
     )
 
     if args.no_submit:
