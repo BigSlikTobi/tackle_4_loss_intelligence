@@ -603,7 +603,17 @@ def main():
     print("\n💡 Next step: Run fact extraction with:")
     print("   python facts_batch_cli.py --task create")
 
-    sys.exit(0 if result["failed"] == 0 else 1)
+    # Exit with success if we processed any URLs successfully
+    # Some failures are expected when fetching external content
+    # Only fail if ALL URLs failed or nothing was processed
+    if result["successful"] > 0:
+        sys.exit(0)
+    elif result["processed"] == 0:
+        # No URLs to process is not an error
+        sys.exit(0)
+    else:
+        # All URLs failed
+        sys.exit(1)
 
 
 if __name__ == "__main__":
