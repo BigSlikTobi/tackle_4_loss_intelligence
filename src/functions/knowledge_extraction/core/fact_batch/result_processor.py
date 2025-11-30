@@ -271,17 +271,15 @@ class FactBatchResultProcessor:
             
             # Update knowledge_extracted_at for each URL
             timestamp = datetime.now(timezone.utc).isoformat()
-            updated_count = 0
-            
-            for url_id in url_ids:
-                try:
-                    client.table("news_urls").update({
-                        "knowledge_extracted_at": timestamp,
-                        "knowledge_error_count": 0,
-                    }).eq("id", url_id).execute()
-                    updated_count += 1
-                except Exception as exc:
-                    logger.warning("Failed to update knowledge_extracted_at for URL %s: %s", url_id, exc)
+            try:
+                client.table("news_urls").update({
+                    "knowledge_extracted_at": timestamp,
+                    "knowledge_error_count": 0,
+                }).in_("id", list(url_ids)).execute()
+                updated_count = len(url_ids)
+            except Exception as exc:
+                logger.warning("Failed to batch update knowledge_extracted_at for URLs: %s", exc)
+                updated_count = 0
             
             logger.info(
                 "Updated knowledge_extracted_at for %d URLs (%s task, %d facts)",
