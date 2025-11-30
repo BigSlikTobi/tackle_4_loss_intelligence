@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Set
 
 from ..db.knowledge_writer import KnowledgeWriter
 from ..db.fact_reader import NewsFactReader
@@ -33,6 +34,7 @@ class FactBatchResult:
     facts_skipped_missing: int = 0
     facts_skipped_existing: int = 0
     facts_skipped_no_data: int = 0
+    urls_updated: int = 0
     errors: List[str] = None
     missing_fact_ids: List[str] = None
 
@@ -76,6 +78,7 @@ class FactBatchResultProcessor:
         pending_topics: List[Dict] = []
         pending_entities: List[Dict] = []
         facts_with_writes: set[str] = set()
+        processed_fact_ids: Set[str] = set()  # Track all fact IDs we processed
 
         with output_file.open("r") as handle:
             for line_number, line in enumerate(handle, 1):
@@ -126,6 +129,9 @@ class FactBatchResultProcessor:
                     continue
 
                 result.facts_in_output += len(fact_ids)
+                
+                # Track all fact IDs for URL timestamp updates
+                processed_fact_ids.update(fact_ids)
 
                 # Filter out fact_ids that don't exist to avoid FK errors
                 existing_fact_ids = set(self.reader.filter_existing_fact_ids(fact_ids))
@@ -218,7 +224,86 @@ class FactBatchResultProcessor:
 
         result.facts_processed += len(facts_with_writes)
 
+        # Update knowledge_extracted_at on URLs that had facts processed
+        # IMPORTANT: Only set this flag after ENTITIES task completes (the final step)
+        # If we set it after topics, the entities batch won't find any pending facts
+        # because it filters on knowledge_extracted_at IS NULL
+        if task == "entities" and processed_fact_ids and not dry_run:
+            urls_updated = self._update_url_timestamps(processed_fact_ids)
+            result.urls_updated = urls_updated
+        elif task == "entities" and dry_run and processed_fact_ids:
+            logger.info("[DRY RUN] Would update knowledge_extracted_at on URLs for %d processed facts", len(processed_fact_ids))
+        elif task == "topics":
+            logger.info(
+                "Topics task completed for %d facts - NOT setting knowledge_extracted_at "
+                "(will be set after entities task)",
+                len(processed_fact_ids),
+            )
+
         return result
+
+    def _update_url_timestamps(self, fact_ids: Set[str]) -> int:
+        """Update knowledge_extracted_at on news_urls for processed facts.
+        
+        This marks the URL as having completed knowledge extraction so it
+        won't be picked up again by future batch runs.
+        
+        NOTE: This should only be called after the ENTITIES task completes,
+        as it's the final step in knowledge extraction. Setting this after
+        topics would prevent entities from being extracted.
+        """
+        if not fact_ids:
+            return 0
+        
+        try:
+            from src.shared.db.connection import get_supabase_client
+            client = get_supabase_client()
+            
+            # Get distinct news_url_ids for the processed facts
+            # Process in chunks to avoid query size limits
+            fact_id_list = list(fact_ids)
+            url_ids: Set[str] = set()
+            
+            chunk_size = 500
+            for i in range(0, len(fact_id_list), chunk_size):
+                chunk = fact_id_list[i:i + chunk_size]
+                response = (
+                    client.table("news_facts")
+                    .select("news_url_id")
+                    .in_("id", chunk)
+                    .execute()
+                )
+                rows = getattr(response, "data", []) or []
+                for row in rows:
+                    if row.get("news_url_id"):
+                        url_ids.add(row["news_url_id"])
+            
+            if not url_ids:
+                logger.warning("No news_url_ids found for %d processed facts", len(fact_ids))
+                return 0
+            
+            # Update knowledge_extracted_at for each URL
+            timestamp = datetime.now(timezone.utc).isoformat()
+            try:
+                client.table("news_urls").update({
+                    "knowledge_extracted_at": timestamp,
+                    "knowledge_error_count": 0,
+                }).in_("id", list(url_ids)).execute()
+                updated_count = len(url_ids)
+            except Exception as exc:
+                logger.warning("Failed to batch update knowledge_extracted_at for URLs: %s", exc)
+                updated_count = 0
+            
+            logger.info(
+                "Updated knowledge_extracted_at for %d URLs (entities task, %d facts)",
+                updated_count,
+                len(fact_ids),
+            )
+            return updated_count
+            
+        except Exception as exc:
+            logger.error("Failed to update URL timestamps: %s", exc, exc_info=True)
+            return 0
 
     def _extract_output_text(self, body: Dict) -> str:
         """Pull the text payload from chat completion style bodies."""

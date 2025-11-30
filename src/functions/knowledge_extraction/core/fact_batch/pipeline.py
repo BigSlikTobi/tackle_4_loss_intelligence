@@ -183,6 +183,7 @@ class FactBatchPipeline:
             "facts_skipped_no_data": result.facts_skipped_no_data,
             "topics_written": result.topics_written,
             "entities_written": result.entities_written,
+            "urls_updated": result.urls_updated,
             "errors": result.errors,
             "missing_fact_ids": result.missing_fact_ids,
             "dry_run": dry_run,

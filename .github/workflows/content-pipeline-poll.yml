@@ -26,6 +26,11 @@ on:
         type: boolean
         default: false
 
+# Prevent concurrent runs - if a run is in progress, skip the new one
+concurrency:
+  group: content-pipeline-poll
+  cancel-in-progress: false
+
 env:
   PYTHON_VERSION: '3.11'
 
@@ -172,6 +177,9 @@ jobs:
                       logger.info(f"No facts pending knowledge extraction ({task})")
                       return None
                   raise
+              except Exception as e:
+                  logger.error(f"Failed to create knowledge batch ({task}): {e}")
+                  return None
 
           def create_summary_batch() -> str | None:
               """Create a summary generation batch for pending articles."""
@@ -202,12 +210,23 @@ jobs:
                       logger.info("No articles pending summarization")
                       return None
                   raise
+              except Exception as e:
+                  logger.error(f"Failed to create summary batch: {e}")
+                  return None
 
           def main():
               tracker = BatchTracker()
               
-              # Get pending batches
+              # Get pending batches (excluding ones currently being processed)
               pending_batches = tracker.get_pending_batches(limit=50)
+              
+              # No need to filter out PROCESSING batches; get_pending_batches() already excludes them
+              
+              
+              
+              
+              
+              
               logger.info(f"Found {len(pending_batches)} pending batches to check")
               
               batches_processed = 0
@@ -314,8 +333,18 @@ jobs:
                       logger.warning(f"Unknown batch status: {openai_batch_status}")
               
               # Check for failed batches eligible for retry
+              # NOTE: We only retry PROCESSING failures, not OpenAI batch failures
+              # OpenAI batch failures (failed/expired/cancelled) cannot be retried -
+              # they would need a new batch to be created from scratch
               failed_batches = tracker.get_failed_batches_for_retry(limit=5)
               for batch in failed_batches:
+                  # Only retry if it was a processing failure (batch completed but processing failed)
+                  if batch.error_message and "OpenAI batch" in batch.error_message:
+                      logger.warning(
+                          f"Skipping batch {batch.batch_id} - OpenAI batch failures cannot be retried, "
+                          f"need to create a new batch"
+                      )
+                      continue
                   logger.info(f"Retrying failed batch {batch.batch_id} (attempt {batch.retry_count + 1})")
                   tracker.reset_for_retry(batch.batch_id)
               

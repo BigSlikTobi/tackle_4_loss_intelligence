@@ -91,7 +91,7 @@ class SummaryBatchRequestGenerator:
         *,
         model: str = "gpt-5-nano",
         output_dir: Optional[Path] = None,
-        page_size: int = 100,
+        page_size: int = 25,
         skip_errors: bool = False,
     ) -> None:
         self.client = get_supabase_client()

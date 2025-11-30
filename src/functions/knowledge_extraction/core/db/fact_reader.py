@@ -188,16 +188,15 @@ class NewsFactReader:
         select_fields = ["id", "fact_text"]
 
         # Use optimized views that already filter to missing knowledge
+        # BUT only if we don't need to filter by pending URLs (knowledge_extracted_at)
         using_view = False
         fact_id_field = "id"
-        if require_entities and not require_topics:
+        if require_entities and not require_topics and not pending_urls_only:
             table_name = "news_facts_without_entities"
-            pending_urls_only = False  # view already represents missing entities across all URLs
             using_view = True
             fact_id_field = "id"
-        elif require_topics and not require_entities:
+        elif require_topics and not require_entities and not pending_urls_only:
             table_name = "news_facts_without_topics"
-            pending_urls_only = False  # view already represents missing topics across all URLs
             using_view = True
             fact_id_field = "id"
         else:

@@ -173,6 +173,7 @@ def main() -> None:
         print(f"Facts skipped (no data): {summary.get('facts_skipped_no_data', 0)}")
         print(f"Topics written:         {summary['topics_written']}")
         print(f"Entities written:       {summary['entities_written']}")
+        print(f"URLs updated:           {summary.get('urls_updated', 0)}")
         
         missing = summary.get("missing_fact_ids") or []
         if missing:
