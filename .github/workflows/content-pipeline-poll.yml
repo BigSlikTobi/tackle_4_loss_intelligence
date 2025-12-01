@@ -143,10 +143,11 @@ jobs:
                   create_embeddings=True,
               )
 
-          def create_knowledge_batch(task: str = "topics") -> str | None:
+          def create_knowledge_batch(tracker: BatchTracker, task: str = "topics") -> str | None:
               """Create a knowledge extraction batch for pending facts.
               
               Args:
+                  tracker: BatchTracker instance for tracking batches
                   task: Either 'topics' or 'entities'
                   
               Returns:
@@ -193,8 +194,12 @@ jobs:
                   logger.error(f"Failed to create knowledge batch ({task}): {e}")
                   return None
 
-          def create_summary_batch() -> str | None:
-              """Create a summary generation batch for pending articles."""
+          def create_summary_batch(tracker: BatchTracker) -> str | None:
+              """Create a summary generation batch for pending articles.
+              
+              Args:
+                  tracker: BatchTracker instance for tracking batches
+              """
               from src.functions.content_summarization.core.summary_batch import (
                   SummaryBatchPipeline,
                   SummaryBatchRequestGenerator,
@@ -296,7 +301,7 @@ jobs:
                               # After facts → create topics batch (first knowledge step)
                               if processed_count >= MIN_PROMOTION_ITEMS:
                                   if not tracker.has_active_batches(BatchStage.KNOWLEDGE):
-                                      next_batch = create_knowledge_batch(task="topics")
+                                      next_batch = create_knowledge_batch(tracker, task="topics")
                                       if next_batch:
                                           next_stage_batches_created += 1
                                   else:
@@ -324,7 +329,7 @@ jobs:
                               if task == "topics":
                                   # After topics → create entities batch
                                   if processed_count >= MIN_PROMOTION_ITEMS:
-                                      next_batch = create_knowledge_batch(task="entities")
+                                      next_batch = create_knowledge_batch(tracker, task="entities")
                                       if next_batch:
                                           next_stage_batches_created += 1
                                           logger.info("Topics complete → created entities batch")
@@ -337,7 +342,7 @@ jobs:
                               elif task == "entities":
                                   # After entities → create summary batch
                                   if processed_count >= MIN_PROMOTION_ITEMS:
-                                      next_batch = create_summary_batch()
+                                      next_batch = create_summary_batch(tracker)
                                       if next_batch:
                                           next_stage_batches_created += 1
                                           logger.info("Entities complete → created summary batch")
