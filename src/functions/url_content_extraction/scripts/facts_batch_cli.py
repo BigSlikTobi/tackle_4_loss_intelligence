@@ -103,6 +103,13 @@ Configuration:
     )
 
     parser.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=48,
+        help="Only include articles created within this many hours (default: 48, use 0 to disable)",
+    )
+
+    parser.add_argument(
         "--model",
         type=str,
         default="gpt-5-nano",
@@ -187,7 +194,8 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
     high_fact_count = getattr(args, 'high_fact_count', None)
     only_validated = getattr(args, 'only_validated', False)
     register = getattr(args, 'register', False)
-    
+    max_age_hours = args.max_age_hours if args.max_age_hours > 0 else None
+
     if high_fact_count:
         logger.info(f"Creating batch job for re-extraction of high fact count articles (> {high_fact_count})...")
     else:
@@ -202,11 +210,18 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
         logger.info(f"  High fact count threshold: > {high_fact_count}")
 
     try:
+        tracker = BatchTracker()
+        if register and tracker.has_active_batches(BatchStage.FACTS):
+            logger.warning("Active facts batch already in-flight; skipping creation to avoid duplication")
+            print("No new batch created: existing facts batch is still pending or processing")
+            return False
+
         result = pipeline.create_batch(
             limit=args.limit,
             skip_existing=args.skip_existing,
             high_fact_count_threshold=high_fact_count,
             include_unextracted=not only_validated,
+            max_age_hours=max_age_hours,
         )
 
         # Register batch in tracking table if requested

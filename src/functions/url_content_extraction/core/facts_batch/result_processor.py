@@ -18,6 +18,8 @@ from ..facts.prompts import FACT_PROMPT_VERSION
 
 logger = logging.getLogger(__name__)
 
+MAX_FACTS_PER_ARTICLE = 25
+
 
 @dataclass
 class ProcessingResult:
@@ -131,6 +133,15 @@ class FactsBatchResultProcessor:
             valid_facts, rejected = filter_story_facts(raw_facts)
             result.facts_extracted += len(raw_facts)
             result.facts_filtered += len(rejected)
+
+            # Enforce cap to avoid runaway fact counts per article
+            if len(valid_facts) > MAX_FACTS_PER_ARTICLE:
+                trimmed = len(valid_facts) - MAX_FACTS_PER_ARTICLE
+                valid_facts = valid_facts[:MAX_FACTS_PER_ARTICLE]
+                result.facts_filtered += trimmed
+                logger.debug(
+                    "Trimmed %d facts over cap for article %s", trimmed, article_id
+                )
 
             if valid_facts:
                 facts_by_article[article_id] = valid_facts

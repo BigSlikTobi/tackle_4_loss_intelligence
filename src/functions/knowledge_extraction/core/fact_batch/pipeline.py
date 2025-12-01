@@ -57,10 +57,15 @@ class FactBatchPipeline:
         *,
         task: KnowledgeTask,
         limit: Optional[int] = None,
+        max_age_hours: Optional[int] = None,
     ) -> BatchCreationResult:
         """Generate requests, upload them, and create the OpenAI batch job."""
 
-        batch_payload: GeneratedBatch = self.generator.generate(task=task, limit=limit)
+        batch_payload: GeneratedBatch = self.generator.generate(
+            task=task,
+            limit=limit,
+            max_age_hours=max_age_hours,
+        )
 
         with batch_payload.file_path.open("rb") as handle:
             uploaded = openai.files.create(file=handle, purpose="batch")

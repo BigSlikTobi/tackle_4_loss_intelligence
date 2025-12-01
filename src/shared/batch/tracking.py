@@ -323,6 +323,40 @@ class BatchTracker:
         
         response = query.execute()
         return [BatchJob.from_row(row) for row in (response.data or [])]
+
+    def has_active_batches(
+        self,
+        stage: BatchStage | str,
+        *,
+        statuses: Optional[List[BatchStatus | str]] = None,
+    ) -> bool:
+        """Return True when a stage already has in-flight batches.
+
+        Active batches are those that are pending, completed (awaiting processing),
+        or currently being processed. This is used to prevent overlapping batch
+        submissions that churn through the same backlog.
+        """
+        if isinstance(stage, str):
+            stage = BatchStage(stage)
+
+        active_statuses = statuses or [
+            BatchStatus.PENDING,
+            BatchStatus.COMPLETED,
+            BatchStatus.PROCESSING,
+        ]
+
+        status_values = [s.value if isinstance(s, BatchStatus) else str(s) for s in active_statuses]
+
+        response = (
+            self.client.table(self.TABLE_NAME)
+            .select("id")
+            .eq("stage", stage.value)
+            .in_("status", status_values)
+            .limit(1)
+            .execute()
+        )
+
+        return bool(getattr(response, "data", []) or [])
     
     def get_failed_batches_for_retry(self, limit: int = 10) -> List[BatchJob]:
         """Get failed batches that are eligible for retry.

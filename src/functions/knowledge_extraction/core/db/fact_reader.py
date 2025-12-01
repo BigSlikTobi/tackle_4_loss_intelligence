@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence
 
 from src.shared.db.connection import get_supabase_client
@@ -172,6 +173,7 @@ class NewsFactReader:
         require_entities: bool = False,
         skip_on_error: bool = False,
         pending_urls_only: bool = True,
+        max_age_hours: Optional[int] = None,
     ):
         """Yield fact rows with optional filtering for missing knowledge.
 
@@ -182,10 +184,13 @@ class NewsFactReader:
             require_entities: When True, only yield facts missing entity rows.
             skip_on_error: When True, skip a page that repeatedly errors after minimal page size.
             pending_urls_only: When True, filter to URLs that have not completed knowledge extraction.
+            max_age_hours: Optional age filter applied to news_urls.created_at.
         """
 
         table_name = "news_facts"
         select_fields = ["id", "fact_text"]
+
+        apply_age_filter = max_age_hours is not None
 
         # Use optimized views that already filter to missing knowledge
         # BUT only if we don't need to filter by pending URLs (knowledge_extracted_at)
@@ -199,6 +204,8 @@ class NewsFactReader:
             table_name = "news_facts_without_topics"
             using_view = True
             fact_id_field = "id"
+        if apply_age_filter:
+            using_view = False  # Ensure we can join to news_urls for created_at filtering
         else:
             if require_topics:
                 select_fields.append("news_fact_topics!left(id)")
@@ -209,9 +216,13 @@ class NewsFactReader:
             select_fields = [fact_id_field]
 
         apply_pending_filter = pending_urls_only and (require_topics or require_entities)
-        if apply_pending_filter:
-            select_fields.append("news_urls!inner(id)")
+        if apply_pending_filter or apply_age_filter:
+            select_fields.append("news_urls!inner(id,created_at)")
         select_clause = ",".join(select_fields)
+
+        cutoff_iso = None
+        if apply_age_filter:
+            cutoff_iso = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat()
 
         offset = 0
         yielded = 0
@@ -241,6 +252,9 @@ class NewsFactReader:
 
             if apply_pending_filter:
                 query = query.is_("news_urls.knowledge_extracted_at", None)
+
+            if cutoff_iso:
+                query = query.gte("news_urls.created_at", cutoff_iso)
 
             try:
                 response = query.execute()

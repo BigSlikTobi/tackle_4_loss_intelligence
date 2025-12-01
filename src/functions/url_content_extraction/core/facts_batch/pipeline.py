@@ -101,6 +101,7 @@ class FactsBatchPipeline:
         skip_existing: bool = True,
         high_fact_count_threshold: Optional[int] = None,
         include_unextracted: bool = True,
+        max_age_hours: Optional[int] = None,
     ) -> BatchCreationResult:
         """Generate requests, upload them, and create the OpenAI batch job.
         
@@ -121,6 +122,7 @@ class FactsBatchPipeline:
             skip_existing=skip_existing,
             high_fact_count_threshold=high_fact_count_threshold,
             include_unextracted=include_unextracted,
+            max_age_hours=max_age_hours,
         )
 
         # Upload to OpenAI

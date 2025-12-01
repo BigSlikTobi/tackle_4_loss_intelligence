@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
@@ -125,6 +125,7 @@ class SummaryBatchRequestGenerator:
         *,
         task: SummaryTask = "all",
         limit: Optional[int] = None,
+        max_age_hours: Optional[int] = None,
     ) -> GeneratedBatch:
         """Generate a JSONL file for summary batch processing."""
 
@@ -133,7 +134,7 @@ class SummaryBatchRequestGenerator:
         file_path = self.output_dir / filename
 
         # Fetch pending articles
-        articles = self._fetch_pending_articles(task=task, limit=limit)
+        articles = self._fetch_pending_articles(task=task, limit=limit, max_age_hours=max_age_hours)
 
         prefetched_data = self._prefetch_article_data(articles)
         
@@ -176,6 +177,7 @@ class SummaryBatchRequestGenerator:
             "requests": total_requests,
             "article_ids": article_ids,
             "limit": limit,
+            "max_age_hours": max_age_hours,
         }
 
         metadata_path = self.output_dir / f"summary_batch_{task}_{timestamp}_metadata.json"
@@ -200,6 +202,7 @@ class SummaryBatchRequestGenerator:
         *,
         task: SummaryTask,
         limit: Optional[int] = None,
+        max_age_hours: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch articles pending summary generation (newest first).
         
@@ -225,6 +228,11 @@ class SummaryBatchRequestGenerator:
 
         # Order by created_at DESC to get youngest/newest articles first
         query = query.order("created_at", desc=True)
+
+        if max_age_hours is not None:
+            cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+            query = query.gte("created_at", cutoff.isoformat())
+
         query = query.limit(effective_limit)
 
         response = query.execute()

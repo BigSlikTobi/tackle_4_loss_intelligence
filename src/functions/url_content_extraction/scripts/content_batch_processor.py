@@ -83,6 +83,7 @@ def fetch_pending_urls(
     limit: int = 100,
     url_ids: Optional[List[str]] = None,
     max_age_hours: Optional[int] = 24,
+    max_error_threshold: int = 3,
 ) -> List[Dict[str, Any]]:
     """Fetch URLs pending content extraction with pagination.
     
@@ -133,8 +134,10 @@ def fetch_pending_urls(
             
             query = (
                 client.table("news_urls")
-                .select("id,url,created_at")
+                .select("id,url,created_at,content_error_count")
                 .is_("content_extracted_at", "null")
+                .is_("content_quarantined_at", "null")
+                .lt("content_error_count", max_error_threshold)
                 .order("created_at", desc=True)  # Newest first
             )
             
@@ -209,11 +212,55 @@ def store_content(client, url_id: str, content: str) -> bool:
         now_iso = datetime.now(timezone.utc).isoformat()
         client.table("news_urls").update({
             "content_extracted_at": now_iso,
+            "content_error_count": 0,
+            "content_last_error": None,
+            "content_last_attempt_at": now_iso,
+            "content_quarantined_at": None,
+            "content_quarantine_reason": None,
         }).eq("id", url_id).execute()
         return True
     except Exception as e:
         logger.error("Failed to mark content extracted for %s: %s", url_id, e)
         return False
+
+
+def mark_content_failure(
+    client,
+    url_id: str,
+    reason: str,
+    *,
+    max_attempts: int = 3,
+) -> None:
+    """Persist a failed content extraction attempt and quarantine when needed."""
+    try:
+        current_count = 0
+        try:
+            response = (
+                client.table("news_urls")
+                .select("content_error_count")
+                .eq("id", url_id)
+                .limit(1)
+                .single()
+                .execute()
+            )
+            current_count = (getattr(response, "data", {}) or {}).get("content_error_count", 0) or 0
+        except Exception as exc:
+            logger.warning("Failed to read error count for %s: %s", url_id, exc)
+
+        new_count = current_count + 1
+        update = {
+            "content_error_count": new_count,
+            "content_last_error": reason[:500],
+            "content_last_attempt_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if new_count >= max_attempts:
+            update["content_quarantined_at"] = datetime.now(timezone.utc).isoformat()
+            update["content_quarantine_reason"] = "content_extraction_failed"
+
+        client.table("news_urls").update(update).eq("id", url_id).execute()
+    except Exception as exc:
+        logger.warning("Failed to persist content failure for %s: %s", url_id, exc)
 
 
 def process_url(
@@ -222,6 +269,7 @@ def process_url(
     checkpoint: CheckpointManager,
     failure_tracker: FailureTracker,
     timeout: int = 45,
+    max_attempts: int = 3,
 ) -> bool:
     """Process a single URL for content extraction.
     
@@ -264,6 +312,12 @@ def process_url(
                 "Content extraction returned empty",
                 failure_tracker,
             )
+            mark_content_failure(
+                client,
+                url_id,
+                "Content extraction returned empty",
+                max_attempts=max_attempts,
+            )
             return False
 
         # Store content
@@ -283,6 +337,12 @@ def process_url(
                 "Failed to store content",
                 failure_tracker,
             )
+            mark_content_failure(
+                client,
+                url_id,
+                "Failed to store content",
+                max_attempts=max_attempts,
+            )
             return False
 
     except Exception as e:
@@ -295,6 +355,12 @@ def process_url(
             failure_tracker,
             tb=traceback.format_exc(),
         )
+        mark_content_failure(
+            client,
+            url_id,
+            str(e),
+            max_attempts=max_attempts,
+        )
         return False
 
 
@@ -306,6 +372,8 @@ def run_batch_processor(
     timeout: int = 45,
     flush_interval: int = 10,
     max_age_hours: Optional[int] = 24,
+    max_error_threshold: int = 3,
+    max_attempts: int = 3,
 ) -> Dict[str, Any]:
     """Run the content batch processor.
     
@@ -317,6 +385,8 @@ def run_batch_processor(
         timeout: Request timeout per URL
         flush_interval: Checkpoint flush interval
         max_age_hours: Only process URLs created within this many hours (None for no limit)
+        max_error_threshold: Skip URLs with this many or more consecutive failures
+        max_attempts: Attempts before quarantining a URL for the run
         
     Returns:
         Summary dict with statistics
@@ -334,7 +404,13 @@ def run_batch_processor(
 
     try:
         # Fetch pending URLs
-        urls = fetch_pending_urls(client, limit=limit, url_ids=url_ids, max_age_hours=max_age_hours)
+        urls = fetch_pending_urls(
+            client,
+            limit=limit,
+            url_ids=url_ids,
+            max_age_hours=max_age_hours,
+            max_error_threshold=max_error_threshold,
+        )
 
         if not urls:
             logger.info("No pending URLs to process")
@@ -366,7 +442,14 @@ def run_batch_processor(
             """Process a URL and return success status."""
             nonlocal successful, failed
             try:
-                success = process_url(item, client, checkpoint, failure_tracker, timeout)
+                success = process_url(
+                    item,
+                    client,
+                    checkpoint,
+                    failure_tracker,
+                    timeout,
+                    max_attempts,
+                )
                 if success:
                     successful += 1
                     progress.increment(success=True)
@@ -392,6 +475,7 @@ def run_batch_processor(
                         checkpoint,
                         failure_tracker,
                         timeout,
+                        max_attempts,
                     ): item
                     for item in light_urls
                 }
@@ -524,6 +608,20 @@ Examples:
     )
 
     parser.add_argument(
+        "--max-error-threshold",
+        type=int,
+        default=3,
+        help="Skip URLs with this many or more consecutive failures (default: 3)",
+    )
+
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="Attempts before quarantining a URL during this run (default: 3)",
+    )
+
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose logging",
@@ -584,6 +682,8 @@ def main():
         workers=args.workers,
         timeout=args.timeout,
         max_age_hours=max_age,
+        max_error_threshold=args.max_error_threshold,
+        max_attempts=args.max_attempts,
     )
 
     # Print summary
