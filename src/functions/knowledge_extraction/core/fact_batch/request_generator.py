@@ -74,6 +74,7 @@ class FactBatchRequestGenerator:
         *,
         task: KnowledgeTask,
         limit: Optional[int] = None,
+        max_age_hours: Optional[int] = None,
     ) -> GeneratedBatch:
         """Generate a jsonl file for the given knowledge task."""
 
@@ -88,6 +89,7 @@ class FactBatchRequestGenerator:
             require_entities=task == "entities",
             skip_on_error=self.skip_errors,
             pending_urls_only=self.pending_urls_only,
+            max_age_hours=max_age_hours,
         )
 
         total_requests = 0
@@ -112,6 +114,7 @@ class FactBatchRequestGenerator:
             "facts_included": total_facts,
             "requests": total_requests,
             "limit": limit,
+            "max_age_hours": max_age_hours,
         }
 
         metadata_path = self.output_dir / f"fact_knowledge_{task}_batch_{timestamp}_metadata.json"

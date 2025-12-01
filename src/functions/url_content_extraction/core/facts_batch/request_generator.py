@@ -6,7 +6,7 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -89,6 +89,7 @@ class FactsBatchRequestGenerator:
         skip_existing: bool = True,
         high_fact_count_threshold: Optional[int] = None,
         include_unextracted: bool = True,
+        max_age_hours: Optional[int] = None,
     ) -> GeneratedBatch:
         """Generate a JSONL file for fact extraction batch processing.
         
@@ -122,6 +123,7 @@ class FactsBatchRequestGenerator:
                 limit=limit,
                 skip_existing=skip_existing,
                 include_unextracted=include_unextracted,
+                max_age_hours=max_age_hours,
             )
 
         if not articles:
@@ -222,6 +224,7 @@ class FactsBatchRequestGenerator:
             "skip_existing": skip_existing,
             "include_unextracted": include_unextracted,
             "max_workers": self.max_workers,
+            "max_age_hours": max_age_hours,
         }
 
         metadata_path = self.output_dir / f"facts_batch_{timestamp}_metadata.json"
@@ -251,6 +254,7 @@ class FactsBatchRequestGenerator:
         limit: Optional[int] = None,
         skip_existing: bool = True,
         include_unextracted: bool = True,
+        max_age_hours: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch articles pending fact extraction (newest first).
 
@@ -270,7 +274,7 @@ class FactsBatchRequestGenerator:
 
         query = (
             self.client.table("news_urls")
-            .select("id,url")
+            .select("id,url,created_at")
             .is_("facts_extracted_at", "null")  # No facts yet
             .order("created_at", desc=True)  # Newest first
             .limit(effective_limit)
@@ -279,6 +283,10 @@ class FactsBatchRequestGenerator:
         # Optionally require content_extracted_at (for backwards compatibility)
         if not include_unextracted:
             query = query.not_.is_("content_extracted_at", "null")
+
+        if max_age_hours is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+            query = query.gte("created_at", cutoff.isoformat())
 
         response = query.execute()
         articles = getattr(response, "data", []) or []

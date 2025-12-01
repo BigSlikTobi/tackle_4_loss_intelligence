@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 
@@ -19,6 +20,7 @@ from ..extractors import get_extractor
 from ..processors import UrlProcessor
 from ..data.transformers import NewsTransformer
 from ..db import NewsUrlWriter
+from ..db.watermarks import NewsSourceWatermarkStore
 from ..utils import HttpClient
 from ..monitoring import PerformanceMonitor
 
@@ -54,6 +56,7 @@ class NewsExtractionPipeline:
         self.transformer = NewsTransformer()
         self.writer = writer  # Will be lazily initialized if needed
         self.max_workers = max_workers
+        self.watermarks = NewsSourceWatermarkStore()
 
     def extract(
         self,
@@ -117,20 +120,38 @@ class NewsExtractionPipeline:
             extraction_results = self._extract_sources_concurrent(
                 sources, days_back, max_articles
             )
-        
+
+        # Load existing watermarks to avoid reprocessing stale items
+        source_watermarks = self.watermarks.fetch_watermarks()
+
         # Compile all items and record metrics
         all_items: List[NewsItem] = []
+        new_watermarks: Dict[str, datetime] = {}
         
         for source_name, result in extraction_results.items():
+            filtered_items: List[NewsItem] = []
+
+            if result["success"]:
+                filtered_items = self._filter_items_by_watermark(
+                    result["items"],
+                    source_watermarks.get(source_name)
+                )
+
+                if filtered_items:
+                    latest_date = self._get_latest_published_date(filtered_items)
+                    if latest_date:
+                        new_watermarks[source_name] = max(
+                            latest_date,
+                            new_watermarks.get(source_name, latest_date)
+                        )
+                all_items.extend(filtered_items)
+
             monitor.record_source_result(
                 source_name=source_name,
                 success=result["success"],
-                items_count=len(result["items"]) if result["success"] else 0,
+                items_count=len(filtered_items) if result["success"] else 0,
                 error=result.get("error") if not result["success"] else None
             )
-            
-            if result["success"]:
-                all_items.extend(result["items"])
 
         logger.info(f"Total items extracted: {len(all_items)}")
 
@@ -166,6 +187,9 @@ class NewsExtractionPipeline:
 
         # Record database metrics
         monitor.record_database_result(write_result)
+
+        if write_result.get("success") and write_result.get("new_records", 0) > 0 and new_watermarks:
+            self.watermarks.update_watermarks(new_watermarks)
 
         # Finish monitoring and get final metrics
         final_metrics = monitor.finish_extraction()
@@ -203,6 +227,40 @@ class NewsExtractionPipeline:
             result["error"] = write_result.get("error")
 
         return result
+
+    @staticmethod
+    def _filter_items_by_watermark(items: List[NewsItem], watermark: Optional[datetime]) -> List[NewsItem]:
+        """Filter items that are older than the stored watermark."""
+        if not watermark:
+            return items
+
+        filtered: List[NewsItem] = []
+        for item in items:
+            published = item.published_date
+            if not published:
+                filtered.append(item)
+                continue
+
+            if published.replace(tzinfo=None) > watermark.replace(tzinfo=None):
+                filtered.append(item)
+
+        if len(filtered) != len(items):
+            logger.info(
+                "Filtered %d items older than watermark %s",
+                len(items) - len(filtered),
+                watermark.isoformat(),
+            )
+
+        return filtered
+
+    @staticmethod
+    def _get_latest_published_date(items: List[NewsItem]) -> Optional[datetime]:
+        dates = [item.published_date for item in items if item.published_date]
+        if not dates:
+            return None
+        # Normalize by dropping tzinfo for comparison consistency
+        latest = max(date.replace(tzinfo=None) for date in dates)
+        return latest
 
     def _extract_sources_concurrent(
         self, 

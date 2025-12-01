@@ -26,6 +26,10 @@ on:
         description: 'Skip content fetching step'
         type: boolean
         default: false
+      force_content_fetch:
+        description: 'Force content fetching even when no new URLs were inserted'
+        type: boolean
+        default: false
       facts_limit:
         description: 'Limit for facts batch (default: 500)'
         type: number
@@ -72,16 +76,17 @@ jobs:
           python src/functions/news_extraction/scripts/extract_news_cli.py \
             --days-back 1 \
             --output-ids-file /tmp/new_url_ids.txt
-          
+
           # Count new URLs and set outputs
-          if [ -f /tmp/new_url_ids.txt ]; then
+          if [ -f /tmp/new_url_ids.txt ] && [ -s /tmp/new_url_ids.txt ]; then
             NEW_COUNT=$(wc -l < /tmp/new_url_ids.txt | tr -d ' ')
             echo "new_url_count=$NEW_COUNT" >> $GITHUB_OUTPUT
             echo "Extracted $NEW_COUNT new URLs"
+            echo "urls_extracted=true" >> $GITHUB_OUTPUT
           else
             echo "new_url_count=0" >> $GITHUB_OUTPUT
+            echo "urls_extracted=false" >> $GITHUB_OUTPUT
           fi
-          echo "urls_extracted=true" >> $GITHUB_OUTPUT
       
       - name: Upload URL IDs artifact
         uses: actions/upload-artifact@v4
@@ -95,9 +100,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: [extract-news]
     if: |
-      always() && 
+      always() &&
       (needs.extract-news.result == 'success' || needs.extract-news.result == 'skipped') &&
-      github.event.inputs.skip_content_fetch != 'true'
+      github.event.inputs.skip_content_fetch != 'true' &&
+      (
+        needs.extract-news.outputs.urls_extracted == 'true' ||
+        github.event.inputs.force_content_fetch == 'true'
+      )
     outputs:
       content_fetched: ${{ steps.fetch.outputs.content_fetched }}
     
@@ -134,7 +143,8 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           echo "Fetching article content..."
-          
+          echo "content_fetched=false" >> $GITHUB_OUTPUT
+
           # Check if we have specific URL IDs from the previous step
           if [ -f /tmp/new_url_ids.txt ] && [ -s /tmp/new_url_ids.txt ]; then
             URL_COUNT=$(wc -l < /tmp/new_url_ids.txt | tr -d ' ')
@@ -146,23 +156,19 @@ jobs:
               --url-ids-file /tmp/new_url_ids.txt \
               --workers 10 \
               --timeout 45
+            echo "content_fetched=true" >> $GITHUB_OUTPUT
           else
-            echo "No new URL IDs from extraction step, fetching from database..."
-            # Only process URLs from the last 24 hours (newest first with pagination)
-            python src/functions/url_content_extraction/scripts/content_batch_processor.py \
-              --limit 500 \
-              --max-age-hours 24 \
-              --workers 10 \
-              --timeout 45
+            echo "No new URL IDs from extraction step, skipping content fetch to save tokens"
+            exit 0
           fi
-          echo "content_fetched=true" >> $GITHUB_OUTPUT
 
   create-facts-batch:
     runs-on: ubuntu-latest
     needs: [fetch-content]
     if: |
-      always() && 
-      (needs.fetch-content.result == 'success' || needs.fetch-content.result == 'skipped')
+      always() &&
+      (needs.fetch-content.result == 'success' || needs.fetch-content.result == 'skipped') &&
+      needs.fetch-content.outputs.content_fetched == 'true'
     outputs:
       batch_id: ${{ steps.create.outputs.batch_id }}
       batch_created: ${{ steps.create.outputs.batch_created }}
@@ -201,6 +207,7 @@ jobs:
             --task create \
             --limit $LIMIT \
             --only-validated \
+            --max-age-hours 48 \
             --register \
             2>&1) || {
             # Check if error is "no articles" - that's OK
