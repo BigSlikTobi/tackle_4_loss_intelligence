@@ -137,7 +137,7 @@ def fetch_pending_urls(
                 .select("id,url,created_at,content_error_count")
                 .is_("content_extracted_at", "null")
                 .is_("content_quarantined_at", "null")
-                .lte("content_error_count", max_error_threshold)
+                .lt("content_error_count", max_error_threshold)
                 .order("created_at", desc=True)  # Newest first
             )
             
