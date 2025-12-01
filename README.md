@@ -187,59 +187,45 @@ python scripts/extract_knowledge_cli.py
 
 ## 🤖 Automated Content Pipeline
 
-The platform includes **fully automated GitHub Actions workflows** that process NFL news content every 30 minutes. This pipeline runs autonomously, requiring no manual intervention.
+Fully automated GitHub Actions run every 30 minutes to move articles from raw URLs → content → facts → knowledge → summaries. The pipeline now runs as two coordinated workflows with strict gating and batch tracking to avoid duplicates.
 
-### How It Works
+### What Runs Where
 
-The pipeline uses **two complementary workflows** that work together:
+- **content-pipeline-create.yml** (creator): Extracts URLs → fetches article content (Playwright) → submits OpenAI **facts** batch. Skips work when there are no new URLs unless `force_content_fetch` is set.
+- **content-pipeline-poll.yml** (processor): Polls OpenAI batches, writes results, and promotes to the next stage using the `batch_jobs` tracking table to prevent overlap. Promotions require a minimum processed count (default `MIN_PROMOTION_ITEMS=100`):
+  - Facts → Knowledge (topics)
+  - Knowledge (topics) → Knowledge (entities)
+  - Knowledge (entities) → Summaries
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    AUTOMATED CONTENT PIPELINE                               │
-│                    Runs every 30 minutes                                    │
+│                    Runs every 30 minutes (cron)                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  WORKFLOW 1: content-pipeline-create.yml                            │   │
-│  │  "The Creator" - Finds new content and starts processing            │   │
+│  │  WORKFLOW 1: content-pipeline-create.yml ("creator")                │   │
 │  ├─────────────────────────────────────────────────────────────────────┤   │
-│  │  Step 1: Extract News URLs                                          │   │
-│  │    └─ Scans RSS feeds & sitemaps for new NFL articles               │   │
-│  │    └─ Saves new URLs to database                                    │   │
-│  │                                                                      │   │
-│  │  Step 2: Fetch Article Content                                      │   │
-│  │    └─ Downloads full article text from URLs                         │   │
-│  │    └─ Uses Playwright browser for heavy sites (ESPN, NFL.com)       │   │
-│  │    └─ Only processes articles from last 24 hours                    │   │
-│  │                                                                      │   │
-│  │  Step 3: Create Facts Batch                                         │   │
-│  │    └─ Sends articles to OpenAI Batch API for fact extraction        │   │
-│  │    └─ OpenAI processes in background (up to 24h, 50% cheaper)       │   │
+│  │  • Extract news URLs (days_back=1) → writes new URL IDs artifact    │   │
+│  │  • Fetch article content with Playwright (10 workers, 45s timeout)  │   │
+│  │    - Skips if no new URLs unless force_content_fetch=true           │   │
+│  │  • Create facts batch (limit configurable, default 500)             │   │
+│  │    - only validated articles, max age 48h, registers in Supabase    │   │
+│  │    - OpenAI Batch API: async, ~24h, 50% cheaper                     │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
-│                              ⬇️  Batch queued with OpenAI                   │
+│                              ⬇️  Facts batch queued with OpenAI             │
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  WORKFLOW 2: content-pipeline-poll.yml                              │   │
-│  │  "The Processor" - Checks on batches and processes results          │   │
+│  │  WORKFLOW 2: content-pipeline-poll.yml ("processor")                │   │
 │  ├─────────────────────────────────────────────────────────────────────┤   │
-│  │  Polls OpenAI for completed batches and processes them:             │   │
-│  │                                                                      │   │
-│  │  When FACTS batch completes:                                        │   │
-│  │    └─ Saves extracted facts to database                             │   │
-│  │    └─ Creates KNOWLEDGE/TOPICS batch (extracts key topics)          │   │
-│  │                                                                      │   │
-│  │  When TOPICS batch completes:                                       │   │
-│  │    └─ Saves topics to database                                      │   │
-│  │    └─ Creates KNOWLEDGE/ENTITIES batch (extracts NFL entities)      │   │
-│  │                                                                      │   │
-│  │  When ENTITIES batch completes:                                     │   │
-│  │    └─ Saves entities (players, teams, games) to database            │   │
-│  │    └─ Creates SUMMARY batch (generates article summaries)           │   │
-│  │                                                                      │   │
-│  │  When SUMMARY batch completes:                                      │   │
-│  │    └─ Saves summaries and embeddings to database                    │   │
-│  │    └─ Pipeline complete! ✅                                         │   │
+│  │  • Polls batch_jobs table for pending batches and OpenAI status     │   │
+│  │  • Processes completed batches and writes to Supabase               │   │
+│  │  • Promotions (threshold-controlled):                               │   │
+│  │      Facts → Knowledge (topics)                                     │   │
+│  │      Topics → Knowledge (entities)                                  │   │
+│  │      Entities → Summaries (with embeddings)                         │   │
+│  │  • Retries processing failures; skips OpenAI-failed batches         │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -249,23 +235,22 @@ The pipeline uses **two complementary workflows** that work together:
 
 | Stage | What It Does | How Long |
 |-------|--------------|----------|
-| **1. News Extraction** | Scans RSS feeds and sitemaps from ESPN, NFL.com, Yahoo Sports, etc. to find new article URLs | ~30 seconds |
-| **2. Content Fetching** | Downloads full article text using browser automation for JavaScript-heavy sites | ~2-5 minutes |
-| **3. Facts Extraction** | AI extracts atomic facts from each article (e.g., "Patrick Mahomes threw 3 touchdowns") | Up to 24 hours* |
-| **4. Topic Extraction** | AI identifies key topics discussed in the facts | Up to 24 hours* |
-| **5. Entity Extraction** | AI identifies NFL entities (players, teams, games) and links to database | Up to 24 hours* |
-| **6. Summary Generation** | AI generates concise summaries from the extracted facts | Up to 24 hours* |
+| **1. News Extraction** | Scans RSS/sitemaps for new NFL URLs; writes ID list artifact | ~30 seconds |
+| **2. Content Fetching** | Fetches article HTML with Playwright (skips if no new URLs unless forced) | ~2–5 minutes |
+| **3. Facts Extraction** | Submits OpenAI Batch API job for validated content (max age 48h, max 25 facts per URL) | Up to 24h* |
+| **4. Knowledge (Topics → Entities)** | Sequential batches over facts; topics must meet threshold before entities | Up to 24h* each |
+| **5. Summary Generation** | Generates summaries + embeddings from facts; promotes only when prior stage meets threshold | Up to 24h* |
 
-*Uses OpenAI Batch API for 50% cost savings - typically completes much faster
+*Batch API is ~50% cheaper; most complete sooner.
 
 ### Key Features
 
-- **🔄 Runs Every 30 Minutes**: Both workflows run on a cron schedule
-- **🚫 No Overlap**: Concurrency controls prevent duplicate runs
-- **💰 50% Cost Savings**: Uses OpenAI Batch API instead of real-time API
-- **🔁 Automatic Retries**: Failed batches are retried automatically
-- **📊 Race Condition Protection**: Batches are locked during processing
-- **✅ Partial Success**: Pipeline continues even if some articles fail
+- **🔄 Cron + Concurrency Guards**: Both workflows scheduled every 30 minutes with non-canceling concurrency groups
+- **🎯 Gated Promotions**: Next stage created only after thresholds (default `MIN_PROMOTION_ITEMS=100`)
+- **📦 Batch Tracking**: `batch_jobs` table records stage, status, retry count, and OpenAI file IDs
+- **💰 Batch API**: Uses OpenAI Batch for cost and queueing benefits
+- **🔁 Safe Retries**: Retries processing failures; OpenAI-failed batches are left for manual re-creation
+- **⚡ Smart Skips**: Content fetch and batch creation skip when no new work; `force_content_fetch` overrides
 
 ### Workflow Files
 
@@ -295,7 +280,9 @@ GitHub → Actions → Content Pipeline - Create Batches → Run workflow
 Optional inputs for manual runs:
 - **Skip news extraction**: Jump straight to content fetching
 - **Skip content fetch**: Only create facts batch
-- **Facts limit**: Control batch size (default: 500)
+- **Force content fetch**: Run content fetch even when no new URLs were just inserted
+- **Facts limit**: Control facts batch size (default: 500)
+- **Poll: force check all**: Processor will re-check all pending batches
 
 ### Monitoring
 
