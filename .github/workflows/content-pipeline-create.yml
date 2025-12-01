@@ -31,9 +31,9 @@ on:
         type: boolean
         default: false
       facts_limit:
-        description: 'Limit for facts batch (default: 500)'
+        description: 'Limit for facts batch (default: 20)'
         type: number
-        default: 500
+        default: 20
 
 # Prevent concurrent runs - if a run is in progress, skip the new one
 concurrency:
@@ -199,7 +199,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          LIMIT=${{ github.event.inputs.facts_limit || 500 }}
+          LIMIT=${{ github.event.inputs.facts_limit || 20 }}
           echo "Creating facts batch with limit $LIMIT..."
           
           # Run the batch creation and capture output

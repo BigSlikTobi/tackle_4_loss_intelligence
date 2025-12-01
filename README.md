@@ -281,7 +281,7 @@ Optional inputs for manual runs:
 - **Skip news extraction**: Jump straight to content fetching
 - **Skip content fetch**: Only create facts batch
 - **Force content fetch**: Run content fetch even when no new URLs were just inserted
-- **Facts limit**: Control facts batch size (default: 500)
+- **Facts limit**: Control facts batch size (default: 20)
 - **Poll: force check all**: Processor will re-check all pending batches
 
 ### Monitoring
