@@ -215,6 +215,11 @@ jobs:
               echo "No articles pending fact extraction"
               echo "batch_created=false" >> $GITHUB_OUTPUT
               exit 0
+            # Skip when a facts batch is already in-flight (non-fatal)
+            elif echo "$OUTPUT" | grep -q "Active facts batch already in-flight"; then
+              echo "Existing facts batch detected; skipping new submission"
+              echo "batch_created=false" >> $GITHUB_OUTPUT
+              exit 0
             fi
             echo "$OUTPUT"
             exit 1
