@@ -81,7 +81,6 @@ jobs:
 
           # Import the batch pipelines
           from src.functions.url_content_extraction.core.facts_batch import FactsBatchPipeline
-          from src.functions.knowledge_extraction.core.fact_batch import FactBatchPipeline
           from src.functions.content_summarization.core.summary_batch import SummaryBatchPipeline
 
           setup_logging(level="INFO")
@@ -123,14 +122,53 @@ jobs:
               )
 
           def process_knowledge_batch(batch_id: str, task: str) -> dict:
-              """Process a completed knowledge batch."""
-              pipeline = FactBatchPipeline()
-              return pipeline.process_batch(
-                  batch_id,
-                  task=task,
-                  dry_run=False,
-                  skip_existing=True,
-              )
+              """Process a completed knowledge batch using CLI script."""
+              import subprocess
+              import json
+              
+              try:
+                  cmd = [
+                      sys.executable,
+                      "src/functions/knowledge_extraction/scripts/fact_knowledge_batch_cli.py",
+                      "--process", batch_id,
+                      "--task", task,
+                      "--skip-existing",
+                  ]
+                  
+                  result = subprocess.run(
+                      cmd,
+                      capture_output=True,
+                      text=True,
+                      check=True,
+                  )
+                  
+                  # Parse the output to extract statistics
+                  # Look for "Facts processed: X" in output
+                  stats = {
+                      "batch_id": batch_id,
+                      "facts_processed": 0,
+                      "facts_skipped_existing": 0,
+                      "errors": [],
+                  }
+                  
+                  for line in result.stdout.split('\n'):
+                      if 'Facts processed:' in line:
+                          stats['facts_processed'] = int(line.split(':')[1].strip())
+                      elif 'Facts skipped (existing):' in line:
+                          stats['facts_skipped_existing'] = int(line.split(':')[1].strip())
+                      elif 'Errors encountered:' in line:
+                          error_count = int(line.split(':')[1].strip())
+                          stats['errors'] = [f"Error {i}" for i in range(error_count)]
+                  
+                  logger.info(f"Processed knowledge batch via CLI: {stats}")
+                  return stats
+                  
+              except subprocess.CalledProcessError as e:
+                  logger.error(f"Failed to process knowledge batch {batch_id}: {e.stderr}")
+                  raise Exception(f"CLI processing failed: {e.stderr}")
+              except Exception as e:
+                  logger.error(f"Failed to process knowledge batch {batch_id}: {e}")
+                  raise
 
           def process_summary_batch(batch_id: str) -> dict:
               """Process a completed summary batch."""
@@ -143,7 +181,7 @@ jobs:
               )
 
           def create_knowledge_batch(tracker: BatchTracker, task: str = "topics") -> str | None:
-              """Create a knowledge extraction batch for pending facts.
+              """Create a knowledge extraction batch for pending facts using CLI script.
               
               Args:
                   tracker: BatchTracker instance for tracking batches
@@ -152,43 +190,48 @@ jobs:
               Returns:
                   batch_id if created, None if no pending items
               """
-              from src.functions.knowledge_extraction.core.fact_batch import (
-                  FactBatchPipeline,
-                  FactBatchRequestGenerator,
-              )
+              import subprocess
+              import json
+              
               try:
                   if tracker.has_active_batches(BatchStage.KNOWLEDGE):
                       logger.info("Knowledge batch already active; skipping new submission")
                       return None
 
-                  generator = FactBatchRequestGenerator(
-                      model="gpt-4.1-nano-2025-04-14",
-                      chunk_size=25,
-                  )
-                  pipeline = FactBatchPipeline(generator=generator)
-
-                  result = pipeline.create_batch(
-                      task=task,
-                      limit=500,
-                      max_age_hours=KNOWLEDGE_BATCH_MAX_AGE,
-                  )
-
-                  # Register in tracking
-                  tracker.register_batch(
-                      batch_id=result.batch_id,
-                      stage=BatchStage.KNOWLEDGE,
-                      request_count=result.total_requests,
-                      model="gpt-4.1-nano-2025-04-14",
-                      metadata={"task": task, "total_facts": result.total_facts},
+                  # Use the CLI script to create batch
+                  cmd = [
+                      sys.executable,
+                      "src/functions/knowledge_extraction/scripts/fact_knowledge_batch_cli.py",
+                      "--task", task,
+                      "--limit", "500",
+                      "--register",  # Register in tracking table
+                  ]
+                  
+                  result = subprocess.run(
+                      cmd,
+                      capture_output=True,
+                      text=True,
+                      check=True,
                   )
                   
-                  logger.info(f"Created knowledge ({task}) batch: {result.batch_id}")
-                  return result.batch_id
-              except ValueError as e:
-                  if "No" in str(e) and "found" in str(e):
+                  # Extract batch_id from output
+                  # Look for "Batch ID: batch_xxx" in the output
+                  for line in result.stdout.split('\n'):
+                      if 'Batch ID:' in line:
+                          batch_id = line.split('Batch ID:')[1].strip()
+                          logger.info(f"Created knowledge ({task}) batch: {batch_id}")
+                          return batch_id
+                  
+                  logger.warning(f"Could not extract batch_id from CLI output")
+                  return None
+                  
+              except subprocess.CalledProcessError as e:
+                  # Check if error was "no pending facts"
+                  if "No" in e.stderr and "found" in e.stderr:
                       logger.info(f"No facts pending knowledge extraction ({task})")
                       return None
-                  raise
+                  logger.error(f"Failed to create knowledge batch ({task}): {e.stderr}")
+                  return None
               except Exception as e:
                   logger.error(f"Failed to create knowledge batch ({task}): {e}")
                   return None
