@@ -115,7 +115,7 @@ def main():
         logger.info(f"Marking {batch.batch_id} as failed...")
         tracker.mark_failed(
             batch.batch_id,
-            reason=f"Stuck in CREATING status for >{args.max_age} minutes (manual cleanup)",
+            error_message=f"Stuck in CREATING status for >{args.max_age} minutes (manual cleanup)",
             increment_retry=False,
         )
     
