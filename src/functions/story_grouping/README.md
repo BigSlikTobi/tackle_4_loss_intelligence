@@ -1,18 +1,19 @@
 # Story Grouping Module
 
-**Clusters similar NFL news stories** based on fact-level embedding vectors using cosine similarity and centroid-based clustering.
+**Clusters similar NFL news stories at the fact level** using cosine similarity and centroid-based clustering on individual fact embeddings.
 
 ---
 
 ## Overview
 
-**What it does:** Identifies similar news content and groups related stories together based on their fact embeddings, allowing a single story to participate in multiple thematic clusters.
+**What it does:** Groups individual facts extracted from news articles based on their embedding similarity. Each fact is treated as an independent unit, allowing multiple facts from the same article to join different thematic groups based on their content.
 
 **Status:** ✅ Production Ready
 
 **Key Features:**
 - Cosine similarity-based clustering (default threshold: 0.8)
-- Dynamic centroid calculation using per-fact vectors (stories can join multiple groups)
+- **Fact-level grouping**: Individual facts from the same article can join different groups
+- Dynamic centroid calculation using fact embedding vectors
 - Batch processing with pagination support
 - Dry-run mode for testing
 - Progress tracking and comprehensive logging
@@ -77,31 +78,35 @@ python scripts/group_stories_cli.py --threshold 0.85 --verbose
 
 1. **Load Embeddings**: Fetch fact embeddings from `facts_embeddings` joined with `news_facts`/`news_urls` (with pagination)
 2. **Load Existing Groups**: Fetch current groups and their centroids from `story_groups` (with pagination)
-3. **Similarity Check**: For each fact:
+3. **Similarity Check**: For each **individual fact**:
    - Calculate cosine similarity with all existing group centroids
    - If similarity ≥ threshold, assign to most similar group
    - Otherwise, create a new group
-4. **Update Centroids**: Recalculate centroid for groups with new members (centroids represent fact vectors)
-5. **Write Results**: Save groups and memberships to database (memberships now include `news_fact_id` so stories can land in multiple groups)
+4. **Update Centroids**: Recalculate centroid for groups with new members (centroids represent average of all member fact vectors)
+5. **Write Results**: Save groups and memberships to database, storing both `news_url_id` (source article) and `news_fact_id` (specific fact)
 
 ### Data Flow
 
 ```
-┌──────────────┐         ┌──────────────────┐         ┌──────────────┐
-│facts_        │         │                  │         │story_        │
-│embeddings    │────────▶│  StoryGrouper    │────────▶│groups        │
-│+ news_url_id │         │  (core logic)    │         │              │
-│+ news_fact_id│         │                  │         │- centroid    │
-│              │         │  - similarity    │         │- member_count│
-└──────────────┘         │  - clustering    │         └──────────────┘
-                         │  - centroid calc │                │
-┌──────────────┐         │                  │         ┌──────────────┐
-│Existing      │         │  Pipeline        │         │story_group_  │
-│Groups        │────────▶│  Orchestration   │────────▶│members       │
-│- centroids   │         └──────────────────┘         │              │
-└──────────────┘                                      │- similarity  │
-                                                      │  _score      │
-                                                      └──────────────┘
+┌──────────────────────┐         ┌──────────────────┐         ┌──────────────┐
+│facts_embeddings      │         │                  │         │story_        │
+│                      │────────▶│  StoryGrouper    │────────▶│groups        │
+│Each row = 1 FACT     │         │  (core logic)    │         │              │
+│+ news_url_id         │         │                  │         │- centroid    │
+│+ news_fact_id        │         │  - similarity    │         │- member_count│
+│+ embedding_vector    │         │  - clustering    │         └──────────────┘
+└──────────────────────┘         │  - centroid calc │                │
+                                 │                  │         ┌──────────────┐
+┌──────────────┐                 │  Pipeline        │         │story_group_  │
+│Existing      │────────────────▶│  Orchestration   │────────▶│members       │
+│Groups        │                 └──────────────────┘         │              │
+│- centroids   │                                              │+ news_url_id │
+└──────────────┘                                              │+ news_fact_id│
+                                                              │+ similarity  │
+                                                              │  _score      │
+                                                              └──────────────┘
+
+Note: Multiple facts from the same news_url can join different groups
 ```
 
 ### Similarity Threshold
@@ -159,24 +164,27 @@ Stores group metadata and centroid embeddings.
 
 ### `story_group_members`
 
-Links news URLs to groups with similarity scores.
+Links individual facts to groups with similarity scores.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | uuid | Primary key |
 | `group_id` | uuid | Foreign key to `story_groups` |
-| `news_url_id` | uuid | Foreign key to `news_urls` |
+| `news_url_id` | uuid | Foreign key to `news_urls` (source article) |
+| `news_fact_id` | uuid | Foreign key to `news_facts` (specific fact) |
 | `similarity_score` | float | Cosine similarity with group centroid (0-1) |
-| `added_at` | timestamp | When story was added to group |
+| `added_at` | timestamp | When fact was added to group |
 
 **Constraints:**
-- UNIQUE(group_id, news_url_id) - A story can only be in a group once
+- UNIQUE(group_id, news_fact_id) - Each fact can only be in a group once
 - Index on `news_url_id` for fast lookup
+
+**Note:** Multiple facts from the same `news_url_id` can join different groups based on their content.
 
 ### Views
 
 - **`group_summary`**: Group statistics with member counts
-- **`ungrouped_stories`**: Stories with embeddings but no group assignment
+- **`ungrouped_stories`**: Facts with embeddings but no group assignment
 
 See `schema.sql` for complete definitions including indexes, triggers, and helper views.
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,10 @@ from .request_generator import FactsBatchRequestGenerator, GeneratedBatch
 from .result_processor import FactsBatchResultProcessor
 
 logger = logging.getLogger(__name__)
+
+# Timeout constants for OpenAI API calls
+OPENAI_FILE_UPLOAD_TIMEOUT = 60  # seconds
+OPENAI_BATCH_CREATE_TIMEOUT = 30  # seconds
 
 
 @dataclass
@@ -125,25 +130,50 @@ class FactsBatchPipeline:
             max_age_hours=max_age_hours,
         )
 
-        # Upload to OpenAI
-        with batch_payload.file_path.open("rb") as handle:
-            uploaded = openai.files.create(file=handle, purpose="batch")
+        # Upload to OpenAI with timeout protection
+        logger.info("Uploading batch file to OpenAI...")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                lambda: openai.files.create(file=batch_payload.file_path.open("rb"), purpose="batch")
+            )
+            try:
+                uploaded = future.result(timeout=OPENAI_FILE_UPLOAD_TIMEOUT)
+            except FuturesTimeoutError:
+                raise TimeoutError(
+                    f"OpenAI file upload timed out after {OPENAI_FILE_UPLOAD_TIMEOUT}s. "
+                    "File may be too large or network connection is slow."
+                )
+            except Exception as e:
+                raise RuntimeError(f"Failed to upload file to OpenAI: {e}")
 
-        # Create batch job
-        batch = openai.batches.create(
-            input_file_id=uploaded.id,
-            endpoint="/v1/chat/completions",
-            completion_window="24h",
-            metadata={
-                "type": "facts_extraction",
-                "timestamp": batch_payload.metadata.get(
-                    "timestamp", datetime.now(timezone.utc).isoformat()
-                ),
-                "requests": str(batch_payload.total_requests),
-                "articles": str(batch_payload.total_articles),
-                "model": self.model,
-            },
-        )
+        # Create batch job with timeout protection
+        logger.info("Creating batch job...")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                lambda: openai.batches.create(
+                    input_file_id=uploaded.id,
+                    endpoint="/v1/chat/completions",
+                    completion_window="24h",
+                    metadata={
+                        "type": "facts_extraction",
+                        "timestamp": batch_payload.metadata.get(
+                            "timestamp", datetime.now(timezone.utc).isoformat()
+                        ),
+                        "requests": str(batch_payload.total_requests),
+                        "articles": str(batch_payload.total_articles),
+                        "model": self.model,
+                    },
+                )
+            )
+            try:
+                batch = future.result(timeout=OPENAI_BATCH_CREATE_TIMEOUT)
+            except FuturesTimeoutError:
+                raise TimeoutError(
+                    f"OpenAI batch creation timed out after {OPENAI_BATCH_CREATE_TIMEOUT}s. "
+                    "API may be experiencing delays."
+                )
+            except Exception as e:
+                raise RuntimeError(f"Failed to create batch job: {e}")
 
         # Save batch info locally
         batch_info = {
