@@ -52,6 +52,7 @@ class BatchStage(str, Enum):
 
 class BatchStatus(str, Enum):
     """Batch job status values."""
+    CREATING = "creating"        # Batch creation in progress (prevents concurrent creation)
     PENDING = "pending"          # Submitted to OpenAI, awaiting completion
     COMPLETED = "completed"      # OpenAI batch finished, ready to process
     PROCESSING = "processing"    # Currently being processed
@@ -236,6 +237,102 @@ class BatchTracker:
         )
         return job
     
+    def mark_creation_started(
+        self,
+        stage: BatchStage | str,
+        *,
+        article_count: int = 0,
+        model: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> BatchJob:
+        """Mark batch creation as started for a stage.
+        
+        Creates a temporary "CREATING" status record to prevent concurrent
+        batch creation attempts. This should be called BEFORE starting the
+        batch creation process, then updated to PENDING once successful.
+        
+        Args:
+            stage: Pipeline stage (facts, knowledge, summary)
+            article_count: Estimated number of articles
+            model: Model to be used
+            metadata: Additional metadata
+            
+        Returns:
+            Created BatchJob record with CREATING status
+            
+        Raises:
+            Exception: If insert fails
+        """
+        if isinstance(stage, str):
+            stage = BatchStage(stage)
+        
+        # Use a temporary batch_id that will be updated later
+        temp_batch_id = f"creating_{stage.value}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        
+        now = _now_iso()
+        record = {
+            "batch_id": temp_batch_id,
+            "stage": stage.value,
+            "status": BatchStatus.CREATING.value,
+            "article_count": article_count,
+            "request_count": 0,
+            "model": model,
+            "submitted_at": now,
+            "max_retries": 1,
+            "metadata": {**(metadata or {}), "creation_started_at": now},
+        }
+        
+        response = self.client.table(self.TABLE_NAME).insert(record).execute()
+        
+        if not response.data:
+            raise Exception(f"Failed to mark creation started for {stage.value}")
+        
+        job = BatchJob.from_row(response.data[0])
+        logger.info(f"Marked batch creation started: {stage.value} (temp_id={temp_batch_id})")
+        return job
+    
+    def mark_creation_completed(
+        self,
+        creating_batch_id: str,
+        actual_batch_id: str,
+        *,
+        request_count: int = 0,
+        input_file_id: Optional[str] = None,
+    ) -> Optional[BatchJob]:
+        """Update a CREATING batch to PENDING with actual batch ID.
+        
+        Called after successful batch creation to update the temporary
+        CREATING record with the actual OpenAI batch ID and transition
+        to PENDING status.
+        
+        Args:
+            creating_batch_id: The temporary batch_id from mark_creation_started()
+            actual_batch_id: The actual OpenAI batch ID
+            request_count: Actual number of requests in the batch
+            input_file_id: OpenAI input file ID
+            
+        Returns:
+            Updated BatchJob, or None if not found
+        """
+        update = {
+            "batch_id": actual_batch_id,
+            "status": BatchStatus.PENDING.value,
+            "request_count": request_count,
+            "input_file_id": input_file_id,
+        }
+        
+        response = (
+            self.client.table(self.TABLE_NAME)
+            .update(update)
+            .eq("batch_id", creating_batch_id)
+            .execute()
+        )
+        
+        if response.data:
+            logger.info(f"Marked batch creation completed: {creating_batch_id} → {actual_batch_id}")
+            return BatchJob.from_row(response.data[0])
+        return None
+    
     def get_batch(self, batch_id: str) -> Optional[BatchJob]:
         """Get a batch job by OpenAI batch ID.
         
@@ -332,7 +429,7 @@ class BatchTracker:
     ) -> bool:
         """Return True when a stage already has in-flight batches.
 
-        Active batches are those that are pending, completed (awaiting processing),
+        Active batches are those that are creating, pending, completed (awaiting processing),
         or currently being processed. This is used to prevent overlapping batch
         submissions that churn through the same backlog.
         """
@@ -340,6 +437,7 @@ class BatchTracker:
             stage = BatchStage(stage)
 
         active_statuses = statuses or [
+            BatchStatus.CREATING,
             BatchStatus.PENDING,
             BatchStatus.COMPLETED,
             BatchStatus.PROCESSING,
@@ -601,3 +699,49 @@ class BatchTracker:
         
         response = query.execute()
         return [BatchJob.from_row(row) for row in (response.data or [])]
+    
+    def get_stale_creating_batches(
+        self,
+        max_age_minutes: int = 30,
+        stage: Optional[BatchStage | str] = None,
+    ) -> List[BatchJob]:
+        """Get batches stuck in CREATING status for too long.
+        
+        These batches indicate a batch creation process that hung or crashed
+        before completing. They should be marked as failed to unblock the pipeline.
+        
+        Args:
+            max_age_minutes: Consider batches stale after this many minutes in CREATING status
+            stage: Optional filter by stage
+            
+        Returns:
+            List of stale BatchJob records
+        """
+        from datetime import timedelta
+        
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        
+        query = (
+            self.client.table(self.TABLE_NAME)
+            .select("*")
+            .eq("status", BatchStatus.CREATING.value)
+            .lt("created_at", cutoff_time.isoformat())
+        )
+        
+        if stage:
+            if isinstance(stage, str):
+                stage = BatchStage(stage)
+            query = query.eq("stage", stage.value)
+        
+        response = query.execute()
+        rows = getattr(response, "data", []) or []
+        
+        jobs = [BatchJob.from_row(row) for row in rows]
+        
+        if jobs:
+            logger.warning(
+                f"Found {len(jobs)} batches stuck in CREATING status "
+                f"for >{max_age_minutes} minutes"
+            )
+        
+        return jobs

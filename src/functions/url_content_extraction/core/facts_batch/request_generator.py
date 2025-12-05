@@ -150,8 +150,9 @@ class FactsBatchRequestGenerator:
         # Get formatted prompt with current date
         prompt = get_formatted_prompt()
 
-        # Parallel content fetching
-        logger.info(f"Fetching content for {len(unique_articles)} articles using {self.max_workers} workers...")
+        # Parallel content fetching with overall timeout protection
+        CONTENT_FETCH_TIMEOUT = 600  # 10 minutes max for all fetching
+        logger.info(f"Fetching content for {len(unique_articles)} articles using {self.max_workers} workers (timeout: {CONTENT_FETCH_TIMEOUT}s)...")
         fetched_contents: Dict[str, str] = {}
         failed_fetches = 0
         
@@ -173,12 +174,17 @@ class FactsBatchRequestGenerator:
             }
             
             completed = 0
-            for future in as_completed(futures):
+            # Use as_completed with timeout to prevent indefinite hangs
+            for future in as_completed(futures, timeout=CONTENT_FETCH_TIMEOUT):
                 completed += 1
-                news_url_id, content, success = future.result()
-                if success:
-                    fetched_contents[news_url_id] = content
-                else:
+                try:
+                    news_url_id, content, success = future.result(timeout=5)  # Quick result extraction
+                    if success:
+                        fetched_contents[news_url_id] = content
+                    else:
+                        failed_fetches += 1
+                except Exception as e:
+                    logger.warning(f"Failed to get result for article: {e}")
                     failed_fetches += 1
                 
                 # Progress logging every 50 articles

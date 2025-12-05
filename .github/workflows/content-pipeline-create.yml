@@ -46,6 +46,7 @@ env:
 jobs:
   extract-news:
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # Prevent zombie workflows
     if: ${{ github.event.inputs.skip_news_extraction != 'true' }}
     outputs:
       urls_extracted: ${{ steps.extract.outputs.urls_extracted }}
@@ -98,6 +99,7 @@ jobs:
 
   fetch-content:
     runs-on: ubuntu-latest
+    timeout-minutes: 20  # Prevent zombie workflows - content fetching should complete in <15min
     needs: [extract-news]
     if: |
       always() &&
@@ -164,6 +166,7 @@ jobs:
 
   create-facts-batch:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # Prevent zombie workflows - force fail if stuck
     needs: [fetch-content]
     if: |
       always() &&
@@ -239,6 +242,7 @@ jobs:
 
   report-status:
     runs-on: ubuntu-latest
+    timeout-minutes: 5  # Quick reporting only
     needs: [extract-news, fetch-content, create-facts-batch]
     if: always()
     
