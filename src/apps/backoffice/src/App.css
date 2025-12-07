@@ -1,33 +1,111 @@
-/* App-specific styles */
-
-/* Header Styles */
 .app-header {
-  background-color: var(--bg-surface-100);
+  background: var(--brand-metallic);
   border-bottom: 1px solid var(--border-default);
   padding: 1rem 0;
-  margin-bottom: 2rem;
+  margin-bottom: 1.25rem;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
 }
 
 .app-header .container {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 1rem;
 }
 
+.branding {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 .app-logo {
-  height: 3.5rem;
-  /* Increased size */
+  height: 3.25rem;
   width: auto;
   transition: transform 0.3s ease;
   cursor: pointer;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.35));
 }
 
 .app-logo:hover {
   transform: scale(1.05);
 }
 
-.app-header h1 {
-  font-size: 1.25rem;
+.app-title {
+  display: flex;
+  flex-direction: column;
+  color: #e7f6ec;
+}
+
+.app-title small {
+  color: #b4ddc8;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+}
+
+.nav-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0.35rem;
+  border-radius: 12px;
+}
+
+.nav-link {
+  padding: 0.5rem 0.85rem;
+  border-radius: 10px;
+  color: #e7f6ec;
   font-weight: 600;
-  color: var(--text-strong);
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.nav-link:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.nav-link.active {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.graph-hero {
+  padding: 0 2rem;
+}
+
+.graph-hero h1 {
+  font-size: 1.5rem;
+}
+
+.graph-hero p {
+  color: var(--text-subtle);
+  margin-top: 0.35rem;
+}
+
+.ambient-card {
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface-100);
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  box-shadow: var(--panel-shadow);
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 720px) {
+  .app-header .container {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .nav-links {
+    width: 100%;
+    justify-content: space-between;
+  }
 }

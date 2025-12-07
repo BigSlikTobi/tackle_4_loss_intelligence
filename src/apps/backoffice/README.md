@@ -1,73 +1,44 @@
-# React + TypeScript + Vite
+# Backoffice dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A Vite + React backoffice for visualising the NFL knowledge graph and validating extracted news facts. The landing page presents a metallic-green 3D sphere of all 32 teams grouped by division. Each team expands into players, schedule, and fresh topics fetched from Supabase via an Edge Function.
 
-Currently, two official plugins are available:
+## Features
+- 360° rotatable knowledge graph with league/division/team layers and logo orbits
+- Dark/light toggle tuned to a dark-green metallic palette
+- Team expansion panels for players (with headshots), upcoming/played games, and facts from the past two days
+- Existing news validator table and detail view for the `news_urls` pipeline
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Running the app
+1. Install dependencies from the project root:
+   ```bash
+   cd src/apps/backoffice
+   npm install
+   npm run dev
+   ```
+2. Environment variables (use a `.env` file in this directory):
+   ```bash
+   VITE_SUPABASE_URL=<your-supabase-url>
+   VITE_SUPABASE_KEY=<anon-or-service-role-key>
+   ```
 
-## React Compiler
+## Supabase Edge Function
+The knowledge graph pulls data from `supabase/functions/knowledge-graph`.
+- **GET / POST** `/functions/v1/knowledge-graph?team_abbr=BUF` (optional `team_abbr`)
+- Returns all teams with conference/division metadata, plus players/games/recent topics for the requested team.
+- CORS enabled for headshot/logo rendering.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+To deploy with the Supabase CLI:
+```bash
+supabase functions deploy knowledge-graph --project-ref <project-ref> --env-file ../../.env
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Project structure
+- `src/pages/KnowledgeGraph.tsx` — 3D view + expansion panel
+- `src/hooks/useKnowledgeGraph.ts` — data loading from the Edge Function
+- `supabase/functions/knowledge-graph/` — serverless endpoint assembling teams, players, games, and topics
+- `src/pages/NewsList.tsx` & `src/pages/NewsDetail.tsx` — existing validator views
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## Accessibility & UX
+- Keyboard-friendly buttons and large hit areas on nav and chips
+- High-contrast palette in both themes with focus glows for interactive elements
+- Concise copy so the graph is mostly self-explanatory
