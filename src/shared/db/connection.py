@@ -95,8 +95,36 @@ def get_supabase_client(config: Optional[SupabaseConfig] = None):
     
     client = create_client(config.url, config.key)
     
-    # Set schema if not default
-    if config.schema != "public":
-        logger.debug(f"Using schema: {config.schema}")
+    if config.schema and config.schema != "public":
+        applied_schema = False
+        for attr_name in ("postgrest", "postgrest_client", "rest", "_postgrest_client"):
+            target = getattr(client, attr_name, None)
+            schema_fn = getattr(target, "schema", None)
+            if callable(schema_fn):
+                try:
+                    setattr(client, attr_name, schema_fn(config.schema))
+                    applied_schema = True
+                    break
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Failed to apply Supabase schema via %s: %s", attr_name, exc)
+                    break
+
+        if not applied_schema:
+            schema_fn = getattr(client, "schema", None)
+            if callable(schema_fn):
+                try:
+                    scoped_client = schema_fn(config.schema)
+                    if scoped_client is not None:
+                        client = scoped_client
+                        applied_schema = True
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Failed to apply Supabase schema on client: %s", exc)
+
+        if applied_schema:
+            logger.debug(f"Using schema: {config.schema}")
+        else:
+            logger.warning(
+                "Supabase client does not support schema override; continuing with default schema"
+            )
     
     return client

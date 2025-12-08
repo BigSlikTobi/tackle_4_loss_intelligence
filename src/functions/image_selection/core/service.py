@@ -125,12 +125,18 @@ class ImageSelectionService:
         self.supabase: Optional[Any] = None
         self.supabase_bucket: Optional[str] = None
         self.supabase_table: Optional[str] = None
+        self.supabase_schema: Optional[str] = None
         supabase_cfg = request.supabase_config
         if supabase_cfg:
-            shared_cfg = SharedSupabaseConfig(url=supabase_cfg.url, key=supabase_cfg.key)
+            shared_cfg = SharedSupabaseConfig(
+                url=supabase_cfg.url,
+                key=supabase_cfg.key,
+                schema=supabase_cfg.schema,
+            )
             self.supabase = get_supabase_client(shared_cfg)
             self.supabase_bucket = supabase_cfg.bucket
             self.supabase_table = supabase_cfg.table
+            self.supabase_schema = supabase_cfg.schema
         else:
             logger.info("Supabase disabled; images will not be uploaded or persisted.")
 
