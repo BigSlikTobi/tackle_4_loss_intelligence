@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--supabase-key", help="Supabase service role key.")
     parser.add_argument("--supabase-bucket", default="images")
     parser.add_argument("--supabase-table", default="article_images")
+    parser.add_argument("--supabase-schema", default="content")
     parser.add_argument("--output", type=Path, help="Optional path to write JSON response.")
     return parser.parse_args()
 
@@ -69,6 +70,7 @@ def load_payload(args: argparse.Namespace) -> Dict[str, Any]:
 
     supabase_url = args.supabase_url or os.getenv("SUPABASE_URL")
     supabase_key = args.supabase_key or os.getenv("SUPABASE_KEY")
+    supabase_schema = args.supabase_schema or os.getenv("SUPABASE_SCHEMA") or "content"
     if supabase_url or supabase_key:
         if not supabase_url or not supabase_key:
             raise ValueError(
@@ -79,6 +81,7 @@ def load_payload(args: argparse.Namespace) -> Dict[str, Any]:
             "key": supabase_key,
             "bucket": args.supabase_bucket,
             "table": args.supabase_table,
+            "schema": supabase_schema,
         }
     else:
         logging.info(

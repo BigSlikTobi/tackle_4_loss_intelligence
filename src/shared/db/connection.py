@@ -95,8 +95,24 @@ def get_supabase_client(config: Optional[SupabaseConfig] = None):
     
     client = create_client(config.url, config.key)
     
-    # Set schema if not default
-    if config.schema != "public":
-        logger.debug(f"Using schema: {config.schema}")
+    if config.schema and config.schema != "public":
+        # Apply schema to the postgrest client component only,
+        # preserving the full client (which includes .storage, .auth, etc.)
+        # Note: The postgrest property uses lazy initialization, so we must:
+        # 1. Access client.postgrest to trigger initialization of _postgrest
+        # 2. Set client._postgrest to the scoped client (the property has no setter)
+        try:
+            # Trigger lazy initialization
+            _ = client.postgrest
+            # Apply schema and update the internal attribute
+            scoped_postgrest = client.postgrest.schema(config.schema)
+            client._postgrest = scoped_postgrest
+            logger.debug(f"Applied schema '{config.schema}' to postgrest client")
+        except (AttributeError, TypeError) as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to apply Supabase schema '%s': %s. Continuing with default schema.",
+                config.schema,
+                exc
+            )
     
     return client

@@ -1,7 +1,7 @@
 # Image Selection Module
 
 This module provides HTTP endpoints that curate article images from common-usage sources,
-store them in Supabase storage, and persist metadata in the `article_images` table.
+store them in Supabase storage, and persist metadata in the `content.article_images` table.
 
 ## Features
 - Google Custom Search (with Creative Commons filters) as the primary provider.
@@ -75,7 +75,8 @@ omitted from the payload.
     "url": "https://<project>.supabase.co",
     "key": "...",                                // service role recommended
     "bucket": "images",                          // optional (defaults to images)
-    "table": "article_images"                    // optional (defaults to article_images)
+    "table": "article_images",                   // optional (defaults to article_images)
+    "schema": "content"                          // optional (defaults to content)
   }
 }
 ```

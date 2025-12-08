@@ -75,6 +75,7 @@ def request_from_payload(payload: Dict[str, Any]) -> ImageSelectionRequest:
                 key=key,
                 bucket=supabase_payload.get("bucket", "images"),
                 table=supabase_payload.get("table", "article_images"),
+                schema=supabase_payload.get("schema", "content"),
             )
         elif url or key:
             raise ValueError(
@@ -88,7 +89,7 @@ def request_from_payload(payload: Dict[str, Any]) -> ImageSelectionRequest:
         enable_llm=enable_llm,
         llm_config=llm_config,
         search_config=search_config,
-    supabase_config=supabase_config,
+        supabase_config=supabase_config,
     )
     request_model.validate()
     return request_model

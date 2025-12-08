@@ -44,6 +44,7 @@ class SupabaseConfig:
     key: str
     bucket: str = "images"
     table: str = "article_images"
+    schema: str = "content"
 
 
 @dataclass
