@@ -83,3 +83,6 @@ src/functions/content_summarization/.backlog_failures.json
 src/functions/url_content_extraction/scripts/checkpoints
 src/functions/url_content_extraction/checkpoints
 src/functions/content_summarization/scripts/.summary_checkpoint.json
+
+# supabase temp files
+supabase/.temp

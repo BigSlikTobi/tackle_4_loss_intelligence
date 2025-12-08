@@ -59,6 +59,7 @@ BLACKLISTED_DOMAINS = {
     "cdn.pixabay.com",
     "reddit.com",
     "i.redd.it",
+    "youtube.com",
 }
 
 IRRELEVANCE_TERMS = {
