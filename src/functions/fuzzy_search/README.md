@@ -7,7 +7,7 @@ Supports Cloud Function and CLI entrypoints with optional filters for each entit
 - Fuzzy name matching for players, teams, and games using RapidFuzz.
 - Optional filters:
   - Players: `team`, `college`, `position`.
-  - Games: `weekday`.
+  - Games: `weekday`, `home_team`, `away_team`, `week`, `season`.
 - Pagination-aware Supabase queries for large tables.
 
 ## Usage
