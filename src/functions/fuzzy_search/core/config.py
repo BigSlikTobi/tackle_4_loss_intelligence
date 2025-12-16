@@ -29,11 +29,21 @@ class GameSearchFilters:
     """Filters for game search queries."""
 
     weekday: Optional[str] = None
+    home_team: Optional[str] = None
+    away_team: Optional[str] = None
+    week: Optional[int] = None
+    season: Optional[int] = None
 
     @classmethod
     def from_dict(cls, payload: Optional[dict]) -> "GameSearchFilters":
         payload = payload or {}
-        return cls(weekday=payload.get("weekday"))
+        return cls(
+            weekday=payload.get("weekday"),
+            home_team=payload.get("home_team"),
+            away_team=payload.get("away_team"),
+            week=payload.get("week"),
+            season=payload.get("season"),
+        )
 
 
 @dataclass

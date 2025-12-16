@@ -48,6 +48,25 @@ class FuzzySearchService:
         self.client = client or get_supabase_client()
         self.page_size = page_size
         self.score_cutoff = score_cutoff
+        self.teams_map = self._fetch_teams_map()
+
+    def _fetch_teams_map(self) -> Dict[str, str]:
+        """Fetch all teams and build a map of abbr -> full name."""
+        try:
+            # Fetch all teams (small dataset, ~32 rows)
+            response = self.client.table("teams").select("team_abbr, team_name, team_nick").execute()
+            mapping = {}
+            for team in response.data:
+                abbr = team.get("team_abbr")
+                name = team.get("team_name") or team.get("team_nick")
+                if abbr and name:
+                    mapping[abbr] = f"{name} ({abbr})"
+            
+            logger.info("Loaded %d teams into mapping", len(mapping))
+            return mapping
+        except Exception as exc:
+            logger.warning("Failed to fetch teams map: %s", exc)
+            return {}
 
     def search(self, request: FuzzySearchRequest) -> List[FuzzySearchResult]:
         """Dispatch search based on entity type."""
@@ -79,8 +98,8 @@ class FuzzySearchService:
         records = self._fetch_paginated(
             table="players",
             select_columns=(
-                "player_id, display_name, first_name, last_name, short_name, "
-                "football_name, latest_team, position, college_name"
+                "player_id, display_name, football_name, first_name, last_name, "
+                "short_name, latest_team, position, college_name"
             ),
             apply_filters=lambda q: self._apply_player_filters(q, filters),
         )
@@ -170,16 +189,23 @@ class FuzzySearchService:
     ) -> List[FuzzySearchResult]:
         """Rank records by fuzzy similarity to the query string."""
 
-        candidates = []
+        label_map: Dict[str, Dict[str, Any]] = {}
+        labels: List[str] = []
+
+        # 1. Build a map of label -> record and a list of labels
         for record in records:
             label = label_builder(record)
             if label:
-                candidates.append((label, record))
+                # If duplicates exist, the last one wins. In practice, labels should be fairly unique
+                # or duplicates might not matter much for search discovery.
+                label_map[label] = record
+                labels.append(label)
 
+        # 2. Run fuzzy search on the simple list of strings
+        # This proved more reliable than passing tuples with a processor
         matches = process.extract(
             query,
-            candidates,
-            processor=lambda choice: choice[0],
+            labels,
             scorer=fuzz.WRatio,
             limit=limit,
             score_cutoff=self.score_cutoff,
@@ -187,15 +213,17 @@ class FuzzySearchService:
 
         results: List[FuzzySearchResult] = []
         for choice, score, _ in matches:
-            label, record = choice
-            results.append(
-                FuzzySearchResult(
-                    entity_type=entity_type,
-                    score=score,
-                    matched_value=label,
-                    record=record,
+            # choice is the label string
+            record = label_map.get(choice)
+            if record:
+                results.append(
+                    FuzzySearchResult(
+                        entity_type=entity_type,
+                        score=score,
+                        matched_value=choice,
+                        record=record,
+                    )
                 )
-            )
 
         return results
 
@@ -229,8 +257,7 @@ class FuzzySearchService:
             return f"{name} ({abbr})"
         return name or abbr
 
-    @staticmethod
-    def _game_label(record: Dict[str, Any]) -> Optional[str]:
+    def _game_label(self, record: Dict[str, Any]) -> Optional[str]:
         """Build a descriptive label for game records."""
 
         home = record.get("home_team")
@@ -238,7 +265,11 @@ class FuzzySearchService:
         if not home or not away:
             return None
 
-        parts = [f"{away} at {home}"]
+        # Resolve to full names if available
+        home_full = self.teams_map.get(home, home)
+        away_full = self.teams_map.get(away, away)
+
+        parts = [f"{away_full} at {home_full}"]
         if record.get("week"):
             parts.append(f"Week {record['week']}")
         if record.get("season"):
@@ -271,5 +302,13 @@ class FuzzySearchService:
 
         if filters.weekday:
             query = query.ilike("weekday", f"%{filters.weekday}%")
+        if filters.home_team:
+            query = query.ilike("home_team", f"%{filters.home_team}%")
+        if filters.away_team:
+            query = query.ilike("away_team", f"%{filters.away_team}%")
+        if filters.week is not None:
+            query = query.eq("week", filters.week)
+        if filters.season is not None:
+            query = query.eq("season", filters.season)
 
         return query

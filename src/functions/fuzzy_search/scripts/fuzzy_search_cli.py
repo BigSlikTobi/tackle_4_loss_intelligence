@@ -6,7 +6,11 @@ import argparse
 import json
 import logging
 import os
+import sys
 from typing import Optional
+
+# Add project root to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
 
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
@@ -50,6 +54,10 @@ def parse_args() -> argparse.Namespace:
     games_parser.add_argument("query", **common_args["query"])
     games_parser.add_argument("--limit", **common_args["--limit"])
     games_parser.add_argument("--weekday", help="Filter games by weekday name")
+    games_parser.add_argument("--home", help="Filter games by home team")
+    games_parser.add_argument("--away", help="Filter games by away team")
+    games_parser.add_argument("--week", type=int, help="Filter games by week number")
+    games_parser.add_argument("--season", type=int, help="Filter games by season year")
 
     return parser.parse_args()
 
@@ -65,7 +73,13 @@ def build_request(args: argparse.Namespace) -> FuzzySearchRequest:
             position=args.position,
         )
     elif args.entity == "games":
-        game_filters = GameSearchFilters(weekday=args.weekday)
+        game_filters = GameSearchFilters(
+            weekday=args.weekday,
+            home_team=args.home,
+            away_team=args.away,
+            week=args.week,
+            season=args.season,
+        )
 
     return FuzzySearchRequest(
         entity_type=args.entity,
