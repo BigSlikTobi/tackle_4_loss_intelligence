@@ -85,6 +85,10 @@ class FuzzySearchRequest:
         entity_type = payload.get("entity_type") or payload.get("type")
         query = payload.get("query")
         limit = payload.get("limit", 10)
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            raise ValueError("Limit must be an integer")
 
         player_filters = PlayerSearchFilters.from_dict(payload.get("player_filters"))
         game_filters = GameSearchFilters.from_dict(payload.get("game_filters"))
