@@ -139,7 +139,7 @@ def handle_single_story(
                             "Using URL as key, which may fail if column is UUID."
                         )
                 except Exception as look_err:
-                     logger.error(f"Error looking up UUID: {look_err}")
+                    logger.error(f"Error looking up UUID: {look_err}")
 
             # 3b. Check if already grouped
             existing_memberships = member_writer.get_memberships_by_news_url_id(member_fk_value)
