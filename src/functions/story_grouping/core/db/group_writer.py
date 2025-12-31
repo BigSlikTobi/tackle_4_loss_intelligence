@@ -14,17 +14,30 @@ logger = logging.getLogger(__name__)
 class GroupWriter:
     """Writes and updates story groups in the story_groups table."""
 
-    def __init__(self, dry_run: bool = False, days_lookback: int = 14):
+    def __init__(
+        self, 
+        dry_run: bool = False, 
+        days_lookback: int = 14,
+        table_name: str = "story_groups",
+        schema_name: str = "public"
+    ):
         """
         Initialize the group writer.
         
         Args:
             dry_run: If True, log operations without writing to database
             days_lookback: Number of days to look back for groups (default: 14)
+            table_name: Name of the table to write groups to
         """
         self.client = get_supabase_client()
         self.dry_run = dry_run
         self.days_lookback = days_lookback
+        self.table_name = table_name
+        self.schema_name = schema_name
+
+    def _table(self, table_name: str):
+        """Helper to get table object with correct schema."""
+        return self.client.schema(self.schema_name).table(table_name)
     
     def _get_cutoff_date(self) -> str:
         """
@@ -58,7 +71,7 @@ class GroupWriter:
         if self.dry_run:
             logger.info(
                 f"[DRY RUN] Would create group {group_id} "
-                f"with {member_count} members"
+                f"with {member_count} members in {self.table_name}"
             )
             return group_id
         
@@ -74,7 +87,7 @@ class GroupWriter:
                 "updated_at": now,
             }
             
-            response = self.client.table("story_groups").insert(data).execute()
+            response = self._table(self.table_name).insert(data).execute()
             
             if response.data:
                 logger.info(f"Created group {group_id} with {member_count} members")
@@ -116,7 +129,7 @@ class GroupWriter:
                 updates.append(f"status={status}")
             
             logger.info(
-                f"[DRY RUN] Would update group {group_id}: {', '.join(updates)}"
+                f"[DRY RUN] Would update group {group_id} in {self.table_name}: {', '.join(updates)}"
             )
             return True
         
@@ -131,7 +144,7 @@ class GroupWriter:
                 data["status"] = status
             
             response = (
-                self.client.table("story_groups")
+                self._table(self.table_name)
                 .update(data)
                 .eq("id", group_id)
                 .execute()
@@ -156,7 +169,7 @@ class GroupWriter:
             List of group dicts with keys: id, centroid_embedding, 
             member_count, status, created_at, updated_at
         """
-        logger.info("Fetching all story groups...")
+        logger.info(f"Fetching all story groups from {self.table_name}...")
         
         try:
             groups = []
@@ -166,7 +179,7 @@ class GroupWriter:
             # Fetch all groups with pagination
             while True:
                 response = (
-                    self.client.table("story_groups")
+                    self._table(self.table_name)
                     .select("*")
                     .order("created_at", desc=False)
                     .range(offset, offset + page_size - 1)
@@ -205,7 +218,7 @@ class GroupWriter:
         Returns:
             List of active group dicts
         """
-        logger.info("Fetching active story groups...")
+        logger.info(f"Fetching active story groups from {self.table_name}...")
         
         try:
             cutoff_date = self._get_cutoff_date()
@@ -214,7 +227,7 @@ class GroupWriter:
             # First, get count to decide strategy
             try:
                 count_response = (
-                    self.client.table("story_groups")
+                    self._table(self.table_name)
                     .select("id", count="exact")
                     .eq("status", "active")
                     .gte("created_at", cutoff_date)
@@ -249,7 +262,7 @@ class GroupWriter:
             while batches_fetched < max_batches:
                 try:
                     response = (
-                        self.client.table("story_groups")
+                        self._table(self.table_name)
                         .select("*")
                         .eq("status", "active")
                         .gte("created_at", cutoff_date)
@@ -323,7 +336,7 @@ class GroupWriter:
             while batches_fetched < max_batches:
                 try:
                     response = (
-                        self.client.table("story_groups")
+                        self._table(self.table_name)
                         .select("id")
                         .eq("status", "active")
                         .gte("created_at", cutoff_date)
@@ -382,7 +395,7 @@ class GroupWriter:
                 batch_ids = group_ids[i:i + batch_size]
                 
                 response = (
-                    self.client.table("story_groups")
+                    self._table(self.table_name)
                     .select("*")
                     .in_("id", batch_ids)
                     .execute()
@@ -414,14 +427,14 @@ class GroupWriter:
         
         try:
             # Total groups
-            total_response = self.client.table("story_groups").select(
+            total_response = self._table(self.table_name).select(
                 "id", count="exact"
             ).execute()
             total_count = total_response.count or 0
             
             # Active groups
             active_response = (
-                self.client.table("story_groups")
+                self._table(self.table_name)
                 .select("id", count="exact")
                 .eq("status", "active")
                 .execute()
@@ -430,7 +443,7 @@ class GroupWriter:
             
             # Member count sum
             member_response = (
-                self.client.table("story_groups")
+                self._table(self.table_name)
                 .select("member_count")
                 .execute()
             )
@@ -463,24 +476,24 @@ class GroupWriter:
         """
         if self.dry_run:
             # Get count
-            response = self.client.table("story_groups").select(
+            response = self._table(self.table_name).select(
                 "id", count="exact"
             ).execute()
             count = response.count or 0
-            logger.info(f"[DRY RUN] Would delete {count} groups")
+            logger.info(f"[DRY RUN] Would delete {count} groups from {self.table_name}")
             return count
         
         try:
-            logger.warning("Deleting all story groups...")
+            logger.warning(f"Deleting all story groups from {self.table_name}...")
             
             # Get count before deletion
-            count_response = self.client.table("story_groups").select(
+            count_response = self._table(self.table_name).select(
                 "id", count="exact"
             ).execute()
             count = count_response.count or 0
             
             # Delete all - use '.not_.is_()' filter to match all records (id not null)
-            self.client.table("story_groups").delete().not_.is_("id", "null").execute()
+            self._table(self.table_name).delete().not_.is_("id", "null").execute()
             
             logger.info(f"Deleted {count} groups")
             return count
@@ -493,15 +506,27 @@ class GroupWriter:
 class GroupMemberWriter:
     """Writes story group memberships to the story_group_member table."""
 
-    def __init__(self, dry_run: bool = False):
+    def __init__(
+        self, 
+        dry_run: bool = False,
+        table_name: str = "story_group_members",
+        schema_name: str = "public"
+    ):
         """
         Initialize the group member writer.
         
         Args:
             dry_run: If True, log operations without writing to database
+            table_name: Name of the table to write memberships to
         """
         self.client = get_supabase_client()
         self.dry_run = dry_run
+        self.table_name = table_name
+        self.schema_name = schema_name
+
+    def _table(self, table_name: str):
+        """Helper to get table object with correct schema."""
+        return self.client.schema(self.schema_name).table(table_name)
 
     def add_member(
         self,
@@ -527,11 +552,38 @@ class GroupMemberWriter:
         if self.dry_run:
             logger.debug(
                 f"[DRY RUN] Would add story {news_url_id} to group {group_id} "
-                f"(similarity: {similarity_score:.4f})"
+                f"(similarity: {similarity_score:.4f}) in {self.table_name}"
             )
             return member_id
         
         try:
+            # Check for existing membership first to avoid duplicate key errors
+            existing = (
+                self._table(self.table_name)
+                .select("id")
+                .eq("group_id", group_id)
+                .eq("news_url_id", news_url_id)
+                .execute()
+            )
+
+            if existing.data:
+                # Update existing membership
+                member_id = existing.data[0]["id"]
+                data = {
+                    "similarity_score": similarity_score,
+                    # Don't update added_at, keep original
+                }
+                if news_fact_id:
+                     data["news_fact_id"] = news_fact_id
+                     
+                self._table(self.table_name).update(data).eq("id", member_id).execute()
+                logger.debug(
+                    f"Updated membership {member_id} for story {news_url_id} in group {group_id} "
+                    f"(similarity: {similarity_score:.4f})"
+                )
+                return member_id
+
+            # Insert new membership
             data = {
                 "id": member_id,
                 "group_id": group_id,
@@ -541,7 +593,7 @@ class GroupMemberWriter:
                 "added_at": datetime.utcnow().isoformat(),
             }
             
-            response = self.client.table("story_group_members").insert(data).execute()
+            response = self._table(self.table_name).insert(data).execute()
             
             if response.data:
                 logger.debug(
@@ -576,7 +628,7 @@ class GroupMemberWriter:
         
         if self.dry_run:
             logger.info(
-                f"[DRY RUN] Would add {len(memberships)} story memberships"
+                f"[DRY RUN] Would add {len(memberships)} story memberships to {self.table_name}"
             )
             return len(memberships)
         
@@ -595,7 +647,7 @@ class GroupMemberWriter:
                 for m in memberships
             ]
             
-            response = self.client.table("story_group_members").insert(data).execute()
+            response = self._table(self.table_name).insert(data).execute()
             
             count = len(response.data) if response.data else 0
             logger.info(f"Added {count} story memberships")
@@ -604,6 +656,30 @@ class GroupMemberWriter:
             
         except Exception as e:
             logger.error(f"Error adding members batch: {e}")
+            raise
+
+    def get_memberships_by_news_url_id(self, news_url_id: str) -> List[Dict]:
+        """
+        Get all group memberships for a specific story (news_url_id).
+        
+        Args:
+            news_url_id: ID of the story (UUID or URL depending on config)
+            
+        Returns:
+            List of membership dicts
+        """
+        try:
+            response = (
+                self._table(self.table_name)
+                .select("*")
+                .eq("news_url_id", news_url_id)
+                .execute()
+            )
+            
+            return response.data
+            
+        except Exception as e:
+            logger.error(f"Error fetching memberships for story {news_url_id}: {e}")
             raise
 
     def get_group_members(self, group_id: str) -> List[Dict]:
@@ -618,7 +694,7 @@ class GroupMemberWriter:
         """
         try:
             response = (
-                self.client.table("story_group_members")
+                self._table(self.table_name)
                 .select("*")
                 .eq("group_id", group_id)
                 .execute()
@@ -644,7 +720,7 @@ class GroupMemberWriter:
         offset = 0
         while True:
             response = (
-                self.client.table("story_group_members")
+                self._table(self.table_name)
                 .select("*")
                 .eq("group_id", group_id)
                 .range(offset, offset + page_size - 1)
@@ -671,18 +747,18 @@ class GroupMemberWriter:
         """
         if self.dry_run:
             response = (
-                self.client.table("story_group_members")
+                self._table(self.table_name)
                 .select("id", count="exact")
                 .eq("group_id", group_id)
                 .execute()
             )
             count = response.count or 0
-            logger.info("[DRY RUN] Would delete %s memberships from group %s", count, group_id)
+            logger.info("[DRY RUN] Would delete %s memberships from group %s in %s", count, group_id, self.table_name)
             return count
 
         try:
             response = (
-                self.client.table("story_group_members")
+                self._table(self.table_name)
                 .delete()
                 .eq("group_id", group_id)
                 .execute()
@@ -702,24 +778,24 @@ class GroupMemberWriter:
             Number of memberships deleted
         """
         if self.dry_run:
-            response = self.client.table("story_group_members").select(
+            response = self._table(self.table_name).select(
                 "id", count="exact"
             ).execute()
             count = response.count or 0
-            logger.info(f"[DRY RUN] Would delete {count} memberships")
+            logger.info(f"[DRY RUN] Would delete {count} memberships from {self.table_name}")
             return count
         
         try:
-            logger.warning("Deleting all group memberships...")
+            logger.warning(f"Deleting all group memberships from {self.table_name}...")
             
             # Get count before deletion
-            count_response = self.client.table("story_group_members").select(
+            count_response = self._table(self.table_name).select(
                 "id", count="exact"
             ).execute()
             count = count_response.count or 0
             
             # Delete all - use 'not_.is_()' filter to match all records with non-null id
-            self.client.table("story_group_members").delete().not_.is_("id", "null").execute()
+            self._table(self.table_name).delete().not_.is_("id", "null").execute()
             
             logger.info(f"Deleted {count} memberships")
             return count
