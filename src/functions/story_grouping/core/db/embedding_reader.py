@@ -450,11 +450,11 @@ class EmbeddingReader:
             query = self.client.table(self.table_name)
             
             if self.is_legacy_schema:
-                 # Legacy join query
+                # Legacy join query
                 response = (
                     query
                     .select(
-                         f"{self.id_column}, news_fact_id, {self.vector_column}, created_at, news_facts!inner({self.grouping_key_column}, created_at)"
+                        f"{self.id_column}, news_fact_id, {self.vector_column}, created_at, news_facts!inner({self.grouping_key_column}, created_at)"
                     )
                     .gte("created_at", cutoff_date)
                     .order("created_at", desc=True)
