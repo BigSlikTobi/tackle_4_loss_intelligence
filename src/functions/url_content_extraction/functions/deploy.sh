@@ -209,6 +209,9 @@ httpx[http2]>=0.27
 lxml>=5.1
 playwright>=1.48,<1.49
 pydantic>=2.9
+supabase>=2.10
+requests>=2.32
+postgrest>=0.10
 EOF
 
 info "Deploying Cloud Function"

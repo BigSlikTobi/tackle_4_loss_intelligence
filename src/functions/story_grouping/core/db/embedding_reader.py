@@ -48,15 +48,42 @@ def parse_vector(vector_data) -> Optional[List[float]]:
 class EmbeddingReader:
     """Reads fact-level embeddings joined with their parent news URLs."""
 
-    def __init__(self, days_lookback: int = 14):
+    def __init__(
+        self, 
+        days_lookback: int = 14,
+        table_name: str = "facts_embeddings",
+        id_column: str = "id",
+        vector_column: str = "embedding_vector",
+        grouping_key_column: str = "news_url_id",
+        # Optional: legacy join configuration (if we are using the standard schema)
+        is_legacy_schema: bool = True,
+        # Optional: Postgres schema (default: public)
+        schema_name: str = "public"
+    ):
         """
         Initialize the embedding reader.
         
         Args:
             days_lookback: Number of days to look back for stories (default: 14)
+            table_name: Name of the table to read embeddings from
+            id_column: Name of the ID column (primary key of embedding table)
+            vector_column: Name of the vector column
+            grouping_key_column: Name of the column used for grouping (e.g. news_url_id or news_url)
+            is_legacy_schema: If True, assumes the standard schema with joins (facts_embeddings -> news_facts).
+                              If False, treats table_name as a flat table containing all info.
         """
         self.client = get_supabase_client()
         self.days_lookback = days_lookback
+        self.table_name = table_name
+        self.id_column = id_column
+        self.vector_column = vector_column
+        self.grouping_key_column = grouping_key_column
+        self.is_legacy_schema = is_legacy_schema
+        self.schema_name = schema_name
+    
+    def _table(self, table_name: str):
+        """Helper to get table object with correct schema."""
+        return self.client.schema(self.schema_name).table(table_name)
     
     def _get_cutoff_date(self) -> str:
         """
@@ -68,30 +95,46 @@ class EmbeddingReader:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.days_lookback)
         return cutoff.isoformat()
 
-    @staticmethod
-    def _normalize_fact_embedding(record: Dict) -> Optional[Dict]:
-        """Normalize a facts_embeddings record into a grouping-ready dict."""
+    def _normalize_embedding_record(self, record: Dict) -> Optional[Dict]:
+        """
+        Normalize a raw DB record into a standard dict for the pipeline.
+        Handles both legacy joined format and flat table format.
+        """
+        vector = parse_vector(record.get(self.vector_column))
+        
+        if self.is_legacy_schema:
+            # Legacy logic: record is from facts_embeddings, with news_facts joined
+            news_fact = record.get("news_facts") or {}
+            grouping_key = news_fact.get(self.grouping_key_column)
+            created_at = news_fact.get("created_at") or record.get("created_at")
+            fact_id = record.get("news_fact_id")
+        else:
+            # Flat table logic
+            grouping_key = record.get(self.grouping_key_column)
+            created_at = record.get("created_at")
+            # For flat tables, fact_id might be the same as id or another column
+            # If not present, we can default to None or use ID
+            fact_id = record.get("news_fact_id")
 
-        vector = parse_vector(record.get("embedding_vector"))
-        news_fact = record.get("news_facts") or {}
-        news_url_id = news_fact.get("news_url_id")
-
-        if vector is None or news_url_id is None:
+        if vector is None or grouping_key is None:
             return None
 
         return {
-            "id": record.get("id"),
-            "news_fact_id": record.get("news_fact_id"),
-            "news_url_id": news_url_id,
+            "id": record.get(self.id_column),
+            "news_fact_id": fact_id,
+            "news_url_id": grouping_key, # We standardise on 'news_url_id' even if the key is a URL string
             "embedding_vector": vector,
-            "created_at": news_fact.get("created_at")
-            or record.get("created_at"),
+            "created_at": created_at,
+            "metadata": record,
         }
 
-    def _get_grouped_fact_ids(self) -> set:
-        """Collect fact IDs that are already assigned to story groups."""
+    def _get_grouped_key_ids(self) -> set:
+        """Collect grouping keys (e.g. news_url_ids) that are already assigned to story groups."""
+        # Note: This logic assumes 'story_group_members' table always uses 'news_url_id' as the key.
+        # If the user provides a custom memberships table, this might need an update in the future.
+        # For now, we assume the memberships table structure is fixed.
 
-        grouped_fact_ids: set = set()
+        grouped_keys: set = set()
         page_size = 1000
         offset = 0
         max_batches = 15
@@ -99,9 +142,9 @@ class EmbeddingReader:
 
         while batches < max_batches:
             response = (
-                self.client.table("story_group_members")
-                .select("news_fact_id")
-                .not_.is_("news_fact_id", "null")
+                self._table("story_group_members")
+                .select("news_url_id")
+                .not_.is_("news_url_id", "null")
                 .range(offset, offset + page_size - 1)
                 .execute()
             )
@@ -109,8 +152,8 @@ class EmbeddingReader:
             if not response.data:
                 break
 
-            grouped_fact_ids.update(
-                item.get("news_fact_id") for item in response.data if item.get("news_fact_id")
+            grouped_keys.update(
+                item.get("news_url_id") for item in response.data if item.get("news_url_id")
             )
 
             if len(response.data) < page_size:
@@ -119,16 +162,15 @@ class EmbeddingReader:
             offset += page_size
             batches += 1
 
-        logger.info("Found %s already grouped facts", len(grouped_fact_ids))
-        return grouped_fact_ids
-
+        logger.info("Found %s already grouped keys", len(grouped_keys))
+        return grouped_keys
 
     def fetch_ungrouped_embeddings(
         self,
         limit: Optional[int] = None
     ) -> List[Dict]:
         """
-        Fetch fact embeddings for stories not yet assigned to a group.
+        Fetch embeddings for stories not yet assigned to a group.
 
         Args:
             limit: Optional maximum number of embeddings to fetch
@@ -136,7 +178,7 @@ class EmbeddingReader:
         Returns:
             List of dicts with keys: id, news_url_id, embedding_vector, created_at
         """
-        logger.info("Fetching ungrouped fact embeddings...")
+        logger.info(f"Fetching ungrouped embeddings from {self.table_name}...")
 
         try:
             embeddings: List[Dict] = []
@@ -147,7 +189,7 @@ class EmbeddingReader:
             ):
                 embeddings.extend(batch)
 
-            logger.info(f"Fetched {len(embeddings)} ungrouped fact embeddings")
+            logger.info(f"Fetched {len(embeddings)} ungrouped embeddings")
 
             return embeddings
 
@@ -155,64 +197,116 @@ class EmbeddingReader:
             logger.error(f"Error fetching ungrouped embeddings: {e}")
             raise
 
-    def fetch_embeddings_by_news_url_ids(
-        self, news_url_ids: List[str]
-    ) -> List[Dict]:
-        """Fetch fact embeddings for a specific list of news_url IDs."""
+    def fetch_embedding_by_id(self, id_value: str) -> Optional[Dict]:
+        """
+        Fetch a single embedding by its primary ID column.
+        Useful when the input story_id is a UUID but we group by another column (e.g. URL).
+        """
+        logger.info(f"Fetching embedding by ID {id_value} from {self.table_name}...")
+        
+        try:
+            query = self._table(self.table_name)
+            
+            if self.is_legacy_schema:
+                # Legacy join query
+                response = (
+                    query
+                    .select(
+                        f"{self.id_column}, news_fact_id, {self.vector_column}, created_at, news_facts!inner({self.grouping_key_column}, created_at)"
+                    )
+                    .eq(self.id_column, id_value)
+                    .execute()
+                )
+            else:
+                 # Flat table query
+                response = (
+                    query
+                    .select("*")
+                    .eq(self.id_column, id_value)
+                    .execute()
+                )
+            
+            if response.data:
+                return self._normalize_embedding_record(response.data[0])
+            
+            return None
+            
+        except Exception as e:
+            # Catch type mismatch errors (e.g. searching UUID column with URL string, or BigInt with UUID)
+            error_str = str(e).lower()
+            if "invalid input syntax" in error_str:
+                logger.warning(f"Type mismatch fetching embedding by ID {id_value}: {e}")
+                return None
+            
+            logger.error(f"Error fetching embedding by ID {id_value}: {e}")
+            raise
 
-        if not news_url_ids:
+    def fetch_embeddings_by_keys(
+        self, keys: List[str]
+    ) -> List[Dict]:
+        """Fetch embeddings for a specific list of grouping keys (e.g. news_url_ids)."""
+
+        if not keys:
             return []
 
         logger.info(
-            "Fetching fact embeddings for %s requested news_url_ids",
-            len(news_url_ids),
+            "Fetching embeddings for %s requested keys from %s",
+            len(keys),
+            self.table_name
         )
 
-        unique_ids: List[str] = []
-        seen = set()
-        for news_id in news_url_ids:
-            if news_id and news_id not in seen:
-                seen.add(news_id)
-                unique_ids.append(news_id)
-
-        if not unique_ids:
+        unique_keys: List[str] = list(set(k for k in keys if k))
+        if not unique_keys:
             return []
 
         chunk_size = 100
         embeddings: List[Dict] = []
 
-        for start in range(0, len(unique_ids), chunk_size):
-            chunk = unique_ids[start : start + chunk_size]
+        for start in range(0, len(unique_keys), chunk_size):
+            chunk = unique_keys[start : start + chunk_size]
             try:
-                response = (
-                    self.client.table("news_facts")
-                    .select(
-                        "id, news_url_id, created_at, facts_embeddings!inner(id, embedding_vector, created_at)"
-                    )
-                    .in_("news_url_id", chunk)
-                    .execute()
-                )
-
-                for fact in response.data or []:
-                    for embedding in fact.get("facts_embeddings", []) or []:
-                        normalized = self._normalize_fact_embedding(
-                            {
-                                "id": embedding.get("id"),
-                                "news_fact_id": fact.get("id"),
-                                "embedding_vector": embedding.get("embedding_vector"),
-                                "created_at": embedding.get("created_at"),
-                                "news_facts": {
-                                    "news_url_id": fact.get("news_url_id"),
-                                    "created_at": fact.get("created_at"),
-                                },
-                            }
+                query = self._table(self.table_name)
+                
+                if self.is_legacy_schema:
+                    # Legacy join query
+                    response = (
+                        query
+                        .select(
+                            f"{self.id_column}, news_fact_id, {self.vector_column}, created_at, news_facts!inner({self.grouping_key_column}, created_at)"
                         )
-                        if normalized:
-                            embeddings.append(normalized)
+                        .in_(f"news_facts.{self.grouping_key_column}", chunk)
+                        .execute()
+                    )
+                else:
+                    # Flat table query
+                    response = (
+                        query
+                        .select("*")
+                        .in_(self.grouping_key_column, chunk)
+                        .execute()
+                    )
+
+                for record in response.data or []:
+                    normalized = self._normalize_embedding_record(record)
+                    if normalized:
+                        embeddings.append(normalized)
 
             except Exception as exc:
+                # Catch type mismatch errors (e.g. searching UUID column with URL string)
+                # This allows fallback logic in main.py to handle it (e.g. try searching by ID instead)
+                error_str = str(exc).lower()
+                if "invalid input syntax" in error_str:
+                    logger.warning(
+                        "Type mismatch fetching keys %s-%s: %s. Returning empty to allow fallback.",
+                        start,
+                        start + len(chunk) - 1,
+                        exc
+                    )
+                    # If the entire chunk fails due to type error, we skip it
+                    continue
+
                 logger.error(
-                    "Error fetching fact embeddings for IDs %s-%s: %s",
+                    "Error fetching embeddings for keys %s-%s: %s",
                     start,
                     start + len(chunk) - 1,
                     exc,
@@ -220,11 +314,10 @@ class EmbeddingReader:
                 raise
 
         logger.info(
-            "Fetched %s fact embeddings for requested IDs", len(embeddings)
+            "Fetched %s embeddings for requested keys", len(embeddings)
         )
 
         return embeddings
-    
 
     def fetch_all_embeddings(
         self,
@@ -241,7 +334,7 @@ class EmbeddingReader:
             List of dicts with keys: id, news_url_id, news_fact_id, embedding_vector,
             created_at
         """
-        logger.info("Fetching all fact embeddings...")
+        logger.info(f"Fetching all embeddings from {self.table_name}...")
         
         try:
             cutoff_date = self._get_cutoff_date()
@@ -257,7 +350,7 @@ class EmbeddingReader:
             ):
                 embeddings.extend(batch)
 
-            logger.info(f"Fetched {len(embeddings)} total fact embeddings")
+            logger.info(f"Fetched {len(embeddings)} total embeddings")
 
             return embeddings
             
@@ -265,57 +358,37 @@ class EmbeddingReader:
             logger.error(f"Error fetching all embeddings: {e}")
             raise
 
-    def get_embeddings_by_news_url_ids(
-        self,
-        news_url_ids: List[str]
-    ) -> List[Dict]:
-        """
-        Fetch fact embeddings for specific news URLs.
-        
-        Args:
-            news_url_ids: List of news URL IDs to fetch
-            
-        Returns:
-            List of dicts with keys: id, news_fact_id, news_url_id,
-            embedding_vector, created_at
-        """
-        if not news_url_ids:
-            return []
-
-        logger.debug(f"Fetching fact embeddings for {len(news_url_ids)} news URLs")
-
-        try:
-            return self.fetch_embeddings_by_news_url_ids(news_url_ids)
-        except Exception as e:
-            logger.error(f"Error fetching embeddings by news URL IDs: {e}")
-            raise
+    # Alias for backward compatibility (if needed by other modules, though we updated pipeline)
+    def fetch_embeddings_by_news_url_ids(self, news_url_ids: List[str]) -> List[Dict]:
+        return self.fetch_embeddings_by_keys(news_url_ids)
 
     def get_embedding_stats(self) -> Dict:
         """
-        Get statistics about fact embeddings used for grouping.
+        Get statistics about embeddings used for grouping.
 
         Returns:
             Dict with keys: total_embeddings, embeddings_with_vectors,
             grouped_count, ungrouped_count
         """
-        logger.info("Fetching embedding statistics...")
+        logger.info(f"Fetching embedding statistics from {self.table_name}...")
 
         try:
-            total_response = self.client.table("facts_embeddings").select(
-                "id", count="exact"
+            total_response = self._table(self.table_name).select(
+                self.id_column, count="exact"
             ).execute()
             total_count = total_response.count or 0
 
-            vector_response = self.client.table("facts_embeddings").select(
-                "id", count="exact"
-            ).not_.is_("embedding_vector", "null").execute()
+            vector_response = self._table(self.table_name).select(
+                self.id_column, count="exact"
+            ).not_.is_(self.vector_column, "null").execute()
             vector_count = vector_response.count or 0
 
-            grouped_response = self.client.table("story_group_members").select(
-                "news_fact_id", count="exact"
-            ).not_.is_("news_fact_id", "null").execute()
+            grouped_response = self._table("story_group_members").select(
+                "id", count="exact"
+            ).execute()
             grouped_count = grouped_response.count or 0
 
+            # Approximation for ungrouped count since we can't easily join count across tables efficiently here
             ungrouped_count = vector_count - grouped_count
 
             stats = {
@@ -359,43 +432,62 @@ class EmbeddingReader:
         limit: Optional[int],
         batch_size: int,
     ):
-        logger.info("Streaming ungrouped fact embeddings from database...")
+        logger.info(f"Streaming ungrouped embeddings from {self.table_name}...")
 
         page_size = max(batch_size, 500)
         offset = 0
         yielded = 0
         cutoff_date = self._get_cutoff_date()
-        grouped_fact_ids = self._get_grouped_fact_ids()
+        grouped_keys = self._get_grouped_key_ids() # Keys already in groups
 
         while True:
             logger.info(
-                "Fetching ungrouped fact embeddings at offset %s (page size %s)...",
+                "Fetching ungrouped embeddings at offset %s (page size %s)...",
                 offset,
                 page_size,
             )
 
-            response = (
-                self.client.table("facts_embeddings")
-                .select(
-                    "id, news_fact_id, embedding_vector, created_at, news_facts!inner(news_url_id, created_at)"
+            query = self.client.table(self.table_name)
+            
+            if self.is_legacy_schema:
+                 # Legacy join query
+                response = (
+                    query
+                    .select(
+                         f"{self.id_column}, news_fact_id, {self.vector_column}, created_at, news_facts!inner({self.grouping_key_column}, created_at)"
+                    )
+                    .gte("created_at", cutoff_date)
+                    .order("created_at", desc=True)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
                 )
-                .gte("created_at", cutoff_date)
-                .order("created_at", desc=True)
-                .range(offset, offset + page_size - 1)
-                .execute()
-            )
+            else:
+                # Flat table query
+                response = (
+                    query
+                    .select("*")
+                    .gte("created_at", cutoff_date)
+                    .order("created_at", desc=True)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
 
             if not response.data:
                 break
 
             parsed_batch = []
             for record in response.data:
-                if record.get("news_fact_id") in grouped_fact_ids:
+                normalized = self._normalize_embedding_record(record)
+                if not normalized:
+                    continue
+                    
+                # Skip if already grouped
+                # Note: This is an in-memory check which is fine for reasonable dataset sizes,
+                # but might need DB-side filtering (NOT IN) for huge datasets.
+                if normalized["news_url_id"] in grouped_keys:
                     continue
 
-                normalized = self._normalize_fact_embedding(record)
-                if normalized:
-                    parsed_batch.append(normalized)
+                parsed_batch.append(normalized)
 
             batch_index = 0
             while batch_index < len(parsed_batch):
@@ -421,14 +513,14 @@ class EmbeddingReader:
 
             offset += page_size
 
-        logger.info(f"Yielded {yielded} ungrouped fact embeddings")
+        logger.info(f"Yielded {yielded} ungrouped embeddings")
 
     def _iter_all_embedding_batches(
         self,
         limit: Optional[int],
         batch_size: int,
     ):
-        logger.info("Streaming all fact embeddings from database...")
+        logger.info(f"Streaming all embeddings from {self.table_name}...")
 
         cutoff_date = self._get_cutoff_date()
         page_size = max(batch_size, 500)
@@ -436,23 +528,35 @@ class EmbeddingReader:
         yielded = 0
 
         while True:
-            response = (
-                self.client.table("facts_embeddings")
-                .select(
-                    "id, news_fact_id, embedding_vector, created_at, news_facts!inner(news_url_id, created_at)"
+            query = self.client.table(self.table_name)
+            
+            if self.is_legacy_schema:
+                response = (
+                    query
+                    .select(
+                         f"{self.id_column}, news_fact_id, {self.vector_column}, created_at, news_facts!inner({self.grouping_key_column}, created_at)"
+                    )
+                    .gte("created_at", cutoff_date)
+                    .order("created_at", desc=False)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
                 )
-                .gte("created_at", cutoff_date)
-                .order("created_at", desc=False)
-                .range(offset, offset + page_size - 1)
-                .execute()
-            )
+            else:
+                response = (
+                    query
+                    .select("*")
+                    .gte("created_at", cutoff_date)
+                    .order("created_at", desc=False)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
 
             if not response.data:
                 break
 
             parsed_batch = []
             for record in response.data:
-                normalized = self._normalize_fact_embedding(record)
+                normalized = self._normalize_embedding_record(record)
                 if normalized:
                     parsed_batch.append(normalized)
 
@@ -480,4 +584,4 @@ class EmbeddingReader:
 
             offset += page_size
 
-        logger.info(f"Yielded {yielded} total fact embeddings")
+        logger.info(f"Yielded {yielded} total embeddings")

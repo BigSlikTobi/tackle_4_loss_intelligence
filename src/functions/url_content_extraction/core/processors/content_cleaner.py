@@ -33,7 +33,7 @@ def _filter_paragraphs(paragraphs: Iterable[str]) -> list[str]:
         if not paragraph:
             continue
         trimmed = paragraph.strip()
-        if len(trimmed) < 40:
+        if len(trimmed) <20:
             continue
         # Skip timestamps (e.g., "00:47", "14:21")
         if re.match(r'^\d{1,2}:\d{2}', trimmed):

@@ -17,6 +17,10 @@ from src.functions.url_content_extraction.core.extractors.extractor_factory impo
 )
 from src.functions.url_content_extraction.core.utils import amp_detector
 
+load_env()
+setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
+
 # Import fact extraction post-processor
 try:
     from src.functions.url_content_extraction.core.post_processors.fact_extraction import (
@@ -26,10 +30,6 @@ try:
 except ImportError:
     FACT_EXTRACTION_AVAILABLE = False
     logger.warning("Fact extraction post-processor not available")
-
-load_env()
-setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
-logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 45
 DEFAULT_MAX_PARAGRAPHS = 120

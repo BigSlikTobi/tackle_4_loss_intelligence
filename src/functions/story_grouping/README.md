@@ -72,6 +72,103 @@ python scripts/group_stories_cli.py --threshold 0.85 --verbose
 
 ---
 
+## Programmatic Usage
+
+### Single Story Grouping
+
+To group a single story (e.g., triggered by an event):
+
+```python
+from src.functions.story_grouping.functions.main import handle_single_story
+
+result = handle_single_story(
+    story_id="news-url-uuid-123",
+    table_config={
+        "embedding_table": "facts_embeddings",
+        "group_table": "story_groups", 
+        "member_table": "story_group_members",
+        "grouping_key_column": "news_url_id"
+    }
+)
+```
+
+### Configuration
+
+#### Table Configuration
+The `handle_single_story` function accepts a `table_config` dictionary to support custom schemas:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `embedding_table` | `facts_embeddings` | Table containing source embeddings |
+| `group_table` | `story_groups` | Table to store groups |
+| `member_table` | `story_group_members` | Table to store memberships |
+| `id_column` | `id` | PK of embedding table |
+| `vector_column` | `embedding_vector` | Column containing vector data |
+| `grouping_key_column` | `news_url_id` | Column used to identify the story (can be URL or UUID) |
+| `is_legacy_schema` | `True` | Set to `False` if reading from a flat table without joins |
+| `schema_name` | `public` | Postgres schema containing the tables |
+
+---
+
+
+---
+
+## Local Development
+
+You can run the Cloud Function locally for testing and debugging using the provided helper script.
+
+### Prerequisites
+- Create a `.env` file in the project root with your `SUPABASE_URL` and `SUPABASE_KEY`.
+- Install dependencies: `pip install -r src/functions/story_grouping/requirements.txt`
+
+### Running Locally
+```bash
+./src/functions/story_grouping/functions/run_local.sh
+```
+This starts the function on `localhost:8080`. You can then trigger it with `curl` (see API section below).
+
+## Cloud Function API
+
+The module is deployed as a Google Cloud Function that exposes an HTTP endpoint for on-demand grouping.
+
+### Triggering via HTTP
+
+You can trigger the grouping logic for a single story using `curl`:
+
+```bash
+curl -X POST https://REGION-PROJECT_ID.cloudfunctions.net/story-grouping \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com/story-url",
+    "table_config": {
+      "embedding_table": "news_urls_embeddings",
+      "group_table": "story_groups", 
+      "member_table": "story_group_members",
+      "grouping_key_column": "url",
+      "news_table": "news_urls",
+      "is_legacy_schema": false,
+      "schema_name": "vector_embeddings"
+    }
+  }'
+```
+
+**Parameters:**
+
+- `story_id` **OR** `url`: (Required) The ID (UUID) or URL string of the story to group.
+- `table_config`: (Optional) Overrides for table names and schema options. Use if you have custom tables.
+- `group_config`: (Optional) Overrides for grouping logic (e.g., `similarity_threshold`).
+
+**UUID Resolution for URLs:**
+If you provide a `url` and set `grouping_key_column` to `"url"`, the function will:
+1. Fetch the embedding using the URL string.
+2. Query the `news_table` (default: `news_urls` in `public` schema) to find the UUID corresponding to that URL.
+3. Use that UUID for the `story_group_members` table.
+
+**Idempotency:**
+The function checks if the story (UUID) is already in a group. If it is, it returns the existing group with status `"existing"` and does *not* reprocess the story or create duplicates.
+
+---
+
 ## How It Works
 
 ### Algorithm Overview
