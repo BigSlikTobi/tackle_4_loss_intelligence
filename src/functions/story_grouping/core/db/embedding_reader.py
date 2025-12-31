@@ -218,7 +218,7 @@ class EmbeddingReader:
                     .execute()
                 )
             else:
-                 # Flat table query
+                # Flat table query
                 response = (
                     query
                     .select("*")
