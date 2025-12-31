@@ -658,8 +658,6 @@ class GroupMemberWriter:
             logger.error(f"Error adding members batch: {e}")
             raise
 
-            raise
-
     def get_memberships_by_news_url_id(self, news_url_id: str) -> List[Dict]:
         """
         Get all group memberships for a specific story (news_url_id).
