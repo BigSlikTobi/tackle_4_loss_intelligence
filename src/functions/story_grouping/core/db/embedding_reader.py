@@ -84,7 +84,6 @@ class EmbeddingReader:
         self.grouping_key_column = grouping_key_column
         self.is_legacy_schema = is_legacy_schema
         self.schema_name = schema_name
-        self.schema_name = schema_name
         self.group_schema_name = group_schema_name or schema_name
         self.resolve_uuid = resolve_uuid
     
