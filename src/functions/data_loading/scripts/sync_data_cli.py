@@ -25,7 +25,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 @handle_cli_errors
-def main() -> None:
+def main() -> bool:
     # Load environment variables first
     load_env()
     
