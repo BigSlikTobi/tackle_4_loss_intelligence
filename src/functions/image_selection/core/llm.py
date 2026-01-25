@@ -150,7 +150,7 @@ class OpenAILLMClient(LLMClient):
             filtered.pop("temperature")
 
         # Set sensible defaults for GPT-4.1 to get precise, deterministic outputs
-        if model.lower().startswith("gpt-4.1") or model.lower() == "gpt-4.1":
+        if model.lower().startswith("gpt-4.1"):
             if "temperature" not in filtered:
                 filtered["temperature"] = 0.3  # Low temperature for more focused queries
             if "max_tokens" not in filtered:
