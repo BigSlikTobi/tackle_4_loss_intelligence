@@ -149,6 +149,13 @@ class OpenAILLMClient(LLMClient):
             logger.info("Removing unsupported temperature parameter for %s", model)
             filtered.pop("temperature")
 
+        # Set sensible defaults for GPT-4.1 to get precise, deterministic outputs
+        if model.lower().startswith("gpt-4.1"):
+            if "temperature" not in filtered:
+                filtered["temperature"] = 0.3  # Low temperature for more focused queries
+            if "max_tokens" not in filtered:
+                filtered["max_tokens"] = 50  # Short output for search queries
+
         return filtered
 
 

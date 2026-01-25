@@ -195,13 +195,13 @@ class StoryGroup:
 class StoryGrouper:
     """Handles grouping of stories based on embedding similarity."""
 
-    def __init__(self, similarity_threshold: float = 0.8):
+    def __init__(self, similarity_threshold: float = 0.88):
         """
         Initialize the story grouper.
         
         Args:
             similarity_threshold: Minimum similarity for stories to be grouped
-                                 together (0.0 to 1.0). Default: 0.8
+                                 together (0.0 to 1.0). Default: 0.55
         """
         if not 0.0 <= similarity_threshold <= 1.0:
             raise ValueError("Similarity threshold must be between 0 and 1")

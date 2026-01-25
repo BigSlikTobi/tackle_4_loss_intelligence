@@ -47,9 +47,9 @@ mkdir -p "$BUILD_DIR"
 
 # Copy source code
 echo "Copying source code..."
-# Copy the entire src tree to maintain package structure
+# Copy the entire src tree using rsync to exclude venv and other artifacts
 mkdir -p "$BUILD_DIR/src"
-cp -r "$PROJECT_ROOT/src" "$BUILD_DIR/"
+rsync -av --exclude 'venv' --exclude '__pycache__' --exclude '.git' --exclude '*.pyc' --exclude '.DS_Store' "$PROJECT_ROOT/src/" "$BUILD_DIR/src/"
 
 # Copy requirements
 cp "$MODULE_ROOT/requirements.txt" "$BUILD_DIR/"
