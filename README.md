@@ -183,6 +183,40 @@ python scripts/extract_knowledge_cli.py --dry-run --limit 5
 python scripts/extract_knowledge_cli.py
 ```
 
+### Gemini TTS
+Text-to-Speech service using Google's Gemini 2.5 Flash Audio model.
+
+- **Location**: [`src/functions/gemini_tts/`](src/functions/gemini_tts/)
+- **Status**: ✅ Production Ready
+- **Features**: Async, type-safe, CORS support
+
+[**→ Full Documentation**](src/functions/gemini_tts/README.md)
+
+**Quick Start:**
+```bash
+cd src/functions/gemini_tts
+# Add dependencies and run local server
+pip install -r requirements.txt
+cd functions && ./run_local.sh
+```
+
+### YouTube Search
+Search YouTube videos with transcript fetching support and proxy capabilities.
+
+- **Location**: [`src/functions/youtube_search/`](src/functions/youtube_search/)
+- **Status**: ✅ Production Ready
+- **Features**: Transcript fetching, proxy support for Cloud Functions, filters
+
+[**→ Full Documentation**](src/functions/youtube_search/README.md)
+
+**Quick Start:**
+```bash
+cd src/functions/youtube_search
+pip install -r requirements.txt
+# Run local tests
+pytest
+```
+
 ---
 
 ## 🤖 Automated Content Pipeline
@@ -427,6 +461,8 @@ Each module is independent:
 - **Story Embeddings** → [`src/functions/story_embeddings/README.md`](src/functions/story_embeddings/README.md)
 - **Story Grouping** → [`src/functions/story_grouping/README.md`](src/functions/story_grouping/README.md)
 - **Knowledge Extraction** → [`src/functions/knowledge_extraction/README.md`](src/functions/knowledge_extraction/README.md)
+- **Gemini TTS** → [`src/functions/gemini_tts/README.md`](src/functions/gemini_tts/README.md)
+- **YouTube Search** → [`src/functions/youtube_search/README.md`](src/functions/youtube_search/README.md)
 
 ---
 

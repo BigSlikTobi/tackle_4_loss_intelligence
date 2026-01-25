@@ -177,9 +177,16 @@ class ImageSelectionService:
                     candidates = await self._search_duckduckgo(query)
 
                 ranked = self._rank_candidates(candidates, query)
+                
+                # Pre-filter candidates in parallel using HEAD requests
+                # This prevents rejected images from counting toward the tries
+                logger.info("Pre-filtering %d candidates with HEAD requests...", len(ranked))
+                prefiltered = await self._prefilter_candidates(session, ranked)
+                logger.info("After pre-filtering: %d candidates remain", len(prefiltered))
+                
                 results: List[ProcessedImage] = []
 
-                for candidate in ranked:
+                for candidate in prefiltered:
                     if len(results) >= self.request.num_images:
                         break
                     try:
@@ -298,7 +305,8 @@ class ImageSelectionService:
         def _search() -> List[ImageCandidate]:
             cutoff = datetime.now(timezone.utc) - timedelta(days=14)
             results: List[ImageCandidate] = []
-            max_results = max(self.request.num_images * 6, 12)
+            # Fetch more candidates to account for pre-filtering losses
+            max_results = max(self.request.num_images * 10, 20)
             try:
                 with DDGS() as ddgs:
                     for image in ddgs.images(
@@ -518,6 +526,95 @@ class ImageSelectionService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Validation error for %s: %s", candidate.url, exc)
             return False
+
+    async def _prefilter_candidates(
+        self, session: aiohttp.ClientSession, candidates: List[ImageCandidate]
+    ) -> List[ImageCandidate]:
+        """Pre-filter candidates using HEAD requests to check size/type before processing.
+        
+        This prevents rejected images from counting toward the processing limit.
+        Uses parallel requests for efficiency.
+        """
+        if not candidates:
+            return []
+
+        async def check_candidate(candidate: ImageCandidate) -> Optional[ImageCandidate]:
+            """Check a single candidate via HEAD request and return it if valid."""
+            # Skip if already filtered by basic filters with known metadata
+            if candidate.width and candidate.height:
+                if candidate.width < MIN_WIDTH or candidate.height < MIN_HEIGHT:
+                    logger.info("Pre-filter: Skipping %s due to low resolution (%dx%d)", 
+                               candidate.url, candidate.width, candidate.height)
+                    return None
+            if candidate.byte_size and candidate.byte_size < MIN_BYTES:
+                logger.info("Pre-filter: Skipping %s due to small byte size (%d bytes)", 
+                           candidate.url, candidate.byte_size)
+                return None
+
+            # For candidates without metadata, use HEAD request to check
+            try:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                }
+                # Use HEAD request first (faster, no body download)
+                async with session.head(candidate.url, headers=headers, allow_redirects=True) as response:
+                    if response.status != 200:
+                        # Some servers don't support HEAD, fall back to GET with range
+                        async with session.get(candidate.url, headers={**headers, "Range": "bytes=0-0"}) as get_response:
+                            if get_response.status not in (200, 206):
+                                logger.info("Pre-filter: Skipping %s - not accessible (status %d)", 
+                                           candidate.url, get_response.status)
+                                return None
+                            content_length = get_response.headers.get("Content-Length") or get_response.headers.get("Content-Range", "").split("/")[-1]
+                            content_type = get_response.headers.get("Content-Type", "").lower()
+                    else:
+                        content_length = response.headers.get("Content-Length")
+                        content_type = response.headers.get("Content-Type", "").lower()
+
+                    # Check content type
+                    if content_type and "image" not in content_type:
+                        logger.info("Pre-filter: Skipping %s - not an image (%s)", 
+                                   candidate.url, content_type)
+                        return None
+
+                    # Check byte size from Content-Length header
+                    if content_length:
+                        try:
+                            byte_size = int(content_length)
+                            if byte_size < MIN_BYTES:
+                                logger.info("Pre-filter: Skipping %s due to small byte size (%d bytes)", 
+                                           candidate.url, byte_size)
+                                return None
+                            # Update candidate with discovered byte size
+                            candidate.byte_size = byte_size
+                        except ValueError:
+                            pass
+
+                return candidate
+            except asyncio.TimeoutError:
+                logger.info("Pre-filter: Skipping %s - timeout", candidate.url)
+                return None
+            except Exception as exc:  # noqa: BLE001
+                logger.info("Pre-filter: Skipping %s - error: %s", candidate.url, exc)
+                return None
+
+        # Run checks in parallel with a semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(10)  # Max 10 concurrent HEAD requests
+
+        async def limited_check(candidate: ImageCandidate) -> Optional[ImageCandidate]:
+            async with semaphore:
+                return await check_candidate(candidate)
+
+        tasks = [limited_check(c) for c in candidates]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Filter out None results and exceptions
+        valid_candidates = [
+            r for r in results 
+            if r is not None and not isinstance(r, Exception)
+        ]
+        return valid_candidates
 
     async def _download_image(
         self, session: aiohttp.ClientSession, url: str, max_retries: int = 3

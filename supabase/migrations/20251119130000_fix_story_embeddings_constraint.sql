@@ -1,1 +1,0 @@
-ALTER TABLE story_embeddings DROP CONSTRAINT IF EXISTS story_embeddings_news_url_id_key;

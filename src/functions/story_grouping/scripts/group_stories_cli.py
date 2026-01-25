@@ -91,7 +91,7 @@ def main():
     parser.add_argument(
         "--threshold",
         type=float,
-        help="Similarity threshold for grouping (0.0-1.0, default: 0.85)",
+        help="Similarity threshold for grouping (0.0-1.0, default: 0.88)",
     )
     
     parser.add_argument(
@@ -143,9 +143,24 @@ def main():
 
         writers_dry_run = args.dry_run or bool(preview_ids)
 
-        embedding_reader = EmbeddingReader(days_lookback=args.days)
-        group_writer = GroupWriter(dry_run=writers_dry_run, days_lookback=args.days)
-        member_writer = GroupMemberWriter(dry_run=writers_dry_run)
+        embedding_reader = EmbeddingReader(
+            days_lookback=args.days,
+            table_name="news_urls_embeddings",
+            schema_name="vector_embeddings",
+            is_legacy_schema=False,
+            vector_column="vector",
+            grouping_key_column="id",
+            resolve_uuid=True
+        )
+        group_writer = GroupWriter(
+            dry_run=writers_dry_run, 
+            days_lookback=args.days,
+            schema_name="vector_embeddings"
+        )
+        member_writer = GroupMemberWriter(
+            dry_run=writers_dry_run,
+            schema_name="vector_embeddings"
+        )
 
         pipeline = GroupingPipeline(
             embedding_reader=embedding_reader,

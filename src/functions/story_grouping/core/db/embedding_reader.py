@@ -58,7 +58,11 @@ class EmbeddingReader:
         # Optional: legacy join configuration (if we are using the standard schema)
         is_legacy_schema: bool = True,
         # Optional: Postgres schema (default: public)
-        schema_name: str = "public"
+        schema_name: str = "public",
+        # Optional: Separate schema for story groups if different from embeddings
+        group_schema_name: Optional[str] = None,
+        # Optional: Resolve UUID from public.news_urls using the URL from the embedding record
+        resolve_uuid: bool = False
     ):
         """
         Initialize the embedding reader.
@@ -80,6 +84,9 @@ class EmbeddingReader:
         self.grouping_key_column = grouping_key_column
         self.is_legacy_schema = is_legacy_schema
         self.schema_name = schema_name
+        self.schema_name = schema_name
+        self.group_schema_name = group_schema_name or schema_name
+        self.resolve_uuid = resolve_uuid
     
     def _table(self, table_name: str):
         """Helper to get table object with correct schema."""
@@ -128,6 +135,57 @@ class EmbeddingReader:
             "metadata": record,
         }
 
+    def _resolve_uuids_for_batch(self, batch: List[Dict]) -> List[Dict]:
+        """
+        Resolve UUIDs for a batch of records by querying public.news_urls with URLs.
+        Only used if self.resolve_uuid is True.
+        """
+        if not batch or not self.resolve_uuid:
+            return batch
+            
+        urls = [item["metadata"].get("url") for item in batch if item.get("metadata", {}).get("url")]
+        if not urls:
+            return batch
+            
+        try:
+            # Query public.news_urls (default schema) to get UUIDs
+            url_map = {}
+            chunk_size = 200
+            
+            for i in range(0, len(urls), chunk_size):
+                chunk = urls[i:i + chunk_size]
+                response = (
+                    self.client.table("news_urls")
+                    .select("id, url")
+                    .in_("url", chunk)
+                    .execute()
+                )
+                if response.data:
+                    for row in response.data:
+                        url_map[row["url"]] = row["id"]
+                        
+            # Update batch with UUIDs and filter out unresolved ones
+            resolved_batch = []
+            count = 0
+            for item in batch:
+                url = item["metadata"].get("url")
+                if url and url in url_map:
+                    item["news_url_id"] = url_map[url]
+                    resolved_batch.append(item)
+                    count += 1
+                else:
+                    logger.warning(
+                        f"Could not resolve UUID for story {item.get('id')} with URL {url}. Skipping."
+                    )
+            
+            logger.debug(f"Resolved {count}/{len(batch)} UUIDs from URLs")
+            return resolved_batch
+            
+        except Exception as e:
+            logger.error(f"Error resolving UUIDs: {e}")
+            # If resolution fails entirely, return empty list to be safe
+            return []
+
     def _get_grouped_key_ids(self) -> set:
         """Collect grouping keys (e.g. news_url_ids) that are already assigned to story groups."""
         # Note: This logic assumes 'story_group_members' table always uses 'news_url_id' as the key.
@@ -142,7 +200,7 @@ class EmbeddingReader:
 
         while batches < max_batches:
             response = (
-                self._table("story_group_members")
+                self.client.schema(self.group_schema_name).table("story_group_members")
                 .select("news_url_id")
                 .not_.is_("news_url_id", "null")
                 .range(offset, offset + page_size - 1)
@@ -383,7 +441,7 @@ class EmbeddingReader:
             ).not_.is_(self.vector_column, "null").execute()
             vector_count = vector_response.count or 0
 
-            grouped_response = self._table("story_group_members").select(
+            grouped_response = self.client.schema(self.group_schema_name).table("story_group_members").select(
                 "id", count="exact"
             ).execute()
             grouped_count = grouped_response.count or 0
@@ -447,7 +505,7 @@ class EmbeddingReader:
                 page_size,
             )
 
-            query = self.client.table(self.table_name)
+            query = self._table(self.table_name)
             
             if self.is_legacy_schema:
                 # Legacy join query
@@ -480,14 +538,23 @@ class EmbeddingReader:
                 normalized = self._normalize_embedding_record(record)
                 if not normalized:
                     continue
-                    
+                parsed_batch.append(normalized)
+
+            # Resolve UUIDs if configured
+            if self.resolve_uuid and parsed_batch:
+                parsed_batch = self._resolve_uuids_for_batch(parsed_batch)
+
+            final_batch = []
+            for normalized in parsed_batch:
                 # Skip if already grouped
                 # Note: This is an in-memory check which is fine for reasonable dataset sizes,
                 # but might need DB-side filtering (NOT IN) for huge datasets.
                 if normalized["news_url_id"] in grouped_keys:
                     continue
 
-                parsed_batch.append(normalized)
+                final_batch.append(normalized)
+
+            parsed_batch = final_batch
 
             batch_index = 0
             while batch_index < len(parsed_batch):
@@ -528,7 +595,7 @@ class EmbeddingReader:
         yielded = 0
 
         while True:
-            query = self.client.table(self.table_name)
+            query = self._table(self.table_name)
             
             if self.is_legacy_schema:
                 response = (
@@ -559,6 +626,10 @@ class EmbeddingReader:
                 normalized = self._normalize_embedding_record(record)
                 if normalized:
                     parsed_batch.append(normalized)
+            
+            # Resolve UUIDs if configured
+            if self.resolve_uuid and parsed_batch:
+                parsed_batch = self._resolve_uuids_for_batch(parsed_batch)
 
             batch_index = 0
             while batch_index < len(parsed_batch):

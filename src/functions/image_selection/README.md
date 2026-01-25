@@ -9,6 +9,9 @@ store them in Supabase storage, and persist metadata in the `content.article_ima
 - Automatic DuckDuckGo fallback when Google Custom Search credentials are not supplied.
 - Optional LLM-assisted query optimization (Gemini or GPT models).
 - Strict domain blacklist to avoid stock imagery and thumbnails.
+- Concurrency limits (max 10 concurrent checks) to prevent timeouts.
+- Improved error handling for image size validation.
+- Strict domain blacklist to avoid stock imagery and thumbnails.
 - Optional Supabase storage upload and metadata insertion (supply credentials per request).
 
 > **Security note:** the Cloud Function does not rely on environment-stored secrets. Callers include
@@ -29,9 +32,9 @@ cd src/functions/image_selection
 python scripts/select_images_cli.py \ 
   --article-file path/to/article.txt \ 
   --num-images 2 \ 
-  --llm-provider gemini \ 
-  --llm-model gemini-2.0-flash \ 
-  --llm-api-key $GEMINI_API_KEY \ 
+  --llm-provider openai \ 
+  --llm-model gpt-4.1 \ 
+  --llm-api-key $OPENAI_API_KEY \ 
   --search-api-key $GOOGLE_CUSTOM_SEARCH_KEY \ 
   --search-engine-id $GOOGLE_CUSTOM_SEARCH_ENGINE_ID \ 
   --supabase-url $SUPABASE_URL \ 
@@ -56,12 +59,12 @@ omitted from the payload.
   "num_images": 2,                                // required >= 1
   "enable_llm": true,                             // defaults to true
   "llm": {
-    "provider": "gemini",                        // "gemini" | "openai"
-    "model": "gemini-2.0-flash",                 // required when `enable_llm`
+    "provider": "openai",                        // "gemini" | "openai" (recommended: openai)
+    "model": "gpt-4.1",                          // recommended for precise queries
     "api_key": "...",                            // required when `enable_llm`
-    "parameters": {"temperature": 0.4},          // provider specific options
+    "parameters": {"temperature": 0.3},          // low temperature for focused results
     "prompt_template": null,                      // optional custom prompt
-    "max_query_words": 8                          // optional cap on query length
+    "max_query_words": 10                         // optional cap on query length
   },
   "search": {
     "api_key": "...",                            // Google Custom Search API key

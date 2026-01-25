@@ -107,6 +107,8 @@ The `handle_single_story` function accepts a `table_config` dictionary to suppor
 | `grouping_key_column` | `news_url_id` | Column used to identify the story (can be URL or UUID) |
 | `is_legacy_schema` | `True` | Set to `False` if reading from a flat table without joins |
 | `schema_name` | `public` | Postgres schema containing the tables |
+| `resolve_uuid` | `False` | If True, looks up UUID from `news_urls` table using the URL |
+| `group_schema_name` | `None` | Optional separate schema for `story_groups` table |
 
 ---
 
