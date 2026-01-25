@@ -49,7 +49,7 @@ cp -r "$MODULE_ROOT/core" "$TEMP_DIR/core"
 # if main.py is at the root and core is a sibling.
 # We will simple sed replacement to fix imports for the flattened structure.
 # `from ..core` -> `from core`
-sed -i '' 's/from \.\.core/from core/g' "$TEMP_DIR/main.py"
+sed -i.bak 's/from \.\.core/from core/g' "$TEMP_DIR/main.py" && rm "$TEMP_DIR/main.py.bak"
 
 # Also checking if core files have relative imports that might break.
 # core/service.py imports `from .config`. That works fine within core package.

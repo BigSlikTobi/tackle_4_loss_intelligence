@@ -31,7 +31,7 @@ cp -r "$MODULE_ROOT/core" "$TEMP_DIR/core"
 
 # Adjust imports in main.py for the flattened structure
 # `from ..core` -> `from core`
-sed -i '' 's/from \.\.core/from core/g' "$TEMP_DIR/main.py"
+sed -i.bak 's/from \.\.core/from core/g' "$TEMP_DIR/main.py" && rm "$TEMP_DIR/main.py.bak"
 
 cd "$TEMP_DIR"
 
