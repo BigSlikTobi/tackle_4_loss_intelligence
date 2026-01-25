@@ -8,6 +8,9 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
+# Mock dotenv before importing the module
+sys.modules["dotenv"] = MagicMock()
+
 from src.functions.data_loading.scripts.sync_data_cli import main
 
 class TestSyncDataCli(unittest.TestCase):
@@ -179,6 +182,89 @@ class TestSyncDataCli(unittest.TestCase):
         
         # Verify logging of errors (we can't easily check logs without more mocking, 
         # but execution without crash proves resilience)
+
+    @patch('src.functions.data_loading.scripts.sync_data_cli.get_supabase_client')
+    @patch('src.functions.data_loading.scripts.sync_data_cli.setup_cli_logging')
+    @patch('argparse.ArgumentParser.parse_args')
+    def test_sync_wipe_with_id_success(self, mock_args, mock_logging, mock_get_client):
+        """Test wipe logic when 'id' column exists."""
+        # Mock CLI args
+        mock_args.return_value = MagicMock(
+            tables=['public.teams'],
+            limit=10,
+            wipe=True,  # Enable wipe
+            all=False,
+            dry_run=False,
+            verbose=False
+        )
+
+        mock_source_client = MagicMock()
+        mock_target_client = MagicMock()
+        mock_get_client.side_effect = [mock_source_client, mock_target_client]
+
+        # Source data
+        mock_source_response = MagicMock()
+        mock_source_response.data = [{'id': 1}]
+        
+        # Source execute mock
+        (mock_source_client.schema.return_value
+            .table.return_value
+            .select.return_value
+            .order.return_value
+            .range.return_value
+            .execute.return_value) = mock_source_response
+        
+        # Target wipe verification steps:
+        # 1. Check if empty: .limit(1).execute() -> returns data to imply not empty
+        limit_mock = mock_target_client.schema.return_value.table.return_value.select.return_value.limit
+        limit_mock.return_value.execute.return_value.data = [{'id': 999}]
+        
+        # 2. Delete call: .delete().neq().execute()
+        delete_mock = mock_target_client.schema.return_value.table.return_value.delete
+        
+        main()
+        
+        # Verify limit(1) was called to inspect
+        limit_mock.assert_called_with(1)
+        
+        # Verify delete called with neq('id', ...)
+        delete_mock.assert_called_once()
+        delete_mock.return_value.neq.assert_called_with("id", "00000000-0000-0000-0000-000000000000")
+        delete_mock.return_value.neq.return_value.execute.assert_called_once()
+
+    @patch('src.functions.data_loading.scripts.sync_data_cli.get_supabase_client')
+    @patch('src.functions.data_loading.scripts.sync_data_cli.setup_cli_logging')
+    @patch('argparse.ArgumentParser.parse_args')
+    def test_sync_wipe_no_id_failure(self, mock_args, mock_logging, mock_get_client):
+        """Test wipe logic when 'id' column is MISSING."""
+        mock_args.return_value = MagicMock(
+            tables=['public.teams'],
+            limit=10,
+            wipe=True, 
+            all=False, 
+            dry_run=False
+        )
+        
+        mock_source_client = MagicMock()
+        mock_target_client = MagicMock()
+        mock_get_client.side_effect = [mock_source_client, mock_target_client]
+        
+        mock_source_client.schema.return_value.table.return_value.select.return_value.order.return_value.range.return_value.execute.return_value.data = [{'code': 'no_id'}]
+        
+        # Target check: returns data WITHOUT id
+        limit_mock = mock_target_client.schema.return_value.table.return_value.select.return_value.limit
+        limit_mock.return_value.execute.return_value.data = [{'code': 'ABC', 'name': 'No ID Here'}]
+        
+        # Capture delete mock
+        delete_mock = mock_target_client.schema.return_value.table.return_value.delete
+        
+        main()
+        
+        # Verify inspection
+        limit_mock.assert_called_with(1)
+        
+        # Verify delete was NOT called
+        delete_mock.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()
