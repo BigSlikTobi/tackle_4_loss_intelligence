@@ -16,6 +16,8 @@ import logging
 import math
 import time
 
+from ..utils.player_id_mapper import PlayerIdMapper
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,9 +79,10 @@ class DataNormalizer:
         clean_ngs = normalized.ngs_data["passing"]
     """
     
-    def __init__(self):
+    def __init__(self, player_id_mapper: Optional[PlayerIdMapper] = None):
         """Initialize the data normalizer."""
         self._normalization_count = 0
+        self._player_id_mapper = player_id_mapper or PlayerIdMapper()
     
     def normalize(self, fetch_result) -> NormalizedData:
         """
@@ -249,8 +252,8 @@ class DataNormalizer:
         
         for key, value in record.items():
             cleaned[key] = self._normalize_value(value, key, source, index)
-        
-        return cleaned
+
+        return self._ensure_consistent_player_ids(cleaned)
     
     def _normalize_value(
         self,
@@ -365,6 +368,73 @@ class DataNormalizer:
         Returns:
             Record with standardized IDs
         """
-        # TODO: Implement ID standardization if needed (issue #25)
-        # For now, just return the record as-is
+        if not self._player_id_mapper or not self._player_id_mapper.enabled:
+            return record
+
+        has_player_id_field = any(
+            self._is_player_id_field(key) or self._is_player_id_list_field(key)
+            or ("pfr" in key.lower() and "id" in key.lower())
+            for key in record.keys()
+        )
+        if not has_player_id_field:
+            return record
+
+        player_ids = record.get("player_ids")
+        if not isinstance(player_ids, dict):
+            player_ids = {}
+
+        gsis_candidate = None
+        pfr_candidate = None
+
+        for key, value in record.items():
+            if not value:
+                continue
+            key_lower = key.lower()
+            if key_lower in {"player_id", "player_gsis_id", "gsis_id", "nflverse_id"}:
+                gsis_candidate = self._player_id_mapper.normalize_gsis_id(value)
+                if gsis_candidate:
+                    player_ids.setdefault("gsis", gsis_candidate)
+            if "pfr" in key_lower and "id" in key_lower:
+                pfr_candidate = str(value).strip()
+                if pfr_candidate:
+                    player_ids.setdefault("pfr", pfr_candidate)
+
+        if not gsis_candidate and pfr_candidate:
+            mapped = self._player_id_mapper.resolve_gsis_from_pfr(pfr_candidate)
+            if mapped:
+                gsis_candidate = mapped
+                player_ids["gsis"] = mapped
+
+        for key, value in list(record.items()):
+            if self._is_player_id_field(key):
+                normalized_value = self._player_id_mapper.normalize_to_gsis(value)
+                if normalized_value:
+                    record[key] = normalized_value
+                elif isinstance(value, str) and value and not self._player_id_mapper.is_valid_gsis_id(value):
+                    logger.debug("Non-standard player ID format for %s: %s", key, value)
+            elif self._is_player_id_list_field(key):
+                record[key] = self._player_id_mapper.normalize_player_id_list(value)
+
+        if gsis_candidate:
+            record["player_id"] = gsis_candidate
+
+        if player_ids:
+            record["player_ids"] = player_ids
+
         return record
+
+    @staticmethod
+    def _is_player_id_field(field: str) -> bool:
+        field_lower = field.lower()
+        if field_lower == "player_ids":
+            return False
+        if "player_id" in field_lower and "pfr" not in field_lower:
+            return True
+        return field_lower in {"player_gsis_id", "gsis_id", "nflverse_id"}
+
+    @staticmethod
+    def _is_player_id_list_field(field: str) -> bool:
+        field_lower = field.lower()
+        if field_lower == "player_ids":
+            return False
+        return "player_ids" in field_lower and "pfr" not in field_lower

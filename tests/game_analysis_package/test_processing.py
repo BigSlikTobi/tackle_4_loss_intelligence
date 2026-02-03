@@ -18,6 +18,10 @@ from src.functions.game_analysis_package.core.processing import (
     DataMerger,
     NormalizedData
 )
+from src.functions.game_analysis_package.core.utils.player_id_mapper import (
+    PlayerIdMapper,
+    PlayerIdMappingConfig,
+)
 from src.functions.game_analysis_package.core.contracts.game_package import (
     GamePackageInput,
     PlayData
@@ -176,6 +180,31 @@ class TestDataNormalizer:
         # Should have processed record successfully
         assert result.records_processed["play_by_play"] == 1
         assert len(result.issues_found) == 0
+
+    def test_normalize_player_ids_with_mapping(self):
+        """Test that player IDs are standardized using the mapper."""
+        mapper = PlayerIdMapper(
+            config=PlayerIdMappingConfig(enabled=True),
+            pfr_to_gsis={
+                "MahoPa00": "00-0033873",
+            },
+        )
+        normalizer = DataNormalizer(player_id_mapper=mapper)
+
+        fetch_result = FetchResult(
+            snap_counts=[
+                {"player_id": "MahoPa00", "pfr_player_id": "MahoPa00"},
+            ],
+            play_by_play=[
+                {"play_id": "1", "receiver_player_id": "MahoPa00"},
+            ],
+        )
+
+        result = normalizer.normalize(fetch_result)
+
+        assert result.snap_counts[0]["player_id"] == "00-0033873"
+        assert result.snap_counts[0]["player_ids"]["pfr"] == "MahoPa00"
+        assert result.play_by_play[0]["receiver_player_id"] == "00-0033873"
 
 
 class TestDataMerger:
