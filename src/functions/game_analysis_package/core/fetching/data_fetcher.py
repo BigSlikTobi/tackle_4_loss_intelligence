@@ -361,6 +361,12 @@ class DataFetcher:
                 continue
 
             payload = self._build_snap_payload(record, normalized_player_id)
+            if not payload.get("game_id"):
+                payload["game_id"] = request.game_id
+            if payload.get("season") is None:
+                payload["season"] = request.season
+            if payload.get("week") is None:
+                payload["week"] = request.week
             game_records.append(payload)
 
         return game_records

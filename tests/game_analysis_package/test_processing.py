@@ -476,6 +476,60 @@ class TestDataFetcherSnapCounts:
         assert payload["snaps"] == 65
         assert payload["snap_pct"] == pytest.approx(98.0)
 
+    def test_fetch_snap_counts_sets_game_context_when_missing(self, monkeypatch):
+        """Snap count fetch backfills game/season/week when missing in source."""
+
+        fake_snap_data = [
+            {
+                "season": 2024,
+                "week": 1,
+                "team": "BUF",
+                "opponent": "NYJ",
+                "player": "Quarterback",
+                "pfr_player_id": "PFR12345",
+                "offense_snaps": 60,
+                "offense_pct": 82.0,
+            }
+        ]
+
+        fake_module = types.ModuleType("nflreadpy")
+
+        def _fake_load_snap_counts(seasons):
+            assert seasons == [2024]
+            return fake_snap_data
+
+        def _fake_load_rosters(seasons):
+            assert seasons == [2024]
+            return [
+                {"pfr_id": "PFR12345", "gsis_id": "00-0012345"},
+            ]
+
+        fake_module.load_snap_counts = _fake_load_snap_counts  # type: ignore[attr-defined]
+        fake_module.load_rosters = _fake_load_rosters  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "nflreadpy", fake_module)
+
+        fetcher = DataFetcher()
+        request = CombinedDataRequest(
+            season=2024,
+            week=1,
+            game_id="2024_01_BUF_NYJ",
+            home_team="NYJ",
+            away_team="BUF",
+            include_play_by_play=False,
+            include_snap_counts=True,
+            include_team_context=False,
+        )
+        request.player_ids = {"00-0012345"}
+
+        result = FetchResult()
+        fetcher._fetch_snap_counts(request, result)
+
+        assert len(result.snap_counts) == 1
+        payload = result.snap_counts[0]
+        assert payload["game_id"] == "2024_01_BUF_NYJ"
+        assert payload["season"] == 2024
+        assert payload["week"] == 1
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
