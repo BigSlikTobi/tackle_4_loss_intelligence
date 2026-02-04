@@ -7,7 +7,6 @@ import hashlib
 import logging
 import re
 import ssl
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
@@ -195,13 +194,22 @@ class ImageSelectionService:
                         public_url = candidate.url
                         record: Optional[Dict[str, Any]] = None
                         if self.supabase is not None:
-                            image_bytes = await self._download_image(
-                                session, candidate.url
-                            )
-                            public_url = await self._upload_image(
-                                image_bytes, candidate
-                            )
-                            record = await self._record_image(public_url, candidate)
+                            existing = await self._find_existing_image(candidate)
+                            if existing:
+                                public_url = existing.get("image_url", candidate.url)
+                                record = existing
+                                logger.info(
+                                    "Reusing existing image for original_url %s",
+                                    candidate.url,
+                                )
+                            else:
+                                image_bytes = await self._download_image(
+                                    session, candidate.url
+                                )
+                                public_url = await self._upload_image(
+                                    image_bytes, candidate
+                                )
+                                record = await self._record_image(public_url, candidate)
                         results.append(
                             ProcessedImage(
                                 public_url=public_url,
@@ -668,6 +676,31 @@ class ImageSelectionService:
             raise RuntimeError("Supabase URL requested but Supabase is disabled")
         return config.url.rstrip("/")
 
+    async def _find_existing_image(
+        self, candidate: ImageCandidate
+    ) -> Optional[Dict[str, Any]]:
+        if self.supabase is None or not self.supabase_table:
+            return None
+
+        def _lookup() -> Optional[Dict[str, Any]]:
+            table = self.supabase.table(self.supabase_table)
+            original_urls = [candidate.url]
+            if candidate.context_url and candidate.context_url != candidate.url:
+                original_urls.append(candidate.context_url)
+            for original_url in original_urls:
+                existing = (
+                    table.select("id,image_url,original_url")
+                    .eq("original_url", original_url)
+                    .limit(1)
+                    .execute()
+                )
+                existing_data = getattr(existing, "data", None) or []
+                if existing_data:
+                    return existing_data[0]
+            return None
+
+        return await asyncio.to_thread(_lookup)
+
     async def _record_image(self, public_url: str, candidate: ImageCandidate) -> Optional[Dict[str, Any]]:
         if self.supabase is None or not self.supabase_table:
             raise RuntimeError("Supabase persistence is not configured")
@@ -675,11 +708,20 @@ class ImageSelectionService:
         def _insert() -> Optional[Dict[str, Any]]:
             payload = {
                 "image_url": public_url,
-                "original_url": candidate.context_url or candidate.url,
+                "original_url": candidate.url,
                 "author": candidate.author or "",
                 "source": candidate.source or "",
             }
             table = self.supabase.table(self.supabase_table)
+            existing = (
+                table.select("id,image_url,original_url")
+                .eq("original_url", payload["original_url"])
+                .limit(1)
+                .execute()
+            )
+            existing_data = getattr(existing, "data", None) or []
+            if existing_data:
+                return existing_data[0]
             response = table.insert(payload).execute()
             error = getattr(response, "error", None)
             if error:
@@ -724,8 +766,7 @@ class ImageSelectionService:
 
     def _build_destination_path(self, original_url: str) -> str:
         digest = hashlib.md5(original_url.encode("utf-8")).hexdigest()
-        timestamp = int(time.time())
-        path = PurePosixPath("public") / f"{digest}_{timestamp}"
+        path = PurePosixPath("public") / digest
         return str(path)
 
     @staticmethod
