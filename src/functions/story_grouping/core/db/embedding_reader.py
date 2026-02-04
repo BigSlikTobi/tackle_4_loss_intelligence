@@ -3,6 +3,7 @@
 import logging
 import json
 from typing import Dict, List, Optional
+import os
 from datetime import datetime, timedelta, timezone
 
 from src.shared.db import get_supabase_client
@@ -62,7 +63,9 @@ class EmbeddingReader:
         # Optional: Separate schema for story groups if different from embeddings
         group_schema_name: Optional[str] = None,
         # Optional: Resolve UUID from public.news_urls using the URL from the embedding record
-        resolve_uuid: bool = False
+        resolve_uuid: bool = False,
+        # Optional: Safety cap for grouped-key pagination (number of 1000-row pages)
+        grouped_key_batch_limit: Optional[int] = None
     ):
         """
         Initialize the embedding reader.
@@ -86,6 +89,17 @@ class EmbeddingReader:
         self.schema_name = schema_name
         self.group_schema_name = group_schema_name or schema_name
         self.resolve_uuid = resolve_uuid
+        env_limit = os.getenv("STORY_GROUPING_GROUPED_KEY_BATCH_LIMIT")
+        if grouped_key_batch_limit is None and env_limit:
+            try:
+                grouped_key_batch_limit = int(env_limit)
+            except ValueError:
+                logger.warning(
+                    "Invalid STORY_GROUPING_GROUPED_KEY_BATCH_LIMIT=%s; ignoring.",
+                    env_limit,
+                )
+                grouped_key_batch_limit = None
+        self.grouped_key_batch_limit = grouped_key_batch_limit
     
     def _table(self, table_name: str):
         """Helper to get table object with correct schema."""
@@ -194,10 +208,9 @@ class EmbeddingReader:
         grouped_keys: set = set()
         page_size = 1000
         offset = 0
-        max_batches = 15
         batches = 0
 
-        while batches < max_batches:
+        while True:
             response = (
                 self.client.schema(self.group_schema_name).table("story_group_members")
                 .select("news_url_id")
@@ -218,8 +231,19 @@ class EmbeddingReader:
 
             offset += page_size
             batches += 1
+            if self.grouped_key_batch_limit is not None and batches >= self.grouped_key_batch_limit:
+                logger.warning(
+                    "Grouped-key pagination reached safety cap (%s batches). "
+                    "Set STORY_GROUPING_GROUPED_KEY_BATCH_LIMIT to raise or unset.",
+                    self.grouped_key_batch_limit,
+                )
+                break
 
-        logger.info("Found %s already grouped keys", len(grouped_keys))
+        logger.info(
+            "Found %s already grouped keys across %s batches",
+            len(grouped_keys),
+            batches + (1 if grouped_keys else 0),
+        )
         return grouped_keys
 
     def fetch_ungrouped_embeddings(
