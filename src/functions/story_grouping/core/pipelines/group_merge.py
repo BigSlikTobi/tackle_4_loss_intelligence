@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import logging
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -129,16 +130,12 @@ class GroupMergeService:
         norms[norms == 0] = 1.0
         centroid_matrix = centroid_matrix / norms
 
-        sim_matrix = centroid_matrix @ centroid_matrix.T
-
-        pairs: List[Tuple[float, int, int]] = []
         n = len(valid_groups)
-        for i in range(n):
-            for j in range(i + 1, n):
-                sim = float(sim_matrix[i, j])
-                if sim >= self.similarity_threshold:
-                    pairs.append((sim, i, j))
-
+        pairs: List[Tuple[float, int, int]] = self._collect_pairs(
+            centroid_matrix=centroid_matrix,
+            similarity_threshold=self.similarity_threshold,
+            max_pairs=self.max_pairs,
+        )
         if not pairs:
             return []
 
@@ -173,6 +170,55 @@ class GroupMergeService:
             plan.append((primary["id"], secondary_ids))
 
         return plan
+
+    @staticmethod
+    def _collect_pairs(
+        *,
+        centroid_matrix: np.ndarray,
+        similarity_threshold: float,
+        max_pairs: int,
+        block_size: int = 256,
+    ) -> List[Tuple[float, int, int]]:
+        """Collect centroid pairs over the similarity threshold without full NxN matrix."""
+        n = centroid_matrix.shape[0]
+        if n < 2:
+            return []
+
+        use_heap = max_pairs is not None and max_pairs > 0
+        heap: List[Tuple[float, int, int]] = []
+        pairs: List[Tuple[float, int, int]] = []
+
+        for block_start in range(0, n, block_size):
+            block_end = min(block_start + block_size, n)
+            block = centroid_matrix[block_start:block_end]
+            sim_block = block @ centroid_matrix.T
+
+            for row_offset, sims in enumerate(sim_block):
+                i = block_start + row_offset
+                j_start = i + 1
+                if j_start >= n:
+                    continue
+
+                row = sims[j_start:]
+                candidate_offsets = np.where(row >= similarity_threshold)[0]
+                if candidate_offsets.size == 0:
+                    continue
+
+                for offset in candidate_offsets:
+                    j = j_start + int(offset)
+                    sim = float(row[offset])
+                    if use_heap:
+                        if len(heap) < max_pairs:
+                            heapq.heappush(heap, (sim, i, j))
+                        else:
+                            if sim > heap[0][0]:
+                                heapq.heapreplace(heap, (sim, i, j))
+                    else:
+                        pairs.append((sim, i, j))
+
+        if use_heap:
+            return heap
+        return pairs
 
     @staticmethod
     def _select_primary(groups: List[Dict]) -> Dict:
