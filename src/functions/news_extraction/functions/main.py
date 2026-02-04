@@ -36,19 +36,22 @@ def news_extractor(request: flask.Request) -> flask.Response:
         return _error_response("Method not allowed", 405)
     
     try:
-        payload = request.get_json()
-        
+        payload = request.get_json(silent=True)
+        if payload is None:
+            return _error_response("Invalid or missing JSON payload", 400)
+
         # TODO: Implement extraction logic
         # extraction_request = NewsExtractionRequest.from_dict(payload)
         # results = extract_news_urls(extraction_request)
-        
-        # Placeholder response
-        return _cors_response({
-            "status": "success",
-            "message": "News extraction not yet implemented",
-            "urls": [],
-            "count": 0
-        })
+
+        # Explicitly fail until the pipeline is wired in.
+        return _cors_response(
+            {
+                "status": "not_implemented",
+                "message": "News extraction pipeline is not wired in yet.",
+            },
+            status=501,
+        )
         
     except Exception as exc:
         logger.exception("News extraction failed")
