@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -44,10 +45,12 @@ class FuzzySearchService:
         client: Optional[Any] = None,
         page_size: int = 500,
         score_cutoff: int = 60,
+        max_candidates: int = 2000,
     ) -> None:
         self.client = client or get_supabase_client()
         self.page_size = page_size
         self.score_cutoff = score_cutoff
+        self.max_candidates = max_candidates
         self.teams_map = self._fetch_teams_map()
 
     def _fetch_teams_map(self) -> Dict[str, str]:
@@ -95,13 +98,14 @@ class FuzzySearchService:
     ) -> List[FuzzySearchResult]:
         """Run a fuzzy search over the players table."""
 
-        records = self._fetch_paginated(
+        records = self._fetch_candidates(
             table="players",
             select_columns=(
                 "player_id, display_name, football_name, first_name, last_name, "
                 "short_name, latest_team, position, college_name"
             ),
             apply_filters=lambda q: self._apply_player_filters(q, filters),
+            apply_candidates=lambda q: self._apply_player_candidates(q, query),
         )
 
         return self._rank_matches(
@@ -115,10 +119,11 @@ class FuzzySearchService:
     def search_teams(self, query: str, limit: int) -> List[FuzzySearchResult]:
         """Run a fuzzy search over the teams table."""
 
-        records = self._fetch_paginated(
+        records = self._fetch_candidates(
             table="teams",
             select_columns="team_abbr, team_name, team_conference, team_division, team_nick",
             apply_filters=lambda q: q,
+            apply_candidates=lambda q: self._apply_team_candidates(q, query),
         )
 
         return self._rank_matches(
@@ -134,12 +139,13 @@ class FuzzySearchService:
     ) -> List[FuzzySearchResult]:
         """Run a fuzzy search over the games table."""
 
-        records = self._fetch_paginated(
+        records = self._fetch_candidates(
             table="games",
             select_columns=(
                 "game_id, season, week, game_type, home_team, away_team, gameday, weekday"
             ),
             apply_filters=lambda q: self._apply_game_filters(q, filters),
+            apply_candidates=lambda q: self._apply_game_candidates(q, query),
         )
 
         return self._rank_matches(
@@ -150,20 +156,22 @@ class FuzzySearchService:
             entity_type="game",
         )
 
-    def _fetch_paginated(
+    def _fetch_candidates(
         self,
         table: str,
         select_columns: str,
         apply_filters: Callable[[Any], Any],
+        apply_candidates: Callable[[Any], Any],
     ) -> List[Dict[str, Any]]:
-        """Fetch data from Supabase with pagination support."""
+        """Fetch candidate data from Supabase with pagination and a hard cap."""
 
         offset = 0
         rows: List[Dict[str, Any]] = []
 
-        while True:
+        while len(rows) < self.max_candidates:
             query = self.client.table(table).select(select_columns)
             query = apply_filters(query)
+            query = apply_candidates(query)
             response = query.range(offset, offset + self.page_size - 1).execute()
 
             rows.extend(response.data)
@@ -176,7 +184,15 @@ class FuzzySearchService:
 
             offset += self.page_size
 
-        logger.info("Fetched %d rows from %s", len(rows), table)
+        if len(rows) > self.max_candidates:
+            rows = rows[: self.max_candidates]
+
+        logger.info(
+            "Fetched %d candidate rows from %s (max=%d)",
+            len(rows),
+            table,
+            self.max_candidates,
+        )
         return rows
 
     def _rank_matches(
@@ -310,5 +326,63 @@ class FuzzySearchService:
             query = query.eq("week", filters.week)
         if filters.season is not None:
             query = query.eq("season", filters.season)
+
+        return query
+
+    @staticmethod
+    def _normalize_query(query: str) -> str:
+        return " ".join(query.strip().split())
+
+    def _apply_player_candidates(self, query: Any, search: str) -> Any:
+        search = self._normalize_query(search)
+        if not search:
+            return query
+        pattern = f"%{search}%"
+        return query.or_(
+            ",".join(
+                [
+                    f"display_name.ilike.{pattern}",
+                    f"football_name.ilike.{pattern}",
+                    f"short_name.ilike.{pattern}",
+                    f"first_name.ilike.{pattern}",
+                    f"last_name.ilike.{pattern}",
+                ]
+            )
+        )
+
+    def _apply_team_candidates(self, query: Any, search: str) -> Any:
+        search = self._normalize_query(search)
+        if not search:
+            return query
+        pattern = f"%{search}%"
+        return query.or_(
+            ",".join(
+                [
+                    f"team_name.ilike.{pattern}",
+                    f"team_nick.ilike.{pattern}",
+                    f"team_abbr.ilike.{pattern}",
+                ]
+            )
+        )
+
+    def _apply_game_candidates(self, query: Any, search: str) -> Any:
+        search = self._normalize_query(search)
+        if not search:
+            return query
+
+        pattern = f"%{search}%"
+        query = query.or_(
+            ",".join(
+                [
+                    f"home_team.ilike.{pattern}",
+                    f"away_team.ilike.{pattern}",
+                    f"weekday.ilike.{pattern}",
+                ]
+            )
+        )
+
+        year_match = re.search(r"\b(19|20)\d{2}\b", search)
+        if year_match:
+            query = query.eq("season", int(year_match.group(0)))
 
         return query
