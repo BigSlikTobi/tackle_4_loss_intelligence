@@ -87,3 +87,4 @@ src/functions/content_summarization/scripts/.summary_checkpoint.json
 # supabase temp files
 supabase/.temp
 old_migrations
+src/functions/image_selection/scripts/article.txt

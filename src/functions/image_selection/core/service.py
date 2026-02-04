@@ -27,10 +27,14 @@ from src.shared.db.connection import get_supabase_client
 
 from .config import ImageSelectionRequest
 from .llm import LLMClient, create_llm_client
+from .prompts import build_image_query
+from .vision_validator import VisionValidator
+from .source_reputation import get_source_score_from_url
 
 logger = logging.getLogger(__name__)
 
 BLACKLISTED_DOMAINS = {
+    # Stock photo sites
     "lookaside.instagram.com",
     "gettyimages.com",
     "shutterstock.com",
@@ -60,9 +64,35 @@ BLACKLISTED_DOMAINS = {
     "reddit.com",
     "i.redd.it",
     "youtube.com",
+    # Trading cards & collectibles
+    "panini.com",
+    "paniniamerica.net",
+    "topps.com",
+    "tradingcarddb.com",
+    "beckett.com",
+    "comc.com",
+    "sportscardspro.com",
+    "psacard.com",
+    # Fantasy sports
+    "espn.com/fantasy",
+    "yahoo.com/fantasy",
+    "draftkings.com",
+    "fanduel.com",
+    "fantasypros.com",
+    "rotowire.com",
+    # Video platforms (thumbnails)
+    "i.ytimg.com",
+    "vimeo.com",
+    # Social/aggregator sites
+    "pinterest.com",
+    "tumblr.com",
+    "blogspot.com",
+    "wordpress.com",
+    "medium.com",
 }
 
 IRRELEVANCE_TERMS = {
+    # Graphics/overlays
     "logo",
     "icon",
     "banner",
@@ -73,7 +103,59 @@ IRRELEVANCE_TERMS = {
     "graphic",
     "chart",
     "screenshot",
+    "overlay",
+    "template",
+    "mockup",
+    # Trading cards
+    "card",
+    "trading",
+    "rookie",
+    "autograph",
+    "panini",
+    "topps",
+    "prizm",
+    "optic",
+    # Fantasy/stats
+    "fantasy",
+    "stat",
+    "stats",
+    "score",
+    "lineup",
+    "projection",
+    "ranking",
+    "dfs",
+    # Video content
+    "highlight",
+    "highlights",
+    "replay",
+    "clip",
+    "video",
+    "watch",
+    # Merchandise
+    "jersey",
+    "merchandise",
+    "shop",
+    "buy",
+    "sale",
+    "store",
 }
+
+# URL patterns to block (regex)
+BLOCKED_URL_PATTERNS = [
+    r"\?text=",
+    r"overlay",
+    r"composite",
+    r"/thumb/",
+    r"/small/",
+    r"_thumb\.",
+    r"-card-",
+    r"trading.card",
+    r"_thumbnail",
+    r"/preview/",
+    r"watermark",
+    r"/draft/",
+    r"fantasy",
+]
 
 MIN_WIDTH = 640
 MIN_HEIGHT = 360
@@ -145,10 +227,22 @@ class ImageSelectionService:
         self._http_timeout = aiohttp.ClientTimeout(total=12)
         self._ssl_context = ssl.create_default_context(cafile=certifi.where())
 
+        # Vision-based validation (OCR + CLIP)
+        self.vision_validator: Optional[VisionValidator] = None
+        if request.vision_config and request.vision_config.enabled:
+            self.vision_validator = VisionValidator(request.vision_config)
+            logger.info("Vision validation enabled (OCR: %s, CLIP: %s)",
+                       request.vision_config.enable_ocr,
+                       request.vision_config.enable_clip)
+        else:
+            logger.info("Vision validation disabled")
+
     async def process(self) -> List[ProcessedImage]:
         """Main entry point returning processed image metadata."""
 
-        query = await self._build_query()
+        raw_query = await self._build_query()
+        # Ensure NFL/football context is always present
+        query = build_image_query(raw_query)
         self.resolved_query = query
         logger.info("Searching images using query: %s", query)
 
@@ -168,6 +262,11 @@ class ImageSelectionService:
                     )
 
                 if not candidates:
+                    if self.request.strict_mode:
+                        logger.warning(
+                            "Strict mode enabled; skipping DuckDuckGo fallback and returning no images"
+                        )
+                        return []
                     if self.request.search_config:
                         logger.warning(
                             "Primary search returned no candidates, using fallback"
@@ -176,7 +275,26 @@ class ImageSelectionService:
                         logger.info("Using DuckDuckGo fallback for image discovery")
                     candidates = await self._search_duckduckgo(query)
 
-                ranked = self._rank_candidates(candidates, query)
+                candidates = self._filter_by_source_score(candidates)
+                required_terms = self._resolve_required_terms()
+                candidates = self._filter_by_required_terms(candidates, required_terms)
+
+                scored = self._score_candidates(candidates, query)
+                ranked = [candidate for candidate, _ in scored]
+
+                if self.request.min_relevance_score > 0:
+                    filtered = [
+                        candidate
+                        for candidate, score in scored
+                        if score >= self.request.min_relevance_score
+                    ]
+                    logger.info(
+                        "Applied min relevance score %.2f: %d -> %d candidates",
+                        self.request.min_relevance_score,
+                        len(ranked),
+                        len(filtered),
+                    )
+                    ranked = filtered
                 
                 # Pre-filter candidates in parallel using HEAD requests
                 # This prevents rejected images from counting toward the tries
@@ -192,12 +310,34 @@ class ImageSelectionService:
                     try:
                         if not await self._validate_candidate(session, candidate):
                             continue
+
+                        # Download image for validation and upload
+                        image_bytes = await self._download_image(
+                            session, candidate.url
+                        )
+
+                        # Vision-based validation (OCR text detection + CLIP relevance)
+                        if self.vision_validator:
+                            validation = await self.vision_validator.validate_image(
+                                image_bytes, self.resolved_query or ""
+                            )
+                            if not validation.passed:
+                                logger.info(
+                                    "Rejecting %s via vision validation: %s",
+                                    candidate.url,
+                                    validation.reason,
+                                )
+                                continue
+                            if validation.clip_similarity:
+                                logger.debug(
+                                    "Image %s CLIP score: %.2f",
+                                    candidate.url,
+                                    validation.clip_similarity,
+                                )
+
                         public_url = candidate.url
                         record: Optional[Dict[str, Any]] = None
                         if self.supabase is not None:
-                            image_bytes = await self._download_image(
-                                session, candidate.url
-                            )
                             public_url = await self._upload_image(
                                 image_bytes, candidate
                             )
@@ -249,6 +389,65 @@ class ImageSelectionService:
             return " ".join(entities[:8])
 
         return " ".join(words[:8])
+
+    def _resolve_required_terms(self) -> List[str]:
+        if self.request.required_terms:
+            return [term.lower() for term in self.request.required_terms if term]
+
+        if not self.request.article_text:
+            return []
+
+        cleaned = re.sub(r"<[^>]+>", "", self.request.article_text).strip()
+        words = cleaned.split()
+        entities = self._extract_entities(words)
+        if not entities:
+            return []
+        return [entity.lower() for entity in entities[:8]]
+
+    def _filter_by_required_terms(
+        self, candidates: List[ImageCandidate], terms: List[str]
+    ) -> List[ImageCandidate]:
+        if not candidates or not terms:
+            return candidates
+
+        def _matches(candidate: ImageCandidate) -> bool:
+            haystack = " ".join(
+                [
+                    candidate.title or "",
+                    candidate.url or "",
+                    candidate.context_url or "",
+                ]
+            ).lower()
+            return any(term in haystack for term in terms)
+
+        filtered = [candidate for candidate in candidates if _matches(candidate)]
+        logger.info(
+            "Applied required terms filter (%d terms): %d -> %d candidates",
+            len(terms),
+            len(candidates),
+            len(filtered),
+        )
+        return filtered
+
+    def _filter_by_source_score(
+        self, candidates: List[ImageCandidate]
+    ) -> List[ImageCandidate]:
+        threshold = self.request.min_source_score
+        if threshold <= 0:
+            return candidates
+
+        def _score(candidate: ImageCandidate) -> float:
+            url = candidate.context_url or candidate.url
+            return get_source_score_from_url(url)
+
+        filtered = [candidate for candidate in candidates if _score(candidate) >= threshold]
+        logger.info(
+            "Applied source score threshold %.2f: %d -> %d candidates",
+            threshold,
+            len(candidates),
+            len(filtered),
+        )
+        return filtered
 
     @staticmethod
     def _extract_entities(words: List[str]) -> List[str]:
@@ -416,6 +615,13 @@ class ImageSelectionService:
             logger.info("Skipping %s due to irrelevance term in title", candidate.url)
             return False
 
+        # Check URL against blocked patterns
+        url_lower = candidate.url.lower()
+        for pattern in BLOCKED_URL_PATTERNS:
+            if re.search(pattern, url_lower):
+                logger.info("Skipping %s due to blocked URL pattern: %s", candidate.url, pattern)
+                return False
+
         if candidate.width and candidate.height:
             if candidate.width < MIN_WIDTH or candidate.height < MIN_HEIGHT:
                 logger.info("Skipping %s due to low resolution", candidate.url)
@@ -466,7 +672,7 @@ class ImageSelectionService:
         }
         return any(term in license_text for term in allowed)
 
-    def _rank_candidates(self, candidates: List[ImageCandidate], query: str) -> List[ImageCandidate]:
+    def _score_candidates(self, candidates: List[ImageCandidate], query: str) -> List[tuple[ImageCandidate, float]]:
         if not candidates:
             return []
         content_words = set()
@@ -495,13 +701,18 @@ class ImageSelectionService:
             if "news" in candidate.title.lower():
                 score += 0.5
 
+            # Boost trusted editorial sources
+            if candidate.url:
+                source_score = get_source_score_from_url(candidate.url)
+                score += source_score * 3.0  # Up to +3.0 for trusted sources
+
             if score <= 0:
                 score -= 5.0
 
             scored.append((candidate, score))
 
         scored.sort(key=lambda item: item[1], reverse=True)
-        return [candidate for candidate, _ in scored]
+        return scored
 
     async def _validate_candidate(
         self, session: aiohttp.ClientSession, candidate: ImageCandidate

@@ -7,8 +7,16 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Add project root to sys.path to allow imports from src
+# script is at src/functions/image_selection/scripts/select_images_cli.py
+# root is at ../../../../
+project_root = Path(__file__).resolve().parents[4]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
@@ -39,6 +47,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--supabase-bucket", default="images")
     parser.add_argument("--supabase-table", default="article_images")
     parser.add_argument("--supabase-schema", default="content")
+    parser.add_argument("--no-vision", action="store_true", help="Disable all vision validation.")
+    parser.add_argument("--no-clip", action="store_true", help="Disable CLIP semantic validation (faster, no model download).")
+    parser.add_argument("--no-ocr", action="store_true", help="Disable OCR text detection.")
     parser.add_argument("--output", type=Path, help="Optional path to write JSON response.")
     return parser.parse_args()
 
@@ -107,6 +118,16 @@ def load_payload(args: argparse.Namespace) -> Dict[str, Any]:
             "model": args.llm_model,
             "api_key": args.llm_api_key,
             "parameters": parse_parameters(args.llm_param),
+        }
+
+    # Vision validation options
+    if args.no_vision:
+        payload["vision"] = {"enabled": False}
+    else:
+        payload["vision"] = {
+            "enabled": True,
+            "enable_clip": not args.no_clip,
+            "enable_ocr": not args.no_ocr,
         }
 
     return payload

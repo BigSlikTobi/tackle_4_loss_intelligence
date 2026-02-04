@@ -34,7 +34,7 @@ class TTSService:
         }
         
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=60.0)
+            response = await client.post(url, json=payload, timeout=240.0)
             
             if response.status_code != 200:
                 error_msg = response.text

@@ -56,8 +56,12 @@ omitted from the payload.
 {
   "article_text": "Full article body…",          // optional when `query` provided
   "query": "fallback keywords",                 // optional when `article_text` provided
+  "required_terms": ["Chiefs", "Mahomes"],      // optional; must match title/url/context
   "num_images": 2,                                // required >= 1
   "enable_llm": true,                             // defaults to true
+  "strict_mode": true,                            // disables DuckDuckGo fallback (default true in Cloud Functions)
+  "min_relevance_score": 5.0,                     // optional relevance threshold; 0 disables
+  "min_source_score": 0.7,                        // optional source reputation threshold; 0 disables
   "llm": {
     "provider": "openai",                        // "gemini" | "openai" (recommended: openai)
     "model": "gpt-4.1",                          // recommended for precise queries
