@@ -138,6 +138,29 @@ For Cloud Functions deployment, use the standard module pattern described in
 configure Secret Manager entries; instead, each caller supplies their own credentials within the
 request payload.
 
+## Database Migration (Image Deduplication)
+
+Before deploying, run the migration in `schema.sql` to enable image deduplication by `original_url`.
+This migration:
+
+1. Removes any existing duplicate rows (keeps the earliest record for each `original_url`)
+2. Adds a unique partial index on `original_url` to prevent future duplicates
+3. Enables upsert operations for race-condition-safe concurrent uploads
+
+**Run the migration:**
+```bash
+# Using Supabase CLI
+supabase db push
+
+# Or manually via SQL editor
+cat src/functions/image_selection/schema.sql | psql $DATABASE_URL
+```
+
+**What this enables:**
+- Re-running image selection on the same `original_url` reuses the existing stored image
+- Storage paths are deterministic (MD5 hash of URL), so the same source always maps to the same path
+- Concurrent uploads of the same image are handled gracefully without duplicate storage objects or DB rows
+
 ## Testing
 - Provide valid Google Custom Search and Supabase credentials in the request payload.
 - The service enforces domain blacklists and Creative Commons licenses; expect some

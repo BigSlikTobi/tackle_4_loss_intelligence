@@ -7,7 +7,6 @@ import hashlib
 import logging
 import re
 import ssl
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
@@ -401,8 +400,18 @@ class ImageSelectionService:
                 public_url = candidate.url
                 record: Optional[Dict[str, Any]] = None
                 if self.supabase is not None:
-                    public_url = await self._upload_image(image_bytes, candidate)
-                    record = await self._record_image(public_url, candidate)
+                    # Check for existing image by original_url to avoid duplicates
+                    existing = await self._find_existing_image(candidate)
+                    if existing:
+                        public_url = existing.get("image_url") or candidate.url
+                        record = existing
+                        logger.info(
+                            "Reusing existing image for original_url %s",
+                            candidate.url,
+                        )
+                    else:
+                        public_url = await self._upload_image(image_bytes, candidate)
+                        record = await self._record_image(public_url, candidate)
                 results.append(
                     ProcessedImage(
                         public_url=public_url,
@@ -1078,15 +1087,31 @@ class ImageSelectionService:
             destination = f"{path}{extension}"
             content_type = self._content_type(extension)
             logger.info("Uploading image to Supabase path %s", destination)
-            response = self.supabase.storage.from_(self.supabase_bucket).upload(
-                path=destination,
-                file=image_bytes,
-                file_options={"contentType": content_type},
-            )
-            if isinstance(response, dict) and response.get("error"):
-                raise RuntimeError(str(response["error"]))
             supabase_url = self.supabase_url()
-            return f"{supabase_url}/storage/v1/object/public/{self.supabase_bucket}/{destination}"
+            public_url = f"{supabase_url}/storage/v1/object/public/{self.supabase_bucket}/{destination}"
+            
+            try:
+                response = self.supabase.storage.from_(self.supabase_bucket).upload(
+                    path=destination,
+                    file=image_bytes,
+                    file_options={"contentType": content_type},
+                )
+                if isinstance(response, dict) and response.get("error"):
+                    error_msg = str(response["error"]).lower()
+                    # Handle "object already exists" - reuse existing storage object
+                    if "duplicate" in error_msg or "exists" in error_msg or "already" in error_msg:
+                        logger.info("Storage object already exists, reusing: %s", destination)
+                        return public_url
+                    raise RuntimeError(str(response["error"]))
+            except Exception as exc:
+                error_msg = str(exc).lower()
+                # Handle "object already exists" exception
+                if "duplicate" in error_msg or "exists" in error_msg or "already" in error_msg:
+                    logger.info("Storage object already exists, reusing: %s", destination)
+                    return public_url
+                raise
+            
+            return public_url
 
         return await asyncio.to_thread(_upload)
 
@@ -1096,40 +1121,82 @@ class ImageSelectionService:
             raise RuntimeError("Supabase URL requested but Supabase is disabled")
         return config.url.rstrip("/")
 
+    async def _find_existing_image(
+        self, candidate: ImageCandidate
+    ) -> Optional[Dict[str, Any]]:
+        """Look up an existing image record by original_url to avoid duplicate uploads."""
+        if self.supabase is None or not self.supabase_table:
+            return None
+
+        def _lookup() -> Optional[Dict[str, Any]]:
+            table = self.supabase.table(self.supabase_table)
+            original_urls = [candidate.url]
+            if candidate.context_url and candidate.context_url != candidate.url:
+                original_urls.append(candidate.context_url)
+            for original_url in original_urls:
+                existing = (
+                    table.select("id,image_url,original_url")
+                    .eq("original_url", original_url)
+                    .limit(1)
+                    .execute()
+                )
+                existing_data = getattr(existing, "data", None) or []
+                if existing_data:
+                    return existing_data[0]
+            return None
+
+        return await asyncio.to_thread(_lookup)
+
     async def _record_image(self, public_url: str, candidate: ImageCandidate) -> Optional[Dict[str, Any]]:
         if self.supabase is None or not self.supabase_table:
             raise RuntimeError("Supabase persistence is not configured")
 
-        def _insert() -> Optional[Dict[str, Any]]:
+        def _upsert() -> Optional[Dict[str, Any]]:
             payload = {
                 "image_url": public_url,
-                "original_url": candidate.context_url or candidate.url,
+                "original_url": candidate.url,
                 "author": candidate.author or "",
                 "source": candidate.source or "",
             }
             table = self.supabase.table(self.supabase_table)
-            response = table.insert(payload).execute()
-            error = getattr(response, "error", None)
-            if error:
-                message = str(error).lower()
-                if "duplicate" in message or "unique" in message:
-                    existing = (
-                        table.select("id,image_url,original_url")
-                        .eq("image_url", payload["image_url"])
-                        .limit(1)
-                        .execute()
-                    )
-                    existing_data = getattr(existing, "data", None) or []
-                    if existing_data:
-                        logger.info("Reusing existing image record for %s", payload["image_url"])
-                        return existing_data[0]
-                raise RuntimeError(error)  # type: ignore[arg-type]
-            data = getattr(response, "data", None) or []
-            if data:
-                return data[0]
+            
+            # Use upsert to handle race conditions - requires unique constraint on original_url
+            try:
+                response = table.upsert(
+                    payload,
+                    on_conflict="original_url"
+                ).execute()
+                data = getattr(response, "data", None) or []
+                if data:
+                    return data[0]
+            except Exception as upsert_exc:
+                # Fallback to insert + duplicate handling if upsert fails
+                # (e.g., if unique constraint doesn't exist yet)
+                logger.debug("Upsert failed, falling back to insert: %s", upsert_exc)
+                response = table.insert(payload).execute()
+                error = getattr(response, "error", None)
+                if error:
+                    message = str(error).lower()
+                    if "duplicate" in message or "unique" in message:
+                        existing = (
+                            table.select("id,image_url,original_url")
+                            .eq("original_url", payload["original_url"])
+                            .limit(1)
+                            .execute()
+                        )
+                        existing_data = getattr(existing, "data", None) or []
+                        if existing_data:
+                            logger.info("Reusing existing image record for %s", payload["original_url"])
+                            return existing_data[0]
+                    raise RuntimeError(error)  # type: ignore[arg-type]
+                data = getattr(response, "data", None) or []
+                if data:
+                    return data[0]
+            
+            # Final fallback: try to fetch the record
             existing = (
                 table.select("id,image_url,original_url")
-                .eq("image_url", payload["image_url"])
+                .eq("original_url", payload["original_url"])
                 .limit(1)
                 .execute()
             )
@@ -1138,7 +1205,7 @@ class ImageSelectionService:
                 return existing_data[0]
             return payload
 
-        return await asyncio.to_thread(_insert)
+        return await asyncio.to_thread(_upsert)
 
     @staticmethod
     def _extract_record_id(record: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -1151,9 +1218,13 @@ class ImageSelectionService:
         return None
 
     def _build_destination_path(self, original_url: str) -> str:
+        """Build a deterministic storage path based on URL hash.
+        
+        Uses MD5 hash only (no timestamp) to ensure the same original URL
+        always maps to the same storage path, enabling deduplication.
+        """
         digest = hashlib.md5(original_url.encode("utf-8")).hexdigest()
-        timestamp = int(time.time())
-        path = PurePosixPath("public") / f"{digest}_{timestamp}"
+        path = PurePosixPath("public") / digest
         return str(path)
 
     @staticmethod

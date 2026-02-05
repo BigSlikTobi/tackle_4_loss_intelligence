@@ -42,13 +42,15 @@ def news_extractor(request: flask.Request) -> flask.Response:
         # extraction_request = NewsExtractionRequest.from_dict(payload)
         # results = extract_news_urls(extraction_request)
         
-        # Placeholder response
+        # Return 501 Not Implemented until pipeline is wired in
+        # See: https://github.com/BigSlikTobi/tackle_4_loss_intelligence/issues/87
         return _cors_response({
-            "status": "success",
-            "message": "News extraction not yet implemented",
-            "urls": [],
-            "count": 0
-        })
+            "error": "Not Implemented",
+            "message": "News extraction pipeline is not yet implemented. "
+                       "This endpoint will return extracted URLs once the "
+                       "core extraction logic is wired in.",
+            "status": 501
+        }, 501)
         
     except Exception as exc:
         logger.exception("News extraction failed")
