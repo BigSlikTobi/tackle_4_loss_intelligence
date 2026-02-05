@@ -7,8 +7,16 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Add project root to sys.path to allow imports from src
+# script is at src/functions/image_selection/scripts/select_images_cli.py
+# root is at ../../../../
+project_root = Path(__file__).resolve().parents[4]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
@@ -23,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--article-text", help="Raw article text input.")
     parser.add_argument("--article-file", type=Path, help="File containing article text.")
     parser.add_argument("--query", help="Override search query and skip LLM.")
+    parser.add_argument("--source-url", help="Source article URL for CC-licensed fallback.")
     parser.add_argument("--num-images", type=int, default=1, help="Number of images to produce.")
     parser.add_argument("--no-llm", action="store_true", help="Disable LLM optimization.")
     parser.add_argument("--llm-provider", default="gemini", help="LLM provider (gemini|openai).")
@@ -39,6 +48,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--supabase-bucket", default="images")
     parser.add_argument("--supabase-table", default="article_images")
     parser.add_argument("--supabase-schema", default="content")
+    parser.add_argument("--no-vision", action="store_true", help="Disable all vision validation.")
+    parser.add_argument("--no-clip", action="store_true", help="Disable CLIP semantic validation (faster, no model download).")
+    parser.add_argument("--no-ocr", action="store_true", help="Disable OCR text detection.")
     parser.add_argument("--output", type=Path, help="Optional path to write JSON response.")
     return parser.parse_args()
 
@@ -51,6 +63,8 @@ def load_payload(args: argparse.Namespace) -> Dict[str, Any]:
             payload["article_text"] = args.article_file.read_text(encoding="utf-8")
         if args.article_text:
             payload.setdefault("article_text", args.article_text)
+        if args.source_url:
+            payload.setdefault("source_url", args.source_url)
         return payload
 
     article_text = collect_article_text(args)
@@ -64,6 +78,7 @@ def load_payload(args: argparse.Namespace) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "article_text": article_text,
         "query": args.query,
+        "source_url": args.source_url,
         "num_images": args.num_images,
         "enable_llm": not args.no_llm,
     }
@@ -107,6 +122,16 @@ def load_payload(args: argparse.Namespace) -> Dict[str, Any]:
             "model": args.llm_model,
             "api_key": args.llm_api_key,
             "parameters": parse_parameters(args.llm_param),
+        }
+
+    # Vision validation options
+    if args.no_vision:
+        payload["vision"] = {"enabled": False}
+    else:
+        payload["vision"] = {
+            "enabled": True,
+            "enable_clip": not args.no_clip,
+            "enable_ocr": not args.no_ocr,
         }
 
     return payload

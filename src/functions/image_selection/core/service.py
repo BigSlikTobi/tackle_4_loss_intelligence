@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import aiohttp
 import certifi
@@ -27,10 +27,14 @@ from src.shared.db.connection import get_supabase_client
 
 from .config import ImageSelectionRequest
 from .llm import LLMClient, create_llm_client
+from .prompts import build_image_query
+from .vision_validator import VisionValidator
+from .source_reputation import get_source_score_from_url
 
 logger = logging.getLogger(__name__)
 
 BLACKLISTED_DOMAINS = {
+    # Stock photo sites
     "lookaside.instagram.com",
     "gettyimages.com",
     "shutterstock.com",
@@ -60,9 +64,58 @@ BLACKLISTED_DOMAINS = {
     "reddit.com",
     "i.redd.it",
     "youtube.com",
+    # Generic lookaside crawlers
+    "lookaside",
+    # Trading cards & collectibles
+    "panini.com",
+    "paniniamerica.net",
+    "topps.com",
+    "tradingcarddb.com",
+    "beckett.com",
+    "comc.com",
+    "sportscardspro.com",
+    "psacard.com",
+    # Fantasy sports
+    "espn.com/fantasy",
+    "yahoo.com/fantasy",
+    "draftkings.com",
+    "fanduel.com",
+    "fantasypros.com",
+    "rotowire.com",
+    # Video platforms (thumbnails)
+    "i.ytimg.com",
+    "vimeo.com",
+    # Social/aggregator sites
+    "pinterest.com",
+    "tumblr.com",
+    "blogspot.com",
+    "wordpress.com",
+    "medium.com",
+    "watson.ch",
+    "lookaside.fbsbx.com",
 }
 
+TRUSTED_SITE_SEARCH_DOMAINS = [
+    "nfl.com",
+    "nflcdn.com",
+    "espn.com",
+    "cbssports.com",
+    "nbcsports.com",
+    "foxsports.com",
+    "theathletic.com",
+    "usatoday.com",
+    "apnews.com",
+    "reuters.com",
+    "si.com",
+    "bleacherreport.com",
+    "profootballtalk.com",
+    "yahoo.com",
+    "sports.yahoo.com",
+]
+
+
 IRRELEVANCE_TERMS = {
+    # Graphics/overlays
     "logo",
     "icon",
     "banner",
@@ -73,11 +126,63 @@ IRRELEVANCE_TERMS = {
     "graphic",
     "chart",
     "screenshot",
+    "overlay",
+    "template",
+    "mockup",
+    # Trading cards
+    "card",
+    "trading",
+    "rookie",
+    "autograph",
+    "panini",
+    "topps",
+    "prizm",
+    "optic",
+    # Fantasy/stats
+    "fantasy",
+    "stat",
+    "stats",
+    "score",
+    "lineup",
+    "projection",
+    "ranking",
+    "dfs",
+    # Video content
+    "highlight",
+    "highlights",
+    "replay",
+    "clip",
+    "video",
+    "watch",
+    # Merchandise
+    "jersey",
+    "merchandise",
+    "shop",
+    "buy",
+    "sale",
+    "store",
 }
 
-MIN_WIDTH = 640
-MIN_HEIGHT = 360
-MIN_BYTES = 50_000
+# URL patterns to block (regex)
+BLOCKED_URL_PATTERNS = [
+    r"\?text=",
+    r"overlay",
+    r"composite",
+    r"/thumb/",
+    r"/small/",
+    r"_thumb\.",
+    r"-card-",
+    r"trading.card",
+    r"_thumbnail",
+    r"/preview/",
+    r"watermark",
+    r"/draft/",
+    r"fantasy",
+]
+
+DEFAULT_MIN_WIDTH = 1024
+DEFAULT_MIN_HEIGHT = 576
+DEFAULT_MIN_BYTES = 50_000
 
 GOOGLE_SEARCH_ENDPOINT = "https://www.googleapis.com/customsearch/v1"
 
@@ -145,12 +250,18 @@ class ImageSelectionService:
         self._http_timeout = aiohttp.ClientTimeout(total=12)
         self._ssl_context = ssl.create_default_context(cafile=certifi.where())
 
+        # Vision-based validation (OCR + CLIP)
+        self.vision_validator: Optional[VisionValidator] = None
+        if request.vision_config and request.vision_config.enabled:
+            self.vision_validator = VisionValidator(request.vision_config)
+            logger.info("Vision validation enabled (OCR: %s, CLIP: %s)",
+                       request.vision_config.enable_ocr,
+                       request.vision_config.enable_clip)
+        else:
+            logger.info("Vision validation disabled")
+
     async def process(self) -> List[ProcessedImage]:
         """Main entry point returning processed image metadata."""
-
-        query = await self._build_query()
-        self.resolved_query = query
-        logger.info("Searching images using query: %s", query)
 
         connector = aiohttp.TCPConnector(ssl=self._ssl_context)
         try:
@@ -159,70 +270,259 @@ class ImageSelectionService:
                 connector=connector,
                 connector_owner=False,
             ) as session:
-                candidates: List[ImageCandidate] = []
-                if self.request.search_config:
-                    candidates.extend(await self._search_google(session, query))
-                else:
-                    logger.info(
-                        "Google Custom Search configuration missing; skipping primary provider"
-                    )
+                if self.request.source_url:
+                    logger.info("Checking source URL for Creative Commons image before search")
+                    source_results = await self._source_url_fallback(session)
+                    if source_results:
+                        return source_results
 
-                if not candidates:
+                raw_query = await self._build_query()
+                primary_query = build_image_query(raw_query)
+                required_terms = self._resolve_required_terms(primary_query)
+                if required_terms:
+                    logger.info("Derived required terms: %s", ", ".join(required_terms))
+                fallback_terms_query = None
+                if required_terms:
+                    fallback_terms_query = build_image_query(" ".join(required_terms[:6]))
+
+                ranked: List[ImageCandidate] = []
+                for attempt, query in enumerate(
+                    [primary_query, fallback_terms_query]
+                ):
+                    if not query:
+                        continue
+                    self.resolved_query = query
+                    logger.info("Searching images using query: %s", query)
+
+                    candidates: List[ImageCandidate] = []
                     if self.request.search_config:
-                        logger.warning(
-                            "Primary search returned no candidates, using fallback"
-                        )
+                        candidates.extend(await self._search_google(session, query))
                     else:
-                        logger.info("Using DuckDuckGo fallback for image discovery")
-                    candidates = await self._search_duckduckgo(query)
+                        logger.info(
+                            "Google Custom Search configuration missing; skipping primary provider"
+                        )
 
-                ranked = self._rank_candidates(candidates, query)
-                
+                    if not candidates:
+                        if self.request.search_config:
+                            trusted_query = self._build_trusted_query(query)
+                            if trusted_query:
+                                logger.info(
+                                    "No candidates; retrying Google search restricted to trusted sources"
+                                )
+                                candidates = await self._search_google(session, trusted_query)
+
+                    if not candidates:
+                        if self.request.strict_mode:
+                            logger.warning(
+                                "Strict mode enabled; skipping DuckDuckGo fallback"
+                            )
+                            candidates = []
+                        elif self.request.search_config:
+                            logger.warning(
+                                "Primary search returned no candidates, using fallback"
+                            )
+                            candidates = await self._search_duckduckgo(query)
+                        else:
+                            logger.info("Using DuckDuckGo fallback for image discovery")
+                            candidates = await self._search_duckduckgo(query)
+
+                    candidates = self._filter_by_source_score(candidates)
+                    apply_terms_filter = attempt == 0 or self.request.strict_mode
+                    if apply_terms_filter:
+                        candidates = self._filter_by_required_terms(candidates, required_terms)
+
+                    scored = self._score_candidates(candidates, query)
+                    ranked = [candidate for candidate, _ in scored]
+
+                    if self.request.min_relevance_score > 0:
+                        filtered = [
+                            candidate
+                            for candidate, score in scored
+                            if score >= self.request.min_relevance_score
+                        ]
+                        logger.info(
+                            "Applied min relevance score %.2f: %d -> %d candidates",
+                            self.request.min_relevance_score,
+                            len(ranked),
+                            len(filtered),
+                        )
+                        ranked = filtered
+
+                    if ranked:
+                        break
+
+                    if attempt == 0 and fallback_terms_query:
+                        logger.info(
+                            "No candidates after required-term filtering; retrying with terms-only query."
+                        )
+
                 # Pre-filter candidates in parallel using HEAD requests
                 # This prevents rejected images from counting toward the tries
                 logger.info("Pre-filtering %d candidates with HEAD requests...", len(ranked))
                 prefiltered = await self._prefilter_candidates(session, ranked)
                 logger.info("After pre-filtering: %d candidates remain", len(prefiltered))
                 
-                results: List[ProcessedImage] = []
-
-                for candidate in prefiltered:
-                    if len(results) >= self.request.num_images:
-                        break
-                    try:
-                        if not await self._validate_candidate(session, candidate):
-                            continue
-                        public_url = candidate.url
-                        record: Optional[Dict[str, Any]] = None
-                        if self.supabase is not None:
-                            image_bytes = await self._download_image(
-                                session, candidate.url
-                            )
-                            public_url = await self._upload_image(
-                                image_bytes, candidate
-                            )
-                            record = await self._record_image(public_url, candidate)
-                        results.append(
-                            ProcessedImage(
-                                public_url=public_url,
-                                original_url=candidate.url,
-                                author=candidate.author,
-                                source=candidate.source,
-                                width=candidate.width,
-                                height=candidate.height,
-                                title=candidate.title,
-                                record_id=self._extract_record_id(record),
-                            )
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "Failed to process candidate %s: %s", candidate.url, exc
-                        )
-                        continue
-
+                results = await self._process_candidates(session, prefiltered)
                 return results
         finally:
             await connector.close()
+
+    async def _process_candidates(
+        self, session: aiohttp.ClientSession, candidates: List[ImageCandidate]
+    ) -> List[ProcessedImage]:
+        results: List[ProcessedImage] = []
+        for candidate in candidates:
+            if len(results) >= self.request.num_images:
+                break
+            try:
+                if not await self._validate_candidate(session, candidate):
+                    continue
+
+                image_bytes = await self._download_image(session, candidate.url)
+
+                if self.vision_validator:
+                    validation = await self.vision_validator.validate_image(
+                        image_bytes, self.resolved_query or ""
+                    )
+                    if not validation.passed:
+                        logger.info(
+                            "Rejecting %s via vision validation: %s",
+                            candidate.url,
+                            validation.reason,
+                        )
+                        continue
+                    if validation.clip_similarity:
+                        logger.debug(
+                            "Image %s CLIP score: %.2f",
+                            candidate.url,
+                            validation.clip_similarity,
+                        )
+
+                public_url = candidate.url
+                record: Optional[Dict[str, Any]] = None
+                if self.supabase is not None:
+                    public_url = await self._upload_image(image_bytes, candidate)
+                    record = await self._record_image(public_url, candidate)
+                results.append(
+                    ProcessedImage(
+                        public_url=public_url,
+                        original_url=candidate.url,
+                        author=candidate.author,
+                        source=candidate.source,
+                        width=candidate.width,
+                        height=candidate.height,
+                        title=candidate.title,
+                        record_id=self._extract_record_id(record),
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to process candidate %s: %s", candidate.url, exc
+                )
+                continue
+
+        return results
+
+    async def _source_url_fallback(
+        self, session: aiohttp.ClientSession
+    ) -> List[ProcessedImage]:
+        source_url = self.request.source_url
+        if not source_url:
+            return []
+
+        source_domain = self._extract_domain(source_url)
+        if not source_domain:
+            return []
+
+        html = await self._fetch_source_html(session, source_url)
+        if not html:
+            return []
+
+        image_url = self._extract_og_image(html, source_url)
+        if not image_url:
+            logger.info("Source URL missing og:image: %s", source_url)
+            return []
+
+        image_domain = self._extract_domain(image_url)
+        if not image_domain:
+            return []
+
+        candidate = ImageCandidate(
+            url=image_url,
+            title="",
+            context_url=source_url,
+            source=source_domain,
+            author=None,
+            width=None,
+            height=None,
+            byte_size=None,
+            mime_type=None,
+            license=None,
+            original_data={"source_url": source_url},
+        )
+
+        if not self._passes_basic_filters(candidate):
+            return []
+
+        prefiltered = await self._prefilter_candidates(session, [candidate])
+        if not prefiltered:
+            return []
+
+        logger.info("Using source URL fallback image from %s", source_url)
+        return await self._process_candidates(session, prefiltered)
+
+    @staticmethod
+    def _extract_domain(url: str) -> Optional[str]:
+        domain = urlparse(url).netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain or None
+
+    async def _fetch_source_html(
+        self, session: aiohttp.ClientSession, source_url: str
+    ) -> Optional[str]:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        }
+        try:
+            async with session.get(source_url, headers=headers) as response:
+                if response.status != 200:
+                    logger.info(
+                        "Source URL request failed (%s): %s",
+                        response.status,
+                        source_url,
+                    )
+                    return None
+                return await response.text(errors="ignore")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Source URL request error for %s: %s", source_url, exc)
+            return None
+
+    @staticmethod
+    def _has_creative_commons_license(html: str) -> bool:
+        lowered = html.lower()
+        if "creativecommons.org/licenses" in lowered:
+            return True
+        if "creative commons" in lowered:
+            return True
+        return False
+
+    @staticmethod
+    def _extract_og_image(html: str, source_url: str) -> Optional[str]:
+        patterns = [
+            r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+property=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                url = match.group(1).strip()
+                if url:
+                    return urljoin(source_url, url)
+        return None
 
     async def _build_query(self) -> str:
         if self.request.explicit_query:
@@ -250,6 +550,99 @@ class ImageSelectionService:
 
         return " ".join(words[:8])
 
+    def _resolve_required_terms(self, query: Optional[str] = None) -> List[str]:
+        if self.request.required_terms:
+            return [term.lower() for term in self.request.required_terms if term]
+
+        if query:
+            extracted = self._extract_terms_from_query(query)
+            if extracted:
+                return extracted
+
+        if not self.request.article_text:
+            return []
+
+        cleaned = re.sub(r"<[^>]+>", "", self.request.article_text).strip()
+        words = cleaned.split()
+        entities = self._extract_entities(words)
+        if not entities:
+            return []
+        return [entity.lower() for entity in entities[:8]]
+
+    @staticmethod
+    def _extract_terms_from_query(query: str) -> List[str]:
+        stopwords = {
+            "the", "and", "for", "with", "from", "that", "this", "into",
+            "der", "die", "das", "und", "mit", "für", "vom", "von", "dass",
+            "nfl", "american", "football", "headshot", "photo", "image",
+        }
+        terms: List[str] = []
+        for token in query.split():
+            if token.startswith("-") or "site:" in token:
+                continue
+            cleaned = re.sub(r"[^a-zA-Z0-9]", "", token).lower()
+            if len(cleaned) < 3:
+                continue
+            if cleaned in stopwords:
+                continue
+            terms.append(cleaned)
+        return list(dict.fromkeys(terms))[:8]
+
+    @staticmethod
+    def _build_trusted_query(base_query: str, limit: int = 8) -> Optional[str]:
+        if not base_query:
+            return None
+        domains = TRUSTED_SITE_SEARCH_DOMAINS[:limit]
+        if not domains:
+            return None
+        site_filters = " OR ".join(f"site:{domain}" for domain in domains)
+        return f"{base_query} ({site_filters})"
+
+    def _filter_by_required_terms(
+        self, candidates: List[ImageCandidate], terms: List[str]
+    ) -> List[ImageCandidate]:
+        if not candidates or not terms:
+            return candidates
+
+        def _matches(candidate: ImageCandidate) -> bool:
+            haystack = " ".join(
+                [
+                    candidate.title or "",
+                    candidate.url or "",
+                    candidate.context_url or "",
+                ]
+            ).lower()
+            return any(term in haystack for term in terms)
+
+        filtered = [candidate for candidate in candidates if _matches(candidate)]
+        logger.info(
+            "Applied required terms filter (%d terms): %d -> %d candidates",
+            len(terms),
+            len(candidates),
+            len(filtered),
+        )
+        return filtered
+
+    def _filter_by_source_score(
+        self, candidates: List[ImageCandidate]
+    ) -> List[ImageCandidate]:
+        threshold = self.request.min_source_score
+        if threshold <= 0:
+            return candidates
+
+        def _score(candidate: ImageCandidate) -> float:
+            url = candidate.context_url or candidate.url
+            return get_source_score_from_url(url)
+
+        filtered = [candidate for candidate in candidates if _score(candidate) >= threshold]
+        logger.info(
+            "Applied source score threshold %.2f: %d -> %d candidates",
+            threshold,
+            len(candidates),
+            len(filtered),
+        )
+        return filtered
+
     @staticmethod
     def _extract_entities(words: List[str]) -> List[str]:
         entities: List[str] = []
@@ -270,35 +663,49 @@ class ImageSelectionService:
         search_cfg = self.request.search_config
         if search_cfg is None:
             return []
-        params = {
-            "key": search_cfg.api_key,
-            "cx": search_cfg.engine_id,
-            "q": query,
-            "searchType": "image",
-            "rights": search_cfg.rights_filter,
-            "safe": search_cfg.safe_search,
-            "imgType": search_cfg.image_type,
-            "imgSize": search_cfg.image_size,
-            "num": min(search_cfg.max_candidates, 10),
-        }
-
-        async with session.get(GOOGLE_SEARCH_ENDPOINT, params=params) as response:
-            if response.status != 200:
-                text = await response.text()
-                logger.warning("Google search failed (%s): %s", response.status, text)
-                return []
-            payload = await response.json()
-
-        items = payload.get("items", [])
+        target = max(search_cfg.max_candidates, self.request.num_images * 5)
+        per_page = min(10, target)
+        start = 1
         candidates: List[ImageCandidate] = []
-        for item in items:
-            image = item.get("image", {})
-            url = item.get("link")
-            if not url:
-                continue
-            candidate = self._build_candidate_from_google(item, image)
-            if candidate:
-                candidates.append(candidate)
+
+        while start <= 100 and len(candidates) < target:
+            params = {
+                "key": search_cfg.api_key,
+                "cx": search_cfg.engine_id,
+                "q": query,
+                "searchType": "image",
+                "rights": search_cfg.rights_filter,
+                "safe": search_cfg.safe_search,
+                "imgType": search_cfg.image_type,
+                "imgSize": search_cfg.image_size,
+                "num": per_page,
+                "start": start,
+            }
+
+            async with session.get(GOOGLE_SEARCH_ENDPOINT, params=params) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logger.warning("Google search failed (%s): %s", response.status, text)
+                    break
+                payload = await response.json()
+
+            items = payload.get("items", [])
+            if not items:
+                break
+
+            for item in items:
+                image = item.get("image", {})
+                url = item.get("link")
+                if not url:
+                    continue
+                candidate = self._build_candidate_from_google(item, image)
+                if candidate:
+                    candidates.append(candidate)
+                if len(candidates) >= target:
+                    break
+
+            start += per_page
+
         return candidates
 
     async def _search_duckduckgo(self, query: str) -> List[ImageCandidate]:
@@ -416,12 +823,23 @@ class ImageSelectionService:
             logger.info("Skipping %s due to irrelevance term in title", candidate.url)
             return False
 
+        # Check URL against blocked patterns
+        url_lower = candidate.url.lower()
+        for pattern in BLOCKED_URL_PATTERNS:
+            if re.search(pattern, url_lower):
+                logger.info("Skipping %s due to blocked URL pattern: %s", candidate.url, pattern)
+                return False
+
+        min_width = self.request.min_width if self.request.min_width > 0 else DEFAULT_MIN_WIDTH
+        min_height = self.request.min_height if self.request.min_height > 0 else DEFAULT_MIN_HEIGHT
+        min_bytes = self.request.min_bytes if self.request.min_bytes > 0 else DEFAULT_MIN_BYTES
+
         if candidate.width and candidate.height:
-            if candidate.width < MIN_WIDTH or candidate.height < MIN_HEIGHT:
+            if candidate.width < min_width or candidate.height < min_height:
                 logger.info("Skipping %s due to low resolution", candidate.url)
                 return False
 
-        if candidate.byte_size and candidate.byte_size < MIN_BYTES:
+        if candidate.byte_size and candidate.byte_size < min_bytes:
             logger.info("Skipping %s due to small byte size", candidate.url)
             return False
 
@@ -466,7 +884,7 @@ class ImageSelectionService:
         }
         return any(term in license_text for term in allowed)
 
-    def _rank_candidates(self, candidates: List[ImageCandidate], query: str) -> List[ImageCandidate]:
+    def _score_candidates(self, candidates: List[ImageCandidate], query: str) -> List[tuple[ImageCandidate, float]]:
         if not candidates:
             return []
         content_words = set()
@@ -485,9 +903,11 @@ class ImageSelectionService:
                 if term in candidate.title.lower():
                     score += 3.0
 
-            if candidate.width and candidate.height:
-                if candidate.width >= MIN_WIDTH and candidate.height >= MIN_HEIGHT:
-                    score += 2.0
+        min_width = self.request.min_width if self.request.min_width > 0 else DEFAULT_MIN_WIDTH
+        min_height = self.request.min_height if self.request.min_height > 0 else DEFAULT_MIN_HEIGHT
+        if candidate.width and candidate.height:
+            if candidate.width >= min_width and candidate.height >= min_height:
+                score += 2.0
                 aspect_ratio = candidate.width / max(candidate.height, 1)
                 if 1.3 <= aspect_ratio <= 2.5:
                     score += 0.5
@@ -495,13 +915,18 @@ class ImageSelectionService:
             if "news" in candidate.title.lower():
                 score += 0.5
 
+            # Boost trusted editorial sources
+            if candidate.url:
+                source_score = get_source_score_from_url(candidate.url)
+                score += source_score * 3.0  # Up to +3.0 for trusted sources
+
             if score <= 0:
                 score -= 5.0
 
             scored.append((candidate, score))
 
         scored.sort(key=lambda item: item[1], reverse=True)
-        return [candidate for candidate, _ in scored]
+        return scored
 
     async def _validate_candidate(
         self, session: aiohttp.ClientSession, candidate: ImageCandidate
@@ -541,12 +966,15 @@ class ImageSelectionService:
         async def check_candidate(candidate: ImageCandidate) -> Optional[ImageCandidate]:
             """Check a single candidate via HEAD request and return it if valid."""
             # Skip if already filtered by basic filters with known metadata
+            min_width = self.request.min_width if self.request.min_width > 0 else DEFAULT_MIN_WIDTH
+            min_height = self.request.min_height if self.request.min_height > 0 else DEFAULT_MIN_HEIGHT
+            min_bytes = self.request.min_bytes if self.request.min_bytes > 0 else DEFAULT_MIN_BYTES
             if candidate.width and candidate.height:
-                if candidate.width < MIN_WIDTH or candidate.height < MIN_HEIGHT:
+                if candidate.width < min_width or candidate.height < min_height:
                     logger.info("Pre-filter: Skipping %s due to low resolution (%dx%d)", 
                                candidate.url, candidate.width, candidate.height)
                     return None
-            if candidate.byte_size and candidate.byte_size < MIN_BYTES:
+            if candidate.byte_size and candidate.byte_size < min_bytes:
                 logger.info("Pre-filter: Skipping %s due to small byte size (%d bytes)", 
                            candidate.url, candidate.byte_size)
                 return None
@@ -582,7 +1010,7 @@ class ImageSelectionService:
                     if content_length:
                         try:
                             byte_size = int(content_length)
-                            if byte_size < MIN_BYTES:
+                            if byte_size < min_bytes:
                                 logger.info("Pre-filter: Skipping %s due to small byte size (%d bytes)", 
                                            candidate.url, byte_size)
                                 return None

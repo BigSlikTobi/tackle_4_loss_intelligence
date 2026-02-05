@@ -61,7 +61,24 @@ class FakeWriter:
         return {"success": True}
 
 
-def test_extract_returns_zero_when_no_sources():
+
+class FakeWatermarkStore:
+    def __init__(self):
+        self.watermarks = {}
+
+    def fetch_watermarks(self):
+        return self.watermarks
+
+    def update_watermarks(self, updates):
+        self.watermarks.update(updates)
+
+
+def test_extract_returns_zero_when_no_sources(monkeypatch):
+    monkeypatch.setattr(
+        "src.functions.news_extraction.core.pipelines.news_pipeline.NewsSourceWatermarkStore",
+        FakeWatermarkStore,
+    )
+
     config = FakeFeedConfig(sources=[])
     pipeline = NewsExtractionPipeline(config=config, writer=FakeWriter())
 
@@ -74,6 +91,11 @@ def test_extract_returns_zero_when_no_sources():
 
 
 def test_extract_runs_and_writes_unique_records(monkeypatch):
+    monkeypatch.setattr(
+        "src.functions.news_extraction.core.pipelines.news_pipeline.NewsSourceWatermarkStore",
+        FakeWatermarkStore,
+    )
+    
     sources = [FakeSource(name="Source A"), FakeSource(name="Source B")]
     config = FakeFeedConfig(sources=sources)
     writer = FakeWriter()

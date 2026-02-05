@@ -6,3 +6,9 @@ supabase>=2.0.0
 google-generativeai>=0.8.0
 openai>=1.12.0
 flask>=3.0.0
+
+# Vision AI (OCR + CLIP) - Optional but recommended for SOTA quality
+google-cloud-vision>=3.0.0
+transformers>=4.35.0
+torch>=2.0.0
+Pillow>=10.0.0
