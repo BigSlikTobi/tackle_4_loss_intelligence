@@ -56,12 +56,16 @@ omitted from the payload.
 {
   "article_text": "Full article body…",          // optional when `query` provided
   "query": "fallback keywords",                 // optional when `article_text` provided
+  "source_url": "https://example.com/article",  // optional: CC-licensed fallback when no image found
   "required_terms": ["Chiefs", "Mahomes"],      // optional; must match title/url/context
   "num_images": 2,                                // required >= 1
   "enable_llm": true,                             // defaults to true
   "strict_mode": true,                            // disables DuckDuckGo fallback (default true in Cloud Functions)
-  "min_relevance_score": 5.0,                     // optional relevance threshold; 0 disables
-  "min_source_score": 0.7,                        // optional source reputation threshold; 0 disables
+  "min_relevance_score": 7.0,                     // optional relevance threshold; 0 disables
+  "min_source_score": 0.5,                        // optional source reputation threshold; 0 disables
+  "min_width": 1024,                              // optional minimum width filter
+  "min_height": 576,                              // optional minimum height filter
+  "min_bytes": 50000,                             // optional minimum file size filter
   "llm": {
     "provider": "openai",                        // "gemini" | "openai" (recommended: openai)
     "model": "gpt-4.1",                          // recommended for precise queries
@@ -75,7 +79,7 @@ omitted from the payload.
     "engine_id": "...",                          // Programmable Search Engine ID
     "rights": "cc_publicdomain,cc_attribute,cc_sharealike", // optional overrides
     "image_type": "photo",                       // optional
-    "image_size": "large"                        // optional
+    "image_size": "large"                        // optional (try xlarge/huge to reduce low-res)
   },                                               // omit entire block to skip Google search
   // omit or set {"enabled": false} when you do not want to upload images
   "supabase": {
@@ -87,6 +91,10 @@ omitted from the payload.
   }
 }
 ```
+
+If `source_url` is provided, the service will first attempt to use the article's `og:image`.
+If an image is found, it will be used immediately. If no image is found, the service falls back
+to the normal image search flow (which still enforces allowlist + CC rules).
 
 ### Successful Response
 ```json

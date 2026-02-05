@@ -13,6 +13,7 @@ def request_from_payload(payload: Dict[str, Any]) -> ImageSelectionRequest:
 
     article_text = payload.get("article_text")
     explicit_query = payload.get("query")
+    source_url = payload.get("source_url")
     required_terms = payload.get("required_terms")
     num_images = int(payload.get("num_images", 1))
 
@@ -96,8 +97,8 @@ def request_from_payload(payload: Dict[str, Any]) -> ImageSelectionRequest:
     )
     default_enable_clip = not is_cloud_function  # Disable CLIP in cloud, enable locally
     default_strict_mode = is_cloud_function
-    default_min_relevance = 5.0 if default_strict_mode else 0.0
-    default_min_source_score = 0.7 if default_strict_mode else 0.0
+    default_min_relevance = 7.0 if default_strict_mode else 0.0
+    default_min_source_score = 0.5 if default_strict_mode else 0.0
     
     if vision_payload is None:
         # Default: vision validation enabled, CLIP based on environment
@@ -125,12 +126,16 @@ def request_from_payload(payload: Dict[str, Any]) -> ImageSelectionRequest:
     request_model = ImageSelectionRequest(
         article_text=article_text,
         explicit_query=explicit_query,
+        source_url=source_url,
         required_terms=_normalize_terms(required_terms),
         num_images=num_images,
         enable_llm=enable_llm,
         strict_mode=bool(payload.get("strict_mode", default_strict_mode)),
         min_relevance_score=float(payload.get("min_relevance_score", default_min_relevance)),
         min_source_score=float(payload.get("min_source_score", default_min_source_score)),
+        min_width=int(payload.get("min_width", 1024)),
+        min_height=int(payload.get("min_height", 576)),
+        min_bytes=int(payload.get("min_bytes", 50_000)),
         llm_config=llm_config,
         search_config=search_config,
         supabase_config=supabase_config,
