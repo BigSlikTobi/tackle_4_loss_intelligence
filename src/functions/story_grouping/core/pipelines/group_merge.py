@@ -139,14 +139,8 @@ class GroupMergeService:
         if not pairs:
             return []
 
+        # Sort by similarity descending (heap returns unsorted)
         pairs.sort(reverse=True, key=lambda x: x[0])
-        if self.max_pairs and len(pairs) > self.max_pairs:
-            pairs = pairs[: self.max_pairs]
-            logger.warning(
-                "Limiting merge pairs to top %s by similarity (threshold %.3f)",
-                self.max_pairs,
-                self.similarity_threshold,
-            )
 
         dsu = _DisjointSet(n)
         for _, i, j in pairs:
