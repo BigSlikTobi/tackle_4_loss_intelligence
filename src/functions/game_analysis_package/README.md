@@ -69,6 +69,31 @@ SUPABASE_KEY=your_supabase_key
 LOG_LEVEL=INFO
 ```
 
+#### Player ID Standardization
+
+This module treats **GSIS IDs** (format `00-0031234`) as canonical for all `*_player_id` fields in normalized outputs.
+If upstream data contains other ID systems (e.g. PFR IDs like `MahoPa00`), the normalizer will map them to GSIS when possible and preserve originals in `player_ids`:
+
+```json
+{
+  "player_id": "00-0033873",
+  "player_ids": {
+    "gsis": "00-0033873",
+    "pfr": "MahoPa00"
+  }
+}
+```
+
+Optional `.env` flags:
+
+```env
+PLAYER_ID_STANDARDIZATION_ENABLED=true
+PLAYER_ID_PRIMARY_SYSTEM=gsis
+PLAYER_ID_MAPPING_CACHE_TTL=3600
+PLAYER_ID_ROSTER_FALLBACK_ENABLED=true
+PLAYER_ID_SUPABASE_IN_BATCH_SIZE=150
+```
+
 ## Usage
 
 ### CLI Usage

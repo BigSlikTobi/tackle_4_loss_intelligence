@@ -203,8 +203,52 @@ class TestDataNormalizer:
         result = normalizer.normalize(fetch_result)
 
         assert result.snap_counts[0]["player_id"] == "00-0033873"
+        assert result.snap_counts[0]["player_ids"]["gsis"] == "00-0033873"
         assert result.snap_counts[0]["player_ids"]["pfr"] == "MahoPa00"
         assert result.play_by_play[0]["receiver_player_id"] == "00-0033873"
+
+    def test_normalize_player_id_lists_with_mapping(self):
+        """List-valued player id fields are normalized element-wise."""
+        mapper = PlayerIdMapper(
+            config=PlayerIdMappingConfig(enabled=True),
+            pfr_to_gsis={
+                "MahoPa00": "00-0033873",
+            },
+        )
+        normalizer = DataNormalizer(player_id_mapper=mapper)
+
+        fetch_result = FetchResult(
+            play_by_play=[
+                {
+                    "play_id": "1",
+                    "tackler_player_ids": ["MahoPa00", "00-0039999"],
+                },
+            ],
+        )
+
+        result = normalizer.normalize(fetch_result)
+
+        assert result.play_by_play[0]["tackler_player_ids"][0] == "00-0033873"
+        assert result.play_by_play[0]["tackler_player_ids"][1] == "00-0039999"
+
+    def test_unknown_pfr_id_is_preserved(self):
+        """If no mapping exists, do not overwrite with an invalid GSIS id."""
+        mapper = PlayerIdMapper(
+            config=PlayerIdMappingConfig(enabled=True),
+            pfr_to_gsis={},
+        )
+        normalizer = DataNormalizer(player_id_mapper=mapper)
+
+        fetch_result = FetchResult(
+            snap_counts=[
+                {"player_id": "AbcDe00"},
+            ],
+        )
+
+        result = normalizer.normalize(fetch_result)
+
+        assert result.snap_counts[0]["player_id"] == "AbcDe00"
+        assert result.snap_counts[0]["player_ids"]["pfr"] == "AbcDe00"
 
 
 class TestDataMerger:

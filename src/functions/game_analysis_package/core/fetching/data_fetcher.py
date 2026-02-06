@@ -11,6 +11,7 @@ import logging
 import time
 
 from ..bundling.request_builder import CombinedDataRequest, NGSRequest
+from ..utils.player_id_mapper import PlayerIdMapper
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,11 @@ class DataFetcher:
     Handles errors gracefully and tracks provenance for all fetched data.
     """
     
-    def __init__(self, fail_fast: bool = False):
+    def __init__(
+        self,
+        fail_fast: bool = False,
+        player_id_mapper: Optional[PlayerIdMapper] = None,
+    ):
         """
         Initialize the data fetcher.
         
@@ -90,7 +95,7 @@ class DataFetcher:
         # Import providers lazily to avoid circular dependencies
         self._providers_module = None
         self._snap_counts_cache: Dict[int, List[Dict[str, Any]]] = {}
-        self._roster_map_cache: Dict[int, Dict[str, str]] = {}
+        self._player_id_mapper = player_id_mapper or PlayerIdMapper()
     
     def _get_provider(self, name: str, **options: Any) -> Any:
         """Lazy import and access to data_loading providers."""
@@ -448,7 +453,7 @@ class DataFetcher:
             value = record.get(field)
             if value:
                 text = str(value).strip()
-                normalized = self._normalize_player_id(text)
+                normalized = self._player_id_mapper.normalize_to_gsis(text, season=season)
                 if normalized:
                     return normalized
 
@@ -456,9 +461,9 @@ class DataFetcher:
         if pfr_candidate:
             pfr_id = self._clean_str(pfr_candidate)
             if pfr_id:
-                mapped = self._lookup_gsis_from_pfr(pfr_id, season)
+                mapped = self._player_id_mapper.resolve_gsis_from_pfr(pfr_id, season=season)
                 if mapped:
-                    return self._normalize_player_id(mapped) or mapped
+                    return mapped
         return None
 
     def _build_snap_payload(
@@ -520,27 +525,8 @@ class DataFetcher:
 
         return payload
 
-    def _lookup_gsis_from_pfr(self, pfr_id: str, season: int) -> Optional[str]:
-        """Map a PFR player identifier to an NFL GSIS ID using roster data."""
-        if season not in self._roster_map_cache:
-            from nflreadpy import load_rosters  # Lazy import
-
-            roster_data = load_rosters([season])
-            records = self._convert_generic_to_records(roster_data)
-            mapping: Dict[str, str] = {}
-            for record in records:
-                pfr_value = self._clean_str(record.get("pfr_id") or record.get("pfr_player_id"))
-                gsis_value = self._clean_str(record.get("gsis_id") or record.get("player_id"))
-                if pfr_value and gsis_value:
-                    mapping[pfr_value] = gsis_value
-            self._roster_map_cache[season] = mapping
-            logger.debug(
-                "Cached roster map with %d entries for season %s",
-                len(mapping),
-                season
-            )
-
-        return self._roster_map_cache.get(season, {}).get(pfr_id)
+    # Mapping logic is centralized in PlayerIdMapper to keep behavior consistent
+    # across fetch + normalization stages.
 
     @staticmethod
     def _normalize_player_id(value: str) -> Optional[str]:

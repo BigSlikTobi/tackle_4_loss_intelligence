@@ -100,6 +100,9 @@ class DataNormalizer:
             normalization_timestamp=time.time(),
             provenance=fetch_result.provenance.copy()
         )
+
+        # Prefetch mappings up-front to avoid per-record Supabase lookups.
+        self._prefetch_player_id_mappings(fetch_result)
         
         # Normalize each data source
         if fetch_result.play_by_play is not None:
@@ -137,6 +140,81 @@ class DataNormalizer:
         )
         
         return result
+
+    def _prefetch_player_id_mappings(self, fetch_result) -> None:
+        mapper = self._player_id_mapper
+        if not mapper or not mapper.enabled:
+            return
+
+        pfr_ids: set[str] = set()
+        season_hint: Optional[int] = None
+        multiple_seasons = False
+
+        def consider_season(value: Any) -> None:
+            nonlocal season_hint, multiple_seasons
+            if multiple_seasons:
+                return
+            if value is None:
+                return
+            try:
+                season_value = int(value)
+            except (TypeError, ValueError):
+                return
+            if season_hint is None:
+                season_hint = season_value
+            elif season_hint != season_value:
+                multiple_seasons = True
+                season_hint = None
+
+        def scan_record(record: Dict[str, Any]) -> None:
+            consider_season(record.get("season"))
+
+            ids_blob = record.get("player_ids")
+            if isinstance(ids_blob, dict):
+                pfr_value = ids_blob.get("pfr")
+                if isinstance(pfr_value, str):
+                    pfr_value = pfr_value.strip()
+                    if mapper.is_valid_pfr_id(pfr_value):
+                        pfr_ids.add(pfr_value)
+
+            for key, value in record.items():
+                key_lower = str(key).lower()
+                if "id" not in key_lower:
+                    continue
+                if "player" not in key_lower and "pfr" not in key_lower:
+                    continue
+
+                if isinstance(value, str):
+                    candidate = value.strip()
+                    if mapper.is_valid_pfr_id(candidate):
+                        pfr_ids.add(candidate)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str):
+                            candidate = item.strip()
+                            if mapper.is_valid_pfr_id(candidate):
+                                pfr_ids.add(candidate)
+
+        def scan_records(records: Any) -> None:
+            if not records:
+                return
+            if isinstance(records, dict):
+                scan_record(records)
+                return
+            if isinstance(records, list):
+                for item in records:
+                    if isinstance(item, dict):
+                        scan_record(item)
+
+        scan_records(fetch_result.play_by_play)
+        scan_records(fetch_result.snap_counts)
+        scan_records(fetch_result.team_context)
+        if getattr(fetch_result, "ngs_data", None):
+            for _, rows in fetch_result.ngs_data.items():
+                scan_records(rows)
+
+        if pfr_ids:
+            mapper.prefetch_pfr_ids(sorted(pfr_ids), season=season_hint)
     
     def _normalize_play_by_play(
         self,
@@ -379,43 +457,68 @@ class DataNormalizer:
         if not has_player_id_field:
             return record
 
+        season_hint: Optional[int] = None
+        season_value = record.get("season")
+        if season_value is not None:
+            try:
+                season_hint = int(season_value)
+            except (TypeError, ValueError):
+                season_hint = None
+
         player_ids = record.get("player_ids")
         if not isinstance(player_ids, dict):
             player_ids = {}
 
-        gsis_candidate = None
-        pfr_candidate = None
+        gsis_candidate: Optional[str] = None
+        pfr_candidate: Optional[str] = None
 
         for key, value in record.items():
             if not value:
                 continue
             key_lower = key.lower()
             if key_lower in {"player_id", "player_gsis_id", "gsis_id", "nflverse_id"}:
-                gsis_candidate = self._player_id_mapper.normalize_gsis_id(value)
-                if gsis_candidate:
-                    player_ids.setdefault("gsis", gsis_candidate)
+                # Some sources stuff PFR IDs into player_id-shaped fields.
+                if isinstance(value, str):
+                    pfr_value = value.strip()
+                    if pfr_value and self._player_id_mapper.is_valid_pfr_id(pfr_value):
+                        pfr_candidate = pfr_value
+                        player_ids.setdefault("pfr", pfr_value)
+
+                # Only treat it as a GSIS candidate if it actually matches the GSIS format.
+                candidate = self._player_id_mapper.normalize_gsis_id(value)
+                if candidate and self._player_id_mapper.is_valid_gsis_id(candidate):
+                    gsis_candidate = candidate
+                    player_ids.setdefault("gsis", candidate)
             if "pfr" in key_lower and "id" in key_lower:
                 pfr_candidate = str(value).strip()
                 if pfr_candidate:
                     player_ids.setdefault("pfr", pfr_candidate)
 
         if not gsis_candidate and pfr_candidate:
-            mapped = self._player_id_mapper.resolve_gsis_from_pfr(pfr_candidate)
+            mapped = self._player_id_mapper.resolve_gsis_from_pfr(pfr_candidate, season=season_hint)
             if mapped:
                 gsis_candidate = mapped
                 player_ids["gsis"] = mapped
 
         for key, value in list(record.items()):
             if self._is_player_id_field(key):
-                normalized_value = self._player_id_mapper.normalize_to_gsis(value)
+                if isinstance(value, str):
+                    pfr_value = value.strip()
+                    if pfr_value and self._player_id_mapper.is_valid_pfr_id(pfr_value):
+                        player_ids.setdefault("pfr", pfr_value)
+                normalized_value = self._player_id_mapper.normalize_to_gsis(value, season=season_hint)
                 if normalized_value:
                     record[key] = normalized_value
+                    if not gsis_candidate:
+                        gsis_candidate = normalized_value
+                        player_ids.setdefault("gsis", normalized_value)
                 elif isinstance(value, str) and value and not self._player_id_mapper.is_valid_gsis_id(value):
                     logger.debug("Non-standard player ID format for %s: %s", key, value)
             elif self._is_player_id_list_field(key):
-                record[key] = self._player_id_mapper.normalize_player_id_list(value)
+                record[key] = self._player_id_mapper.normalize_player_id_list(value, season=season_hint)
 
-        if gsis_candidate:
+        # Only enforce the canonical player_id if we actually resolved a valid GSIS id.
+        if gsis_candidate and self._player_id_mapper.is_valid_gsis_id(gsis_candidate):
             record["player_id"] = gsis_candidate
 
         if player_ids:
@@ -427,6 +530,9 @@ class DataNormalizer:
     def _is_player_id_field(field: str) -> bool:
         field_lower = field.lower()
         if field_lower == "player_ids":
+            return False
+        # Avoid treating list-valued fields like tackler_player_ids as scalar player ids.
+        if "player_ids" in field_lower:
             return False
         if "player_id" in field_lower and "pfr" not in field_lower:
             return True
