@@ -20,7 +20,13 @@ class NewsSourceWatermarkStore:
     TABLE_NAME = "news_source_watermarks"
 
     def __init__(self) -> None:
-        self.client = get_supabase_client()
+        # Watermarks are an optimization. If Supabase isn't configured (common in
+        # unit tests / local runs), degrade gracefully to "no watermarks".
+        try:
+            self.client = get_supabase_client()
+        except (ValueError, ImportError) as exc:
+            self.client = None
+            logger.info("News source watermarks disabled (Supabase unavailable): %s", exc)
 
     def fetch_watermarks(self) -> Dict[str, datetime]:
         """Return the latest published date per source.
@@ -28,6 +34,8 @@ class NewsSourceWatermarkStore:
         Returns:
             Mapping of source name to last processed published timestamp.
         """
+        if self.client is None:
+            return {}
         try:
             response = (
                 self.client.table(self.TABLE_NAME)
@@ -61,6 +69,8 @@ class NewsSourceWatermarkStore:
             updates: Mapping of source name to newest published timestamp.
         """
         if not updates:
+            return
+        if self.client is None:
             return
 
         payload = []
