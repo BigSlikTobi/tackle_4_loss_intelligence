@@ -17,6 +17,9 @@ from urllib.parse import unquote
 from src.shared.utils.env import load_env
 from src.shared.db.connection import get_supabase_client
 
+PAGE_SIZE = 1000
+UPSERT_BATCH_SIZE = 200
+
 def main():
     """Find and fix URL-encoded URLs in the database."""
     load_env()
@@ -25,25 +28,47 @@ def main():
     print("Checking for URL-encoded URLs in news_urls table...")
     print("=" * 80)
     
-    # Fetch all URLs
-    response = supabase.table("news_urls").select("id, url").execute()
-    
     encoded_urls = []
-    for row in response.data:
-        if "%" in row["url"]:
-            encoded_urls.append(row)
+    total_scanned = 0
+    offset = 0
+
+    while True:
+        response = (
+            supabase.table("news_urls")
+            .select("id, url")
+            .range(offset, offset + PAGE_SIZE - 1)
+            .execute()
+        )
+
+        rows = response.data or []
+        if not rows:
+            break
+
+        total_scanned += len(rows)
+        for row in rows:
+            url = row.get("url") or ""
+            if "%" in url:
+                decoded_url = unquote(url)
+                if decoded_url != url:
+                    encoded_urls.append({"id": row["id"], "url": url, "decoded_url": decoded_url})
+
+        if len(rows) < PAGE_SIZE:
+            break
+
+        offset += PAGE_SIZE
     
     if not encoded_urls:
         print("\n✓ No URL-encoded URLs found. Database is clean!")
         return
     
-    print(f"\nFound {len(encoded_urls)} URL-encoded URLs:")
+    print(f"\nScanned {total_scanned} URLs.")
+    print(f"Found {len(encoded_urls)} URL-encoded URLs:")
     print("-" * 80)
     
     for row in encoded_urls:
         print(f"\nID: {row['id']}")
         print(f"Encoded:  {row['url']}")
-        print(f"Decoded:  {unquote(row['url'])}")
+        print(f"Decoded:  {row['decoded_url']}")
     
     # Ask for confirmation
     print("\n" + "=" * 80)
@@ -57,23 +82,23 @@ def main():
     print("\nFixing URLs...")
     success_count = 0
     error_count = 0
-    
-    for row in encoded_urls:
+
+    for start in range(0, len(encoded_urls), UPSERT_BATCH_SIZE):
+        batch = encoded_urls[start:start + UPSERT_BATCH_SIZE]
+        payload = [{"id": row["id"], "url": row["decoded_url"]} for row in batch]
+
         try:
-            decoded_url = unquote(row["url"])
-            
-            supabase.table("news_urls").update({
-                "url": decoded_url
-            }).eq("id", row["id"]).execute()
-            
-            print(f"✓ Fixed: {row['id']}")
-            success_count += 1
+            supabase.table("news_urls").upsert(payload, on_conflict="id").execute()
+            for row in batch:
+                print(f"✓ Fixed: {row['id']}")
+            success_count += len(batch)
         except Exception as e:
-            print(f"✗ Failed {row['id']}: {e}")
-            error_count += 1
-    
+            print(f"✗ Batch failed ({len(batch)} rows): {e}")
+            error_count += len(batch)
+
     print("\n" + "=" * 80)
     print(f"Complete: {success_count} fixed, {error_count} failed")
+    print(f"Total scanned: {total_scanned}, total updated: {success_count}")
     
     if success_count > 0:
         print("\n✓ URLs successfully decoded in database!")
