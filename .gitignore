@@ -88,3 +88,7 @@ src/functions/content_summarization/scripts/.summary_checkpoint.json
 supabase/.temp
 old_migrations
 src/functions/image_selection/scripts/article.txt
+# NightLedger local runtime data
+.nightledger/
+nightledger_local/
+
