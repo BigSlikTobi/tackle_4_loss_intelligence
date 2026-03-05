@@ -281,19 +281,33 @@ class FactBatchResultProcessor:
             if not url_ids:
                 logger.warning("No news_url_ids found for %d processed facts", len(fact_ids))
                 return 0
-            
-            # Update knowledge_extracted_at for each URL
+
+            # Only mark a URL as knowledge-complete when ALL of its facts have
+            # topics. If the topics batch hit a limit and left some facts
+            # unprocessed, those facts would be orphaned forever once
+            # knowledge_extracted_at is set (future queries filter on IS NULL).
+            complete_url_ids = self._filter_fully_processed_urls(url_ids, client)
+            skipped = len(url_ids) - len(complete_url_ids)
+            if skipped:
+                logger.info(
+                    "Skipping knowledge_extracted_at for %d URL(s) that still have facts missing topics",
+                    skipped,
+                )
+            if not complete_url_ids:
+                return 0
+
+            # Update knowledge_extracted_at for fully-processed URLs only
             timestamp = datetime.now(timezone.utc).isoformat()
             try:
                 client.table("news_urls").update({
                     "knowledge_extracted_at": timestamp,
                     "knowledge_error_count": 0,
-                }).in_("id", list(url_ids)).execute()
-                updated_count = len(url_ids)
+                }).in_("id", list(complete_url_ids)).execute()
+                updated_count = len(complete_url_ids)
             except Exception as exc:
                 logger.warning("Failed to batch update knowledge_extracted_at for URLs: %s", exc)
                 updated_count = 0
-            
+
             logger.info(
                 "Updated knowledge_extracted_at for %d URLs (entities task, %d facts)",
                 updated_count,
@@ -304,6 +318,70 @@ class FactBatchResultProcessor:
         except Exception as exc:
             logger.error("Failed to update URL timestamps: %s", exc, exc_info=True)
             return 0
+
+    def _filter_fully_processed_urls(self, url_ids: Set[str], client) -> Set[str]:
+        """Return only URL IDs whose every fact has at least one topic row.
+
+        If a topics batch was capped at a limit some facts may still be
+        topic-less.  We must not mark those URLs as knowledge-complete or
+        those facts will be silently orphaned forever.
+        """
+        if not url_ids:
+            return set()
+
+        url_id_list = list(url_ids)
+        chunk_size = 500
+
+        # Step 1: collect all fact IDs that belong to the candidate URLs
+        url_to_facts: dict[str, set[str]] = {uid: set() for uid in url_ids}
+        for i in range(0, len(url_id_list), chunk_size):
+            chunk = url_id_list[i : i + chunk_size]
+            response = (
+                client.table("news_facts")
+                .select("id,news_url_id")
+                .in_("news_url_id", chunk)
+                .execute()
+            )
+            rows = getattr(response, "data", []) or []
+            for row in rows:
+                uid = row.get("news_url_id")
+                fid = row.get("id")
+                if uid and fid and uid in url_to_facts:
+                    url_to_facts[uid].add(fid)
+
+        # Gather all fact IDs we need to check
+        all_fact_ids = {fid for fids in url_to_facts.values() for fid in fids}
+        if not all_fact_ids:
+            # No facts found — treat as complete (nothing to block on)
+            return url_ids
+
+        # Step 2: find which of those facts already have topics
+        all_fact_id_list = list(all_fact_ids)
+        facts_with_topics: Set[str] = set()
+        for i in range(0, len(all_fact_id_list), chunk_size):
+            chunk = all_fact_id_list[i : i + chunk_size]
+            response = (
+                client.table("news_fact_topics")
+                .select("news_fact_id")
+                .in_("news_fact_id", chunk)
+                .execute()
+            )
+            rows = getattr(response, "data", []) or []
+            for row in rows:
+                fid = row.get("news_fact_id")
+                if fid:
+                    facts_with_topics.add(fid)
+
+        # Step 3: a URL is complete only when every one of its facts has a topic
+        complete: Set[str] = set()
+        for uid, fids in url_to_facts.items():
+            if not fids:
+                # URL has no facts at all — safe to mark complete
+                complete.add(uid)
+            elif fids.issubset(facts_with_topics):
+                complete.add(uid)
+
+        return complete
 
     def _extract_output_text(self, body: Dict) -> str:
         """Pull the text payload from chat completion style bodies."""
