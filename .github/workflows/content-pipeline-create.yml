@@ -31,9 +31,9 @@ on:
         type: boolean
         default: false
       facts_limit:
-        description: 'Limit for facts batch (default: 20)'
+        description: 'Limit for facts batch (default: 500)'
         type: number
-        default: 20
+        default: 500
 
 # Prevent concurrent runs - if a run is in progress, skip the new one
 concurrency:
@@ -170,8 +170,7 @@ jobs:
     needs: [fetch-content]
     if: |
       always() &&
-      (needs.fetch-content.result == 'success' || needs.fetch-content.result == 'skipped') &&
-      needs.fetch-content.outputs.content_fetched == 'true'
+      (needs.fetch-content.result == 'success' || needs.fetch-content.result == 'skipped')
     outputs:
       batch_id: ${{ steps.create.outputs.batch_id }}
       batch_created: ${{ steps.create.outputs.batch_created }}
@@ -202,7 +201,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          LIMIT=${{ github.event.inputs.facts_limit || 20 }}
+          LIMIT=${{ github.event.inputs.facts_limit || 500 }}
           echo "Creating facts batch with limit $LIMIT..."
           
           # Run the batch creation and capture output
@@ -210,7 +209,7 @@ jobs:
             --task create \
             --limit $LIMIT \
             --only-validated \
-            --max-age-hours 48 \
+            --max-age-hours 96 \
             --register \
             2>&1) || {
             # Check if error is "no articles" - that's OK
