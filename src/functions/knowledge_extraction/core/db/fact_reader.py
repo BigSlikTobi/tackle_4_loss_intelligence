@@ -234,7 +234,10 @@ class NewsFactReader:
                 break
             page_limit = current_page_size if remaining is None else min(current_page_size, remaining)
 
-            query = self.client.table(table_name).select(select_clause)
+            if using_view:
+                query = self.client.schema("view").table(table_name).select(select_clause)
+            else:
+                query = self.client.table(table_name).select(select_clause)
 
             # Views only expose id; order by id to keep pagination stable
             if using_view:
