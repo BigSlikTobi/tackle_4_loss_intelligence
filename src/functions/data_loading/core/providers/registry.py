@@ -6,11 +6,15 @@ from typing import Any, Callable, Dict
 
 from ...core.data.loaders.player.ftn import build_ftn_pipeline
 from .base import DataProvider, PipelineDataProvider
+from .injuries import InjuriesProvider
+from .player_lookup import PlayerLookupProvider
 from .pbp import PlayByPlayProvider
 from .player_weekly_stats import PlayerWeeklyStatsProvider
 from .ngs import NextGenStatsProvider
 from .pfr import PfrPlayerSeasonProvider
 from .snap_counts import SnapCountsGameProvider
+from .team_season_stats import TeamSeasonStatsProvider
+from .team_weekly_stats import TeamWeeklyStatsProvider
 
 
 ProviderFactory = Callable[..., DataProvider]
@@ -45,6 +49,11 @@ _PROVIDER_FACTORIES: Dict[str, ProviderFactory] = {
     "pbp": _pbp_provider,
     "ngs": _ngs_provider,
     "player_weekly_stats": lambda **_: PlayerWeeklyStatsProvider(),
+    "player_season_stats": lambda **_: PfrPlayerSeasonProvider(),
+    "team_weekly_stats": lambda **_: TeamWeeklyStatsProvider(),
+    "team_season_stats": lambda **_: TeamSeasonStatsProvider(),
+    "injuries": lambda **_: InjuriesProvider(),
+    "player_lookup": lambda **_: PlayerLookupProvider(),
 }
 
 

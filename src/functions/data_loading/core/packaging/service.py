@@ -32,6 +32,7 @@ class PackageRequest:
     bundles: Sequence[Dict[str, Any]]
     payload: Dict[str, Any] | None = None
     links: Dict[str, Any] | None = None
+    options: Dict[str, Any] | None = None
 
     @staticmethod
     def from_mapping(data: Mapping[str, Any]) -> "PackageRequest":
@@ -45,6 +46,7 @@ class PackageRequest:
                 bundles=list(data["bundles"]),
                 payload=dict(data.get("payload", {})) if data.get("payload") else None,
                 links=dict(data.get("links", {})) if data.get("links") else None,
+                options=dict(data.get("options", {})) if data.get("options") else None,
             )
         except KeyError as exc:  # pragma: no cover - user input validation
             raise ValueError(f"Missing required request field: {exc.args[0]}") from exc
@@ -77,6 +79,7 @@ def assemble_package(request_data: Mapping[str, Any] | PackageRequest) -> Packag
         bundles=bundles,
         base_payload=request.payload,
         links=request.links,
+        strict_mode=bool((request.options or {}).get("strict_mode", False)),
     )
 
     if request.payload:

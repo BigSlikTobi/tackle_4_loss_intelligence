@@ -75,6 +75,11 @@ def test_get_provider_registry_exposes_known_providers():
     providers = list_providers()
 
     assert "pfr" in providers
+    assert "team_weekly_stats" in providers
+    assert "team_season_stats" in providers
+    assert "injuries" in providers
+    assert "player_lookup" in providers
+    assert "player_season_stats" in providers
     assert callable(providers["pfr"])
 
     provider = get_provider("pfr")
