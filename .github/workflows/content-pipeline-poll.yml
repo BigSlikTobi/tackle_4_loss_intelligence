@@ -416,10 +416,12 @@ jobs:
                   else:
                       logger.warning(f"Unknown batch status: {openai_batch_status}")
               
-              # Check for failed batches eligible for retry
-              # NOTE: We only retry PROCESSING failures, not OpenAI batch failures
+              # Check for failed batches eligible for retry.
+              # NOTE: We only retry PROCESSING failures, not OpenAI batch failures.
               # OpenAI batch failures (failed/expired/cancelled) cannot be retried -
-              # they would need a new batch to be created from scratch
+              # they would need a new batch to be created from scratch.
+              # This runs BEFORE proactive creation so that reset batches (now PENDING)
+              # are seen as active by has_active_batches(), preventing duplicate submissions.
               failed_batches = tracker.get_failed_batches_for_retry(limit=5)
               for batch in failed_batches:
                   # Only retry if it was a processing failure (batch completed but processing failed)
@@ -431,7 +433,27 @@ jobs:
                       continue
                   logger.info(f"Retrying failed batch {batch.batch_id} (attempt {batch.retry_count + 1})")
                   tracker.reset_for_retry(batch.batch_id)
-              
+
+              # Proactive batch creation: self-heal if a previous promotion was missed.
+              # Runs after the retry loop so that any just-reset batches (now PENDING)
+              # are seen as active by has_active_batches(), preventing duplicate submissions.
+              if not tracker.has_active_batches(BatchStage.KNOWLEDGE):
+                  logger.info("No active knowledge batch; checking for pending facts (proactive)...")
+                  # Try topics first; fall back to entities if topics are all done
+                  next_batch = create_knowledge_batch(tracker, task="topics")
+                  if not next_batch:
+                      next_batch = create_knowledge_batch(tracker, task="entities")
+                  if next_batch:
+                      next_stage_batches_created += 1
+                      logger.info(f"Proactively created knowledge batch: {next_batch}")
+
+              if not tracker.has_active_batches(BatchStage.SUMMARY):
+                  logger.info("No active summary batch; checking for pending articles (proactive)...")
+                  next_batch = create_summary_batch(tracker)
+                  if next_batch:
+                      next_stage_batches_created += 1
+                      logger.info(f"Proactively created summary batch: {next_batch}")
+
               # Summary
               print("\n" + "=" * 50)
               print("CONTENT PIPELINE POLL SUMMARY")
