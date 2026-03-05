@@ -11,7 +11,8 @@ from typing import Any
 
 import flask
 
-from ...core.packaging import assemble_package
+from ..core.packaging import assemble_package
+from .request_adapter import normalize_package_request
 
 
 def package_handler(request: flask.Request) -> flask.Response:
@@ -40,9 +41,10 @@ def package_handler(request: flask.Request) -> flask.Response:
         logging.error(f"Invalid JSON body: {exc}")
         return _error_response(f"Invalid JSON body: {exc}", status=400)
 
-    # Assemble package
+    # Normalize legacy payloads and assemble package
     try:
-        envelope = assemble_package(payload)
+        normalized_payload, adapter_meta = normalize_package_request(payload)
+        envelope = assemble_package(normalized_payload)
     except ValueError as exc:
         logging.error(f"Package assembly validation error: {exc}")
         return _error_response(str(exc), status=400)
@@ -50,7 +52,17 @@ def package_handler(request: flask.Request) -> flask.Response:
         logging.exception("Failed to assemble package")
         return _error_response("Internal server error", status=500)
 
-    return _cors_response(envelope.to_dict())
+    body = envelope.to_dict()
+    links = body.get("links", {})
+    bundle_errors = links.get("bundle_errors", []) if isinstance(links, dict) else []
+    if adapter_meta or bundle_errors:
+        meta = body.get("meta", {})
+        if adapter_meta:
+            meta.update(adapter_meta)
+        if bundle_errors:
+            meta["bundle_errors"] = bundle_errors
+        body["meta"] = meta
+    return _cors_response(body)
 
 
 def _cors_response(body: dict[str, Any], status: int = 200) -> flask.Response:
