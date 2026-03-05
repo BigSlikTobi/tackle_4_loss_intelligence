@@ -198,12 +198,18 @@ jobs:
                       logger.info("Knowledge batch already active; skipping new submission")
                       return None
 
-                  # Use the CLI script to create batch
+                  # Use the CLI script to create batch.
+                  # --include-completed-urls lets the generator use the
+                  # optimised views (news_facts_without_topics /
+                  # news_facts_without_entities) instead of a heavy
+                  # knowledge_extracted_at IS NULL join, and also recovers
+                  # facts that were orphaned by the premature URL-timestamp bug.
                   cmd = [
                       sys.executable,
                       "src/functions/knowledge_extraction/scripts/fact_knowledge_batch_cli.py",
                       "--task", task,
                       "--limit", "500",
+                      "--include-completed-urls",
                       "--register",  # Register in tracking table
                   ]
                   
