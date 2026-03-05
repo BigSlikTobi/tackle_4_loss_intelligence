@@ -235,7 +235,7 @@ class NewsFactReader:
             page_limit = current_page_size if remaining is None else min(current_page_size, remaining)
 
             if using_view:
-                query = self.client.schema("view").table(table_name).select(select_clause)
+                query = self.client.schema("views").table(table_name).select(select_clause)
             else:
                 query = self.client.table(table_name).select(select_clause)
 
