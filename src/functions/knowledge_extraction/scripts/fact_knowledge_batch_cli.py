@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         help="Do not filter out URLs that already have knowledge_extracted_at set (useful for reprocessing)",
     )
     parser.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=None,
+        help="Only include facts from news_urls created within this many hours (reduces DB scan size)",
+    )
+    parser.add_argument(
         "--model",
         default="gpt-4.1-nano-2025-04-14",
         help="OpenAI model to use for knowledge extraction",
@@ -201,7 +207,7 @@ def main() -> None:
     )
 
     if args.no_submit:
-        batch = generator.generate(task=args.task, limit=args.limit)
+        batch = generator.generate(task=args.task, limit=args.limit, max_age_hours=args.max_age_hours)
         logger.info(
             "Generated batch file without submission",
             extra={
@@ -213,7 +219,7 @@ def main() -> None:
         return
 
     pipeline = FactBatchPipeline(generator=generator, output_dir=args.output_dir)
-    result = pipeline.create_batch(task=args.task, limit=args.limit)
+    result = pipeline.create_batch(task=args.task, limit=args.limit, max_age_hours=args.max_age_hours)
 
     # Register batch in tracking table if requested
     register = getattr(args, 'register', False)

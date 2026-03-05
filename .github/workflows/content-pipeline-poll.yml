@@ -204,6 +204,7 @@ jobs:
                       "src/functions/knowledge_extraction/scripts/fact_knowledge_batch_cli.py",
                       "--task", task,
                       "--limit", "500",
+                      "--max-age-hours", str(KNOWLEDGE_BATCH_MAX_AGE),
                       "--register",  # Register in tracking table
                   ]
                   
