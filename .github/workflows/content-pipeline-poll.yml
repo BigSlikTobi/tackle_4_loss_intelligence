@@ -16,8 +16,8 @@ name: Content Pipeline - Poll and Process
 
 on:
   schedule:
-    # Every 30 minutes
-    - cron: '*/30 * * * *'
+    # Every 5 minutes
+    - cron: '*/5 * * * *'
   
   workflow_dispatch:
     inputs:
