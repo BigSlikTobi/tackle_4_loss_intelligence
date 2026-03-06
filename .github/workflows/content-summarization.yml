@@ -1,10 +1,6 @@
-name: Summarize NFL News Content
+name: Legacy - Manual Content Summarization
 
 on:
-  schedule:
-    # Every 15 minutes
-    - cron: '*/15 * * * *'
-  
   workflow_dispatch:  # Allow manual triggers
 
 env:
@@ -36,6 +32,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          echo "Legacy manual workflow. Scheduled summary creation now runs through content-pipeline-poll.yml."
           python src/functions/content_summarization/scripts/summarize_cli.py \
             --limit 25
       

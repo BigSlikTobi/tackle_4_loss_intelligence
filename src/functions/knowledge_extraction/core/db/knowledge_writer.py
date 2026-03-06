@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime
 import logging
 from typing import Dict, List, Sequence, Tuple
 
@@ -395,8 +394,6 @@ class KnowledgeWriter:
         updates = {
             "facts_count": num_facts,
             "article_difficulty": difficulty,
-            "knowledge_extracted_at": datetime.datetime.utcnow().isoformat(),
-            "knowledge_error_count": 0,
         }
 
         if dry_run:

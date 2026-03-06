@@ -168,14 +168,38 @@ def main() -> None:
     # Process completed batch mode
     if args.process:
         pipeline = SummaryBatchPipeline(output_dir=args.output_dir)
+        tracker = BatchTracker()
+
+        try:
+            tracker.mark_completed(args.process)
+        except Exception as exc:
+            logger.warning("Failed to mark summary batch %s completed before processing: %s", args.process, exc)
         
         print(f"\nProcessing batch {args.process}...")
-        summary = pipeline.process_batch(
-            args.process,
-            dry_run=args.dry_run,
-            skip_existing=args.skip_existing,
-            create_embeddings=not args.no_embeddings,
-        )
+        try:
+            summary = pipeline.process_batch(
+                args.process,
+                dry_run=args.dry_run,
+                skip_existing=args.skip_existing,
+                create_embeddings=not args.no_embeddings,
+            )
+        except Exception as exc:
+            try:
+                tracker.mark_failed(args.process, str(exc))
+            except Exception as tracking_exc:
+                logger.warning("Failed to mark summary batch %s failed: %s", args.process, tracking_exc)
+            raise
+
+        if not args.dry_run:
+            try:
+                tracker.mark_processed(
+                    args.process,
+                    items_processed=summary.get("articles_processed", 0),
+                    items_skipped=summary.get("articles_skipped_existing", 0),
+                    items_failed=len(summary.get("errors", [])),
+                )
+            except Exception as exc:
+                logger.warning("Failed to mark summary batch %s processed: %s", args.process, exc)
         
         logger.info("Processed batch", extra=summary)
         print(f"\n{'='*50}")
@@ -234,23 +258,45 @@ def main() -> None:
         return
 
     # Create and submit batch
-    pipeline = SummaryBatchPipeline(generator=generator, output_dir=args.output_dir)
-    result = pipeline.create_batch(task=args.task, limit=args.limit)
+    tracker = BatchTracker()
+    creating_job = None
+    if args.register and tracker.has_active_batches(BatchStage.SUMMARY):
+        logger.warning("Active summary batch already in-flight; skipping creation to avoid duplication")
+        print("No new batch created: existing summary batch is still pending or processing")
+        return
+
+    if args.register:
+        creating_job = tracker.mark_creation_started(
+            stage=BatchStage.SUMMARY,
+            article_count=args.limit or 0,
+            model=args.model,
+            metadata={"task": args.task},
+        )
+
+    try:
+        pipeline = SummaryBatchPipeline(generator=generator, output_dir=args.output_dir)
+        result = pipeline.create_batch(task=args.task, limit=args.limit)
+    except Exception as exc:
+        if creating_job is not None:
+            try:
+                tracker.mark_failed(
+                    creating_job.batch_id,
+                    str(exc),
+                    increment_retry=False,
+                )
+            except Exception as tracking_exc:
+                logger.warning("Failed to mark creating summary batch as failed: %s", tracking_exc)
+        raise
 
     # Register batch in tracking table if requested
     register = getattr(args, 'register', False)
     if register:
         try:
-            tracker = BatchTracker()
-            tracker.register_batch(
-                batch_id=result.batch_id,
-                stage=BatchStage.SUMMARY,
-                article_count=result.total_articles,
+            tracker.mark_creation_completed(
+                creating_job.batch_id,
+                result.batch_id,
                 request_count=result.total_requests,
-                model=args.model,
-                metadata={
-                    "task": args.task,
-                },
+                input_file_id=result.input_file_id,
             )
             logger.info(f"Registered batch {result.batch_id} in tracking table")
         except Exception as e:

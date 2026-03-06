@@ -1,10 +1,6 @@
-name: Extract Knowledge from Story Groups
+name: Legacy - Manual Knowledge Extraction
 
 on:
-  schedule:
-    # Every 30 minutes
-    - cron: '*/30 * * * *'
-  
   workflow_dispatch:  # Allow manual triggers
 
 env:
@@ -36,6 +32,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          echo "Legacy manual workflow. Scheduled extraction now runs through content-pipeline-poll.yml."
           python src/functions/knowledge_extraction/scripts/extract_knowledge_cli.py \
             --limit 25
             

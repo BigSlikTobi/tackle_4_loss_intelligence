@@ -437,6 +437,7 @@ def run_batch_processor(
         progress = ProgressTracker(total_articles=len(pending), stage="content")
         successful = 0
         failed = 0
+        successful_url_ids: List[str] = []
 
         def process_and_track(item):
             """Process a URL and return success status."""
@@ -452,6 +453,8 @@ def run_batch_processor(
                 )
                 if success:
                     successful += 1
+                    if item.get("id"):
+                        successful_url_ids.append(str(item["id"]))
                     progress.increment(success=True)
                 else:
                     failed += 1
@@ -486,6 +489,8 @@ def run_batch_processor(
                         success = future.result()
                         if success:
                             successful += 1
+                            if item.get("id"):
+                                successful_url_ids.append(str(item["id"]))
                             progress.increment(success=True)
                         else:
                             failed += 1
@@ -531,6 +536,7 @@ def run_batch_processor(
             "successful": successful,
             "failed": failed,
             "failure_summary": failure_tracker.get_summary(),
+            "successful_url_ids": successful_url_ids,
         }
 
     finally:
@@ -584,6 +590,12 @@ Examples:
         "--checkpoint",
         type=Path,
         help="Path to checkpoint file",
+    )
+
+    parser.add_argument(
+        "--output-success-ids-file",
+        type=Path,
+        help="Write successfully processed URL IDs to this file",
     )
 
     parser.add_argument(
@@ -694,6 +706,20 @@ def main():
     print(f"Successful:       {result['successful']}")
     print(f"Failed:           {result['failed']}")
     print("=" * 60)
+
+    if args.output_success_ids_file:
+        args.output_success_ids_file.parent.mkdir(parents=True, exist_ok=True)
+        args.output_success_ids_file.write_text(
+            "\n".join(result.get("successful_url_ids", [])) + (
+                "\n" if result.get("successful_url_ids") else ""
+            ),
+            encoding="utf-8",
+        )
+        logger.info(
+            "Wrote %d successful URL IDs to %s",
+            len(result.get("successful_url_ids", [])),
+            args.output_success_ids_file,
+        )
 
     if result.get("failure_summary"):
         print("\nFailure summary:")

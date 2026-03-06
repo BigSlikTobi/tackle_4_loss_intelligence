@@ -7,6 +7,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -278,24 +279,30 @@ class FactsBatchRequestGenerator:
         """
         effective_limit = limit if limit is not None else 500
 
-        query = (
-            self.client.table("news_urls")
-            .select("id,url,created_at")
-            .is_("facts_extracted_at", "null")  # No facts yet
-            .order("created_at", desc=True)  # Newest first
-            .limit(effective_limit)
-        )
-        
-        # Optionally require content_extracted_at (for backwards compatibility)
-        if not include_unextracted:
-            query = query.not_.is_("content_extracted_at", "null")
+        if effective_limit <= 1:
+            articles = self._query_pending_articles(
+                limit=effective_limit,
+                include_unextracted=include_unextracted,
+                max_age_hours=max_age_hours,
+                newest_first=False,
+            )
+        else:
+            newest_limit = max(1, effective_limit // 2)
+            oldest_limit = effective_limit - newest_limit
 
-        if max_age_hours is not None:
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-            query = query.gte("created_at", cutoff.isoformat())
-
-        response = query.execute()
-        articles = getattr(response, "data", []) or []
+            newest = self._query_pending_articles(
+                limit=newest_limit,
+                include_unextracted=include_unextracted,
+                max_age_hours=max_age_hours,
+                newest_first=True,
+            )
+            oldest = self._query_pending_articles(
+                limit=oldest_limit,
+                include_unextracted=include_unextracted,
+                max_age_hours=max_age_hours,
+                newest_first=False,
+            )
+            articles = self._interleave_pending_articles(newest=newest, oldest=oldest, limit=effective_limit)
 
         logger.info(
             "Fetched pending articles for facts batch",
@@ -304,10 +311,63 @@ class FactsBatchRequestGenerator:
                 "effective_limit": effective_limit,
                 "include_unextracted": include_unextracted,
                 "articles_found": len(articles),
+                "selection_strategy": "balanced-newest-oldest",
             },
         )
 
         return articles
+
+    def _query_pending_articles(
+        self,
+        *,
+        limit: int,
+        include_unextracted: bool,
+        max_age_hours: Optional[int],
+        newest_first: bool,
+    ) -> List[Dict[str, Any]]:
+        """Fetch one side of the pending queue."""
+        query = (
+            self.client.table("news_urls")
+            .select("id,url,created_at")
+            .is_("facts_extracted_at", "null")
+            .order("created_at", desc=newest_first)
+            .limit(limit)
+        )
+
+        if not include_unextracted:
+            query = query.not_.is_("content_extracted_at", "null")
+
+        if max_age_hours is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+            query = query.gte("created_at", cutoff.isoformat())
+
+        response = query.execute()
+        return getattr(response, "data", []) or []
+
+    def _interleave_pending_articles(
+        self,
+        *,
+        newest: List[Dict[str, Any]],
+        oldest: List[Dict[str, Any]],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Mix fresh and old backlog items so neither side starves."""
+        selected: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for fresh_article, backlog_article in zip_longest(newest, oldest):
+            for article in (fresh_article, backlog_article):
+                if not article:
+                    continue
+                article_id = article.get("id")
+                if not article_id or article_id in seen_ids:
+                    continue
+                seen_ids.add(article_id)
+                selected.append(article)
+                if len(selected) >= limit:
+                    return selected
+
+        return selected
 
     def _fetch_high_fact_count_articles(
         self,

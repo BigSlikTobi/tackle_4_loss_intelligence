@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
+from ..db.completion_tracker import KnowledgeCompletionTracker
 from ..db.knowledge_writer import KnowledgeWriter
 from ..db.fact_reader import NewsFactReader
 from ..extraction.entity_extractor import ExtractedEntity
@@ -68,6 +69,7 @@ class BatchResultProcessor:
         self.writer = writer or KnowledgeWriter()
         self.entity_resolver = entity_resolver or EntityResolver()
         self.reader = reader or NewsFactReader()
+        self.completion_tracker = KnowledgeCompletionTracker(client=self.writer.client)
         self.continue_on_error = continue_on_error
         
         logger.info("Initialized BatchResultProcessor")
@@ -261,6 +263,8 @@ class BatchResultProcessor:
                         news_url_id=group_id,
                         dry_run=dry_run
                     )
+                    if not dry_run:
+                        self.completion_tracker.mark_complete_for_url_ids([group_id])
                     
                     result.groups_processed += 1
                     result.topics_extracted += topics_count

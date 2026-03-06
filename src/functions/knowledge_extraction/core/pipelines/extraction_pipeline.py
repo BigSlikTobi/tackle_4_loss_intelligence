@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional
 
+from ..db.completion_tracker import KnowledgeCompletionTracker
 from ..db.fact_reader import NewsFactReader
 from ..db.knowledge_writer import KnowledgeWriter
 from ..extraction.entity_extractor import EntityExtractor, ExtractedEntity
@@ -34,6 +35,7 @@ class ExtractionPipeline:
         self.entity_extractor = entity_extractor or EntityExtractor()
         self.topic_extractor = topic_extractor or TopicExtractor()
         self.entity_resolver = entity_resolver or EntityResolver()
+        self.completion_tracker = KnowledgeCompletionTracker(client=self.writer.client)
         self.max_topics = max_topics or 3
         self.max_entities = max_entities or 5
         self.continue_on_error = continue_on_error
@@ -133,6 +135,7 @@ class ExtractionPipeline:
 
                 if not dry_run:
                     self.writer.update_article_metrics(news_url_id=str(news_url_id))
+                    self.completion_tracker.mark_complete_for_url_ids([str(news_url_id)])
 
                 results["urls_processed"] += 1
 

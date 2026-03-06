@@ -195,6 +195,8 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
     only_validated = getattr(args, 'only_validated', False)
     register = getattr(args, 'register', False)
     max_age_hours = args.max_age_hours if args.max_age_hours > 0 else None
+    tracker = BatchTracker()
+    creating_job = None
 
     if high_fact_count:
         logger.info(f"Creating batch job for re-extraction of high fact count articles (> {high_fact_count})...")
@@ -210,11 +212,23 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
         logger.info(f"  High fact count threshold: > {high_fact_count}")
 
     try:
-        tracker = BatchTracker()
         if register and tracker.has_active_batches(BatchStage.FACTS):
             logger.warning("Active facts batch already in-flight; skipping creation to avoid duplication")
             print("No new batch created: existing facts batch is still pending or processing")
             return False
+
+        if register:
+            creating_job = tracker.mark_creation_started(
+                stage=BatchStage.FACTS,
+                article_count=args.limit or 0,
+                model=args.model,
+                metadata={
+                    "high_fact_count_threshold": high_fact_count,
+                    "only_validated": only_validated,
+                    "skip_existing": args.skip_existing,
+                    "max_age_hours": max_age_hours,
+                },
+            )
 
         result = pipeline.create_batch(
             limit=args.limit,
@@ -227,18 +241,11 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
         # Register batch in tracking table if requested
         if register:
             try:
-                tracker = BatchTracker()
-                tracker.register_batch(
-                    batch_id=result.batch_id,
-                    stage=BatchStage.FACTS,
-                    article_count=result.total_articles,
+                tracker.mark_creation_completed(
+                    creating_job.batch_id,
+                    result.batch_id,
                     request_count=result.total_requests,
-                    model=args.model,
-                    metadata={
-                        "high_fact_count_threshold": high_fact_count,
-                        "only_validated": only_validated,
-                        "skip_existing": args.skip_existing,
-                    },
+                    input_file_id=result.input_file_id,
                 )
                 logger.info(f"Registered batch {result.batch_id} in tracking table")
             except Exception as e:
@@ -255,6 +262,7 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
         print(f"Status:         {result.status}")
         print(f"Articles:       {result.total_articles}")
         print(f"Requests:       {result.total_requests}")
+        print(f"Skipped URLs:   {result.articles_skipped_no_content} (content unavailable at facts time)")
         print(f"Input file:     {result.input_file_path}")
         if register:
             print(f"Tracking:       ✅ Registered")
@@ -272,9 +280,27 @@ def handle_create(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> boo
 
     except ValueError as e:
         logger.warning(str(e))
+        if creating_job is not None:
+            try:
+                tracker.mark_failed(
+                    creating_job.batch_id,
+                    str(e),
+                    increment_retry=False,
+                )
+            except Exception as tracking_exc:
+                logger.warning("Failed to mark creating facts batch as failed: %s", tracking_exc)
         return False
     except Exception as e:
         logger.error(f"Failed to create batch: {e}", exc_info=True)
+        if creating_job is not None:
+            try:
+                tracker.mark_failed(
+                    creating_job.batch_id,
+                    str(e),
+                    increment_retry=False,
+                )
+            except Exception as tracking_exc:
+                logger.warning("Failed to mark creating facts batch as failed: %s", tracking_exc)
         return False
 
 
@@ -341,6 +367,12 @@ def handle_process(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> bo
     force_delete = getattr(args, 'force_delete', False)
 
     try:
+        tracker = BatchTracker()
+        try:
+            tracker.mark_completed(args.batch_id)
+        except Exception as exc:
+            logger.warning("Failed to mark facts batch %s completed before processing: %s", args.batch_id, exc)
+
         logger.info(f"Processing batch: {args.batch_id}")
         if args.dry_run:
             logger.info("🔍 DRY RUN - No data will be written to database")
@@ -354,6 +386,17 @@ def handle_process(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> bo
             create_embeddings=not args.no_embeddings,
             force_delete=force_delete,
         )
+
+        if not args.dry_run:
+            try:
+                tracker.mark_processed(
+                    args.batch_id,
+                    items_processed=result.get("articles_processed", 0),
+                    items_skipped=result.get("articles_skipped_existing", 0),
+                    items_failed=result.get("articles_with_errors", 0),
+                )
+            except Exception as exc:
+                logger.warning("Failed to mark facts batch %s processed: %s", args.batch_id, exc)
 
         print("\n" + "=" * 60)
         print("BATCH PROCESSING RESULTS")
@@ -386,9 +429,17 @@ def handle_process(pipeline: FactsBatchPipeline, args: argparse.Namespace) -> bo
 
     except ValueError as e:
         logger.error(str(e))
+        try:
+            BatchTracker().mark_failed(args.batch_id, str(e))
+        except Exception as tracking_exc:
+            logger.warning("Failed to mark facts batch %s failed: %s", args.batch_id, tracking_exc)
         return False
     except Exception as e:
         logger.error(f"Failed to process batch: {e}", exc_info=True)
+        try:
+            BatchTracker().mark_failed(args.batch_id, str(e))
+        except Exception as tracking_exc:
+            logger.warning("Failed to mark facts batch %s failed: %s", args.batch_id, tracking_exc)
         return False
 
 

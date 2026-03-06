@@ -34,6 +34,7 @@ class BatchCreationResult:
     metadata_path: Optional[str]
     total_requests: int
     total_articles: int
+    articles_skipped_no_content: int
 
 
 class FactsBatchPipeline:
@@ -186,6 +187,7 @@ class FactsBatchPipeline:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "total_requests": batch_payload.total_requests,
             "total_articles": batch_payload.total_articles,
+            "articles_skipped_no_content": batch_payload.metadata.get("articles_skipped_no_content", 0),
         }
 
         batch_info_path = self.output_dir / f"facts_batch_{batch.id}.json"
@@ -198,6 +200,7 @@ class FactsBatchPipeline:
                 "batch_id": batch.id,
                 "status": batch.status,
                 "requests": batch_payload.total_requests,
+                "skipped_no_content": batch_payload.metadata.get("articles_skipped_no_content", 0),
             },
         )
 
@@ -209,6 +212,7 @@ class FactsBatchPipeline:
             metadata_path=str(batch_payload.metadata_path),
             total_requests=batch_payload.total_requests,
             total_articles=batch_payload.total_articles,
+            articles_skipped_no_content=batch_payload.metadata.get("articles_skipped_no_content", 0),
         )
 
     def check_status(self, batch_id: str) -> dict:

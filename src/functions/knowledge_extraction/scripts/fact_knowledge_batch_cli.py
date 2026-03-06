@@ -158,12 +158,36 @@ def main() -> None:
             raise SystemExit("Task is required to process batch (provide --task or ensure metadata exists).")
 
         pipeline = FactBatchPipeline(output_dir=args.output_dir)
-        summary = pipeline.process_batch(
-            args.process,
-            task=task,
-            dry_run=args.dry_run,
-            skip_existing=args.skip_existing,
-        )
+        tracker = BatchTracker()
+        try:
+            tracker.mark_completed(args.process)
+        except Exception as exc:
+            logger.warning("Failed to mark knowledge batch %s completed before processing: %s", args.process, exc)
+
+        try:
+            summary = pipeline.process_batch(
+                args.process,
+                task=task,
+                dry_run=args.dry_run,
+                skip_existing=args.skip_existing,
+            )
+        except Exception as exc:
+            try:
+                tracker.mark_failed(args.process, str(exc))
+            except Exception as tracking_exc:
+                logger.warning("Failed to mark knowledge batch %s failed: %s", args.process, tracking_exc)
+            raise
+
+        if not args.dry_run:
+            try:
+                tracker.mark_processed(
+                    args.process,
+                    items_processed=summary.get("facts_processed", 0),
+                    items_skipped=summary.get("facts_skipped_existing", 0),
+                    items_failed=len(summary.get("errors", [])),
+                )
+            except Exception as exc:
+                logger.warning("Failed to mark knowledge batch %s processed: %s", args.process, exc)
         logger.info("Processed batch", extra=summary)
         print(f"Processed batch {summary['batch_id']}")
         print(f"Output: {summary['output_path']}")
@@ -218,25 +242,50 @@ def main() -> None:
         )
         return
 
-    pipeline = FactBatchPipeline(generator=generator, output_dir=args.output_dir)
-    result = pipeline.create_batch(task=args.task, limit=args.limit, max_age_hours=args.max_age_hours)
+    tracker = BatchTracker()
+    creating_job = None
+
+    if args.register and tracker.has_active_batches(BatchStage.KNOWLEDGE):
+        logger.warning("Active knowledge batch already in-flight; skipping creation to avoid duplication")
+        print("No new batch created: existing knowledge batch is still pending or processing")
+        return
+
+    if args.register:
+        creating_job = tracker.mark_creation_started(
+            stage=BatchStage.KNOWLEDGE,
+            article_count=0,
+            model=args.model,
+            metadata={
+                "task": args.task,
+                "chunk_size": args.chunk_size,
+                "max_age_hours": args.max_age_hours,
+            },
+        )
+
+    try:
+        pipeline = FactBatchPipeline(generator=generator, output_dir=args.output_dir)
+        result = pipeline.create_batch(task=args.task, limit=args.limit, max_age_hours=args.max_age_hours)
+    except Exception as exc:
+        if creating_job is not None:
+            try:
+                tracker.mark_failed(
+                    creating_job.batch_id,
+                    str(exc),
+                    increment_retry=False,
+                )
+            except Exception as tracking_exc:
+                logger.warning("Failed to mark creating knowledge batch as failed: %s", tracking_exc)
+        raise
 
     # Register batch in tracking table if requested
     register = getattr(args, 'register', False)
     if register:
         try:
-            tracker = BatchTracker()
-            tracker.register_batch(
-                batch_id=result.batch_id,
-                stage=BatchStage.KNOWLEDGE,
-                article_count=0,  # Knowledge batches work on facts, not articles
+            tracker.mark_creation_completed(
+                creating_job.batch_id,
+                result.batch_id,
                 request_count=result.total_requests,
-                model=args.model,
-                metadata={
-                    "task": args.task,
-                    "total_facts": result.total_facts,
-                    "chunk_size": args.chunk_size,
-                },
+                input_file_id=result.input_file_id,
             )
             logger.info(f"Registered batch {result.batch_id} in tracking table")
         except Exception as e:
