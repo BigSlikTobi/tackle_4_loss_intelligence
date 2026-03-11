@@ -29,7 +29,7 @@ def handle_tts_batch(request: Request) -> Response:
     headers = _cors_headers()
     try:
         payload = request.get_json(silent=True)
-        if not payload:
+        if payload is None:
             return Response("Invalid JSON payload", 400, headers)
 
         parsed_request = TTSBatchFactory.create_request(payload)
