@@ -1,0 +1,47 @@
+{
+  "action": "create",
+  "model_name": "gemini-2.5-pro-preview-tts",
+  "voice_name": "Zephyr",
+  "items": [
+    {
+      "id": "nahshon-wright-bears-zu-jets",
+      "title": "Bears lose takeaway corner Nahshon Wright to the Jets on a one-year deal",
+      "direction": {
+        "audio_profile": "Selbstbewusste Berliner Sportstimme, klarer, leicht rauer Klang, sehr direkt, kontrastreich, mit präziser Betonung bei Zahlen und Vertragspunkten.",
+        "scene": "Top-Meldung im Football-Update zur vollen Stunde. Studio trocken, Fokus komplett auf Claras Stimme. Die Stimmung: leicht genervt aus Chicago-Sicht, sachlich-kritisch, aber nicht überdreht - ein klarer Blick auf einen wichtigen Verlust in der Secondary.",
+        "director_notes": "Clara als klare Analystin: knapp, direkt, leicht genervter Unterton gegenüber dem Management, aber ohne Schreien. Zahlen sauber aussprechen, Jets/Bears-Verlust klar gegeneinanderstellen. Kein Gelaber, schnell auf den Punkt, dann sauber raus.",
+        "pace": "zügig, entschlossen, mit kurzen Pausen bei Kernzahlen",
+        "warmth": "kühl-sachlich mit einem Hauch Kumpelhaftigkeit, als würde sie einem guten Freund am Küchentisch erklären, was da gerade schief läuft",
+        "must_hit": [
+          "Nahshon Wright",
+          "New York Jets",
+          "Chicago Bears",
+          "ein Jahr, bis zu 5,5 Millionen Dollar",
+          "Pro-Bowl-Saison 2025 mit den Bears",
+          "fünf Interceptions 2025",
+          "mehr Interceptions als die Jets-Defense als ganzes Team 2025",
+          "Ian Rapoport von NFL Network als Quelle"
+        ],
+        "pronunciations": [
+          {
+            "term": "Nahshon Wright",
+            "guide": "NÄ-schon Rait"
+          },
+          {
+            "term": "Chicago Bears",
+            "guide": "Schi-KA-go BÄRS"
+          },
+          {
+            "term": "New York Jets",
+            "guide": "Nju Jork Dschets"
+          }
+        ]
+      },
+      "script": {
+        "intro": "Die Chicago Bears verlieren ihren Balljäger in der Secondary: Cornerback Nahshon Wright ist weg - und wechselt zu den New York Jets. Für dich heißt das: ein Pro-Bowler weniger im Bears-Backfield, und das kurz vor der nächsten Saison.",
+        "body": "Lass uns direkt in die Zahlen gehen.\n\nNahshon Wright unterschreibt bei den New York Jets einen Einjahresvertrag, laut Ian Rapoport von NFL Network im Maximum bis zu 5,5 Millionen Dollar wert.\n\nDer Punkt, der richtig weh tut aus Bears-Sicht: Wright kommt aus einer Pro-Bowl-Saison 2025 mit Chicago. Er hat alle 17 Spiele gemacht, 16 davon gestartet. In dieser Saison: 80 Tackles, 11 Pass-Breakups, also Pässe verteidigt, 2 Forced Fumbles, 3 Fumble Recoveries - und vor allem: 5 Interceptions.\n\nUnd jetzt kommt der Hammer: Diese fünf Interceptions von Nahshon Wright allein waren mehr, als die komplette Jets-Defense 2025 zusammen gefangen hat. Die holen sich mit ihm also genau das, was ihnen gefehlt hat: einen Corner, der Takeaways produziert.\n\nFür dich als Bears-Fan heißt das ganz nüchtern: Chicago verliert einen Starting-Cornerback, einen Pro-Bowler, der den Ball erobert hat wie kaum ein anderer im Kader. Das ist ein klarer Einschnitt für die Secondary - ein Jahr Jets, bis zu 5,5 Millionen, und der Playmaker ist raus aus Chicago.",
+        "outro": "Unterm Strich: Die Jets kaufen sich Turnover, die Bears verlieren sie. Nahshon Wright, ein Jahr New York, bis zu 5,5 Millionen Dollar - und Chicago muss jetzt ohne seinen Pro-Bowl-Balljäger in der Secondary klarkommen. Wir behalten für dich im Blick, wie die Bears diesen Verlust auffangen - du bleibst dran, wir sortieren's für dich."
+      }
+    }
+  ]
+}

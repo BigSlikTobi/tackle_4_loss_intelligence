@@ -261,6 +261,9 @@ See `docs/architecture/function_isolation.md` for complete architecture document
 ## Commit & Pull Request Guidelines
 
 - No repository exists yet
+- NEVER push directly to `main`
+- `main` must remain shippable at all times
+- Create and push a feature branch unless the user explicitly instructs otherwise
 
 ## Security & Configuration Tips
 
