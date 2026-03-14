@@ -6,8 +6,30 @@ from textwrap import dedent
 
 TOPIC_EXTRACTION_PROMPT_TEMPLATE = dedent(
     """
-    Classify NFL topics from this text. Return ONLY categories from this list (exact names, lowercase):
-    Quarterback Performance & Analysis, Running Back & Rushing Game, Wide Receiver & Passing Game, Defense & Turnovers, Coaching & Play Calling, Injuries & Player Health, Team Performance & Trends, Season Outlook & Predictions, Rookies & Emerging Players, Draft & College Prospects, Trades, Signings & Roster Moves, Contracts & Cap Management, Game Analysis & Highlights, Statistics & Rankings, Fantasy Football Impact, Offseason & Training Camp, Special Teams & Kicking Game, Refereeing & Rules, Player Profiles & Interviews, Team Culture & Leadership, League News & Administration, Off-Field & Lifestyle, Media & Fan Reactions
+    Classify NFL topics from this text. Return ONLY categories from this list (exact names):
+    - Quarterback Performance & Analysis
+    - Running Back & Rushing Game
+    - Wide Receiver & Passing Game
+    - Defense & Turnovers
+    - Coaching & Play Calling
+    - Injuries & Player Health
+    - Team Performance & Trends
+    - Season Outlook & Predictions
+    - Rookies & Emerging Players
+    - Draft & College Prospects
+    - Trades, Signings & Roster Moves
+    - Contracts & Cap Management
+    - Game Analysis & Highlights
+    - Statistics & Rankings
+    - Fantasy Football Impact
+    - Offseason & Training Camp
+    - Special Teams & Kicking Game
+    - Refereeing & Rules
+    - Player Profiles & Interviews
+    - Team Culture & Leadership
+    - League News & Administration
+    - Off-Field & Lifestyle
+    - Media & Fan Reactions
 
     Rules: max {max_items} topics, ranked by importance (1=primary, 2=secondary, 3+=minor), confidence 0-1.
 
