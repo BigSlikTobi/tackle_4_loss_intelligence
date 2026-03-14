@@ -460,7 +460,16 @@ class EntityExtractor:
                     continue
 
                 fact_id = fact_ids[idx]
-                entity_list = item.get("entities", [])
+                raw_entities = item.get("entities", [])
+                if not isinstance(raw_entities, list):
+                    logger.warning(
+                        "Expected 'entities' to be a list for fact_index %s, got %s; defaulting to empty list",
+                        fact_index,
+                        type(raw_entities),
+                    )
+                    entity_list = []
+                else:
+                    entity_list = raw_entities
 
                 # Reuse existing _parse_response by wrapping in expected format
                 wrapped = json.dumps({"entities": entity_list})
