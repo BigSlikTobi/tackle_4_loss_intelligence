@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import openai
 from openai import OpenAIError, RateLimitError, APITimeoutError
 
-from ..prompts import build_entity_extraction_prompt
+from ..prompts import build_entity_extraction_prompt, build_batched_entity_extraction_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ class EntityExtractor:
                 response = openai.responses.create(
                     model=self.model,
                     input=prompt,
-                    reasoning={"effort": "medium"},
+                    reasoning={"effort": "low"},
                     text={"verbosity": "low"},
                     timeout=self.timeout,
                 )
@@ -310,6 +310,158 @@ class EntityExtractor:
             logger.error(f"Error parsing entity response: {e}", exc_info=True)
             return []
     
+    def extract_multi(
+        self,
+        facts: List[Dict],
+        max_entities_per_fact: int = 10,
+        chunk_size: int = 15,
+    ) -> Dict[str, List[ExtractedEntity]]:
+        """
+        Extract entities from multiple facts in a single API call per chunk.
+
+        Sends chunk_size facts at once, dramatically reducing prompt overhead
+        compared to one API call per fact.
+
+        Args:
+            facts: List of dicts with 'id' and 'fact_text' keys
+            max_entities_per_fact: Max entities to extract per fact
+            chunk_size: Number of facts per API call
+
+        Returns:
+            Dict mapping fact ID to list of extracted entities
+        """
+        results: Dict[str, List[ExtractedEntity]] = {}
+
+        # Process in chunks
+        for chunk_start in range(0, len(facts), chunk_size):
+            chunk = facts[chunk_start:chunk_start + chunk_size]
+            fact_texts = [f.get("fact_text", "") for f in chunk]
+            fact_ids = [f.get("id", "") for f in chunk]
+
+            if not any(fact_texts):
+                continue
+
+            # Check circuit breaker
+            try:
+                self._check_circuit_breaker()
+            except Exception as e:
+                logger.error(str(e))
+                for fid in fact_ids:
+                    results[fid] = []
+                continue
+
+            chunk_results = self._extract_multi_chunk(
+                fact_texts, fact_ids, max_entities_per_fact
+            )
+            results.update(chunk_results)
+
+        logger.info(f"Extracted entities for {len(results)} facts via batched extraction")
+        return results
+
+    def _extract_multi_chunk(
+        self,
+        fact_texts: List[str],
+        fact_ids: List[str],
+        max_entities_per_fact: int,
+    ) -> Dict[str, List[ExtractedEntity]]:
+        """Extract entities from a single chunk of facts via one API call."""
+        import json as json_mod
+
+        for attempt in range(self.max_retries):
+            try:
+                prompt = build_batched_entity_extraction_prompt(
+                    fact_texts, max_entities_per_fact
+                )
+
+                response = openai.responses.create(
+                    model=self.model,
+                    input=prompt,
+                    reasoning={"effort": "low"},
+                    text={"verbosity": "low"},
+                    timeout=self.timeout,
+                )
+
+                parsed = self._parse_multi_response(response.output_text, fact_ids)
+                self._record_success()
+                return parsed
+
+            except RateLimitError:
+                wait_time = min(2 ** attempt, 60)
+                logger.warning(
+                    f"Rate limit hit on multi-extract (attempt {attempt + 1}/{self.max_retries}). "
+                    f"Waiting {wait_time}s..."
+                )
+                if attempt < self.max_retries - 1:
+                    time.sleep(wait_time)
+                else:
+                    self._record_failure()
+
+            except APITimeoutError as e:
+                logger.warning(f"API timeout on multi-extract (attempt {attempt + 1}): {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    self._record_failure()
+
+            except OpenAIError as e:
+                logger.error(f"OpenAI error on multi-extract (attempt {attempt + 1}): {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    self._record_failure()
+
+            except Exception as e:
+                logger.error(f"Unexpected error in multi-extract: {e}", exc_info=True)
+                self._record_failure()
+                break
+
+        # On failure, return empty lists
+        return {fid: [] for fid in fact_ids}
+
+    def _parse_multi_response(
+        self, response_text: str, fact_ids: List[str]
+    ) -> Dict[str, List[ExtractedEntity]]:
+        """Parse the batched multi-fact response into per-fact entity lists."""
+        import json
+
+        results: Dict[str, List[ExtractedEntity]] = {fid: [] for fid in fact_ids}
+
+        try:
+            data = json.loads(response_text)
+
+            if not isinstance(data, list):
+                logger.error(f"Expected list response for multi-extract, got {type(data)}")
+                return results
+
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+
+                fact_index = item.get("fact_index")
+                if fact_index is None:
+                    continue
+
+                # fact_index is 1-based
+                idx = fact_index - 1
+                if idx < 0 or idx >= len(fact_ids):
+                    logger.warning(f"fact_index {fact_index} out of range")
+                    continue
+
+                fact_id = fact_ids[idx]
+                entity_list = item.get("entities", [])
+
+                # Reuse existing _parse_response by wrapping in expected format
+                wrapped = json.dumps({"entities": entity_list})
+                entities = self._parse_response(wrapped)
+                results[fact_id] = entities
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse multi-extract response: {e}")
+        except Exception as e:
+            logger.error(f"Error parsing multi-extract response: {e}", exc_info=True)
+
+        return results
+
     def extract_batch(
         self,
         summaries: List[Dict[str, str]],
