@@ -189,7 +189,7 @@ class TopicExtractor:
                 response = openai.responses.create(
                     model=self.model,
                     input=prompt,
-                    reasoning={"effort": "medium"},
+                    reasoning={"effort": "low"},
                     text={"verbosity": "low"},
                     timeout=self.timeout,
                 )

@@ -189,8 +189,8 @@ class BatchRequestGenerator:
             "body": {
                 "model": self.model,
                 "input": prompt,
-                "reasoning": {"effort": "medium"},
-                "text": {"verbosity": "medium"},
+                "reasoning": {"effort": "low"},
+                "text": {"verbosity": "low"},
             }
         }
     
@@ -205,8 +205,8 @@ class BatchRequestGenerator:
             "body": {
                 "model": self.model,
                 "input": prompt,
-                "reasoning": {"effort": "medium"},
-                "text": {"verbosity": "medium"},
+                "reasoning": {"effort": "low"},
+                "text": {"verbosity": "low"},
             }
         }
     

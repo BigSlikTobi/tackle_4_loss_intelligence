@@ -549,7 +549,7 @@ class SummaryBatchRequestGenerator:
                     "messages": [
                         {"role": "user", "content": f"{prompt}\n\n{user_content}"}
                     ],
-                    "max_completion_tokens": 4000,
+                    "max_completion_tokens": 2000,
                     "reasoning_effort": "low",
                 },
             }

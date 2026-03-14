@@ -247,34 +247,41 @@ def main() -> None:
         if row.get("news_fact_id")
     }
 
-    for row in pending_facts:
-        fact_id = row["id"]
-        if fact_id in existing_fact_ids:
-            stats["skipped_existing"] += 1
-            continue
+    # Filter out already-existing facts
+    facts_to_process = [
+        row for row in pending_facts if row["id"] not in existing_fact_ids
+    ]
+    stats["skipped_existing"] = len(pending_facts) - len(facts_to_process)
 
-        try:
-            extracted = extractor.extract(
-                row["fact_text"],
-                max_entities=args.max_entities,
-            )
-            resolved = resolve_entities(extracted, resolver)
-            if not resolved:
-                resolved = [build_no_entity_marker()]
-                stats["skipped_no_data"] += 1
+    # Use batched multi-fact extraction (Phase 3 optimization)
+    if facts_to_process:
+        multi_results = extractor.extract_multi(
+            facts_to_process,
+            max_entities_per_fact=args.max_entities,
+            chunk_size=15,
+        )
 
-            written = writer.write_fact_entities(
-                news_fact_id=fact_id,
-                entities=resolved,
-                llm_model=args.model,
-                dry_run=args.dry_run,
-            )
-            stats["entities_written"] += written
-            stats["processed"] += 1
-            processed_fact_ids.append(fact_id)
-        except Exception as exc:
-            stats["failed"] += 1
-            logger.error("Realtime entities failed for %s: %s", fact_id, exc, exc_info=True)
+        for row in facts_to_process:
+            fact_id = row["id"]
+            try:
+                extracted = multi_results.get(fact_id, [])
+                resolved = resolve_entities(extracted, resolver)
+                if not resolved:
+                    resolved = [build_no_entity_marker()]
+                    stats["skipped_no_data"] += 1
+
+                written = writer.write_fact_entities(
+                    news_fact_id=fact_id,
+                    entities=resolved,
+                    llm_model=args.model,
+                    dry_run=args.dry_run,
+                )
+                stats["entities_written"] += written
+                stats["processed"] += 1
+                processed_fact_ids.append(fact_id)
+            except Exception as exc:
+                stats["failed"] += 1
+                logger.error("Realtime entities failed for %s: %s", fact_id, exc, exc_info=True)
 
     if processed_fact_ids:
         stats["urls_completed"] = completion_tracker.mark_complete_for_fact_ids(
