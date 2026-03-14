@@ -382,6 +382,18 @@ class EntityExtractor:
                 )
 
                 parsed = self._parse_multi_response(response.output_text, fact_ids)
+
+                # Treat parse failures (e.g., wrong shape / missing fact IDs) as failures
+                # so that the retry loop and circuit breaker behave correctly.
+                if not isinstance(parsed, dict) or any(fid not in parsed for fid in fact_ids):
+                    logger.error(
+                        "Failed to parse multi-extract response into expected shape; "
+                        "treating as failure and retrying."
+                    )
+                    self._record_failure()
+                    # Let the retry loop handle backoff / eventual exhaustion.
+                    continue
+
                 self._record_success()
                 return parsed
 
