@@ -242,6 +242,53 @@ def test_handle_request_raises_become_per_url_errors(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Phase 5: CLI migrated to FactsReader/FactsWriter; storage.py removed
+# ---------------------------------------------------------------------------
+
+
+def test_core_facts_package_no_longer_exports_storage_api():
+    """``core/facts/__init__`` must expose only prompt/parser/filter surface;
+    the old ``storage`` module is fully consolidated into ``core/db/``."""
+    from src.functions.url_content_extraction.core import facts as facts_pkg
+
+    for name in (
+        "store_facts",
+        "fetch_existing_fact_ids",
+        "remove_non_story_facts_from_db",
+        "create_fact_embeddings",
+        "bulk_check_embeddings",
+    ):
+        assert not hasattr(facts_pkg, name), (
+            f"{name} still exported from core/facts — migrate callers to FactsWriter."
+        )
+
+
+def test_storage_module_is_deleted():
+    """The old ``storage`` submodule must be gone so nothing can import it."""
+    import importlib
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(
+            "src.functions.url_content_extraction.core.facts.storage"
+        )
+
+
+def test_extract_facts_cli_uses_facts_writer():
+    """CLI must route through FactsReader/FactsWriter, not the old storage API."""
+    import inspect
+    from src.functions.url_content_extraction.scripts import extract_facts_cli
+
+    source = inspect.getsource(extract_facts_cli)
+    # Must import the unified DB layer.
+    assert "FactsReader" in source and "FactsWriter" in source
+    # Must NOT import removed helpers.
+    for removed in ("store_facts", "fetch_existing_fact_ids", "remove_non_story_facts_from_db"):
+        assert f" {removed}," not in source and f" {removed}\n" not in source, (
+            f"CLI still imports removed helper `{removed}`"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Phase 4: Playwright browser reuse (3.1) + LightExtractor shared client (3.2)
 # ---------------------------------------------------------------------------
 

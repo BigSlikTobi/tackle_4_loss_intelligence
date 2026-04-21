@@ -55,10 +55,8 @@ from src.functions.url_content_extraction.core.facts import (
     FACT_PROMPT_VERSION,
     parse_fact_response,
     filter_story_facts,
-    store_facts,
-    fetch_existing_fact_ids,
-    remove_non_story_facts_from_db,
 )
+from src.functions.url_content_extraction.core.db import FactsReader, FactsWriter
 
 logger = logging.getLogger(__name__)
 
@@ -266,25 +264,26 @@ def extract_facts_from_content(
     Returns:
         List of extracted fact strings
     """
-    import openai
-    
+    from openai import OpenAI
+
     current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     formatted_prompt = FACT_PROMPT.format(current_date=current_date)
-    
+
     # GPT-5-nano is a reasoning model - special parameters
     is_reasoning_model = (
-        "nano" in model or 
-        model.startswith("o1") or 
-        model.startswith("o3")
+        "nano" in model
+        or model.startswith("o1")
+        or model.startswith("o3")
     )
-    
+
     logger.info(f"Calling {model} for fact extraction...")
-    
-    openai.api_key = api_key
-    
+
+    # Request-scoped client instead of mutating `openai.api_key` globally.
+    openai_client = OpenAI(api_key=api_key)
+
     if is_reasoning_model:
         # Reasoning models: no temperature, use max_completion_tokens, reasoning_effort
-        response = openai.chat.completions.create(
+        response = openai_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "user", "content": f"{formatted_prompt}\n\n{content}"}
@@ -294,7 +293,7 @@ def extract_facts_from_content(
         )
     else:
         # Standard models
-        response = openai.chat.completions.create(
+        response = openai_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": formatted_prompt},
@@ -320,140 +319,98 @@ def extract_facts_from_content(
 
 
 def create_fact_embeddings_sync(
-    client,
+    reader: FactsReader,
+    writer: FactsWriter,
     fact_ids: List[str],
     api_key: str,
+    texts_by_id: Optional[Dict[str, str]] = None,
     model: str = DEFAULT_EMBEDDING_MODEL,
-) -> int:
+) -> tuple[int, List[List[float]]]:
     """Create embeddings for facts synchronously.
-    
-    Args:
-        client: Supabase client
-        fact_ids: List of fact IDs
-        api_key: OpenAI API key
-        model: Embedding model
-        
-    Returns:
-        Number of embeddings created
+
+    Uses a request-scoped ``OpenAI`` client instead of mutating
+    ``openai.api_key`` globally. Returns ``(count, vectors)`` so the caller
+    can feed the vectors directly into pooled-embedding creation without
+    re-reading them from the database.
     """
-    import openai
-    
     if not fact_ids:
-        return 0
-    
-    # Fetch fact texts
-    response = (
-        client.table("news_facts")
-        .select("id,fact_text")
-        .in_("id", fact_ids)
-        .execute()
-    )
-    rows = getattr(response, "data", []) or []
-    
-    if not rows:
-        return 0
-    
-    texts = [row.get("fact_text", "") for row in rows]
-    ids = [row.get("id") for row in rows]
-    
-    logger.info(f"Creating embeddings for {len(texts)} facts...")
-    
-    openai.api_key = api_key
-    embed_response = openai.embeddings.create(
+        return 0, []
+
+    from openai import OpenAI
+
+    # Reuse texts from the insert step when possible; fall back to a read.
+    texts: Dict[str, str] = dict(texts_by_id or {})
+    missing = [fid for fid in fact_ids if fid not in texts]
+    if missing:
+        texts.update(reader.fetch_fact_texts(missing))
+
+    ordered = [(fid, texts[fid]) for fid in fact_ids if fid in texts and texts[fid]]
+    if not ordered:
+        return 0, []
+
+    logger.info("Creating embeddings for %d facts...", len(ordered))
+
+    openai_client = OpenAI(api_key=api_key)
+    embed_response = openai_client.embeddings.create(
         model=model,
-        input=texts,
+        input=[text for _fid, text in ordered],
     )
-    
-    records = []
-    for idx, embedding_data in enumerate(embed_response.data):
-        records.append({
-            "news_fact_id": ids[idx],
-            "embedding_vector": embedding_data.embedding,
-            "model_name": model,
-        })
-    
-    if records:
-        client.table("facts_embeddings").insert(records).execute()
-        logger.info(f"Created {len(records)} embeddings")
-        return len(records)
-    
-    return 0
+
+    records: List[Dict[str, Any]] = []
+    kept_vectors: List[List[float]] = []
+    for (fid, _text), embedding_data in zip(ordered, embed_response.data):
+        vector = embedding_data.embedding
+        records.append(
+            {
+                "news_fact_id": fid,
+                "embedding_vector": vector,
+                "model_name": model,
+            }
+        )
+        kept_vectors.append(vector)
+
+    inserted = writer.insert_fact_embeddings(records)
+    if inserted:
+        logger.info("Created %d embeddings", inserted)
+    return inserted, kept_vectors
 
 
 def create_pooled_embedding(
-    client,
+    reader: FactsReader,
+    writer: FactsWriter,
     news_url_id: str,
-    api_key: str,
     model: str = DEFAULT_EMBEDDING_MODEL,
+    *,
+    known_vectors: Optional[List[List[float]]] = None,
 ) -> bool:
     """Create pooled (averaged) embedding for all facts of an article.
-    
-    Args:
-        client: Supabase client
-        news_url_id: News URL ID
-        api_key: OpenAI API key
-        model: Embedding model
-        
-    Returns:
-        True if created successfully
+
+    ``known_vectors`` (optional): vectors freshly generated in the current
+    run. When provided, avoids the ``news_facts`` + ``facts_embeddings``
+    read round-trips.
     """
-    # Check if already exists
-    existing = (
-        client.table("story_embeddings")
-        .select("id")
-        .eq("news_url_id", news_url_id)
-        .eq("embedding_type", "fact_pooled")
-        .limit(1)
-        .execute()
-    )
-    if getattr(existing, "data", []):
+    if reader.pooled_embedding_exists(news_url_id):
         logger.info("Pooled embedding already exists")
         return True
-    
-    # Fetch all fact embeddings
-    fact_ids = fetch_existing_fact_ids(client, news_url_id)
-    if not fact_ids:
-        logger.warning("No facts found for pooling")
-        return False
-    
-    embeddings = []
-    for chunk_start in range(0, len(fact_ids), 200):
-        chunk = fact_ids[chunk_start:chunk_start + 200]
-        response = (
-            client.table("facts_embeddings")
-            .select("embedding_vector")
-            .in_("news_fact_id", chunk)
-            .execute()
-        )
-        rows = getattr(response, "data", []) or []
-        
-        for row in rows:
-            vector = row.get("embedding_vector")
-            if isinstance(vector, str):
-                # Parse string representation
-                vector = [float(x) for x in vector.strip("[]").split(",")]
-            if isinstance(vector, list) and vector:
-                embeddings.append(vector)
-    
-    if not embeddings:
+
+    vectors = list(known_vectors or [])
+    if not vectors:
+        fact_ids = reader.fetch_existing_fact_ids(news_url_id)
+        if not fact_ids:
+            logger.warning("No facts found for pooling")
+            return False
+        vectors = reader.fetch_fact_embeddings(fact_ids)
+
+    if not vectors:
         logger.warning("No fact embeddings found for pooling")
         return False
-    
-    # Average the embeddings
-    dimension = len(embeddings[0])
-    pooled = [sum(e[i] for e in embeddings) / len(embeddings) for i in range(dimension)]
-    
-    # Store pooled embedding
-    client.table("story_embeddings").insert({
-        "news_url_id": news_url_id,
-        "embedding_vector": pooled,
-        "model_name": model,
-        "embedding_type": "fact_pooled",
-        "scope": "article",
-    }).execute()
-    
-    logger.info(f"Created pooled embedding from {len(embeddings)} fact embeddings")
-    return True
+
+    inserted = writer.insert_pooled_embedding(news_url_id, vectors, model)
+    if inserted:
+        logger.info(
+            "Created pooled embedding from %d fact embeddings", len(vectors)
+        )
+    return inserted
 
 
 def calculate_article_difficulty(content: str, facts_count: int) -> str:
@@ -523,51 +480,29 @@ def process_single_article(
     api_key: str,
 ) -> bool:
     """Process a single article for fact extraction.
-    
+
     Returns:
         True if successful
     """
     logger.info(f"Processing article: {url_id}")
     logger.info(f"URL: {article_url}")
-    
+
+    reader = FactsReader(client)
+    writer = FactsWriter(client)
+
     # Check for existing facts
-    existing_facts = fetch_existing_fact_ids(client, url_id)
+    existing_facts = reader.fetch_existing_fact_ids(url_id)
     if existing_facts and not args.force:
         logger.info(f"Article already has {len(existing_facts)} facts. Use --force to re-extract.")
         return True
-    
+
     if existing_facts and args.force:
         logger.info(f"Deleting {len(existing_facts)} existing facts and all downstream data...")
         if not args.dry_run:
-            # Delete in chunks to avoid URL length limits
-            chunk_size = 100
-            for i in range(0, len(existing_facts), chunk_size):
-                chunk = existing_facts[i:i + chunk_size]
-                # Delete all downstream data first (order matters for foreign keys)
-                # 1. Delete fact embeddings
-                client.table("facts_embeddings").delete().in_("news_fact_id", chunk).execute()
-                # 2. Delete entity links
-                client.table("news_fact_entities").delete().in_("news_fact_id", chunk).execute()
-                # 3. Delete topic links
-                client.table("news_fact_topics").delete().in_("news_fact_id", chunk).execute()
-                # 4. Finally delete the facts themselves
-                client.table("news_facts").delete().in_("id", chunk).execute()
-            
-            # Delete story-level data that depends on facts
-            # 5. Delete pooled embeddings (all types for this article)
-            client.table("story_embeddings").delete().eq("news_url_id", url_id).execute()
-            
-            # 6. Reset timestamps and counts so downstream processes know to re-run
-            client.table("news_urls").update({
-                "facts_extracted_at": None,
-                "facts_count": None,
-                "article_difficulty": None,
-                "knowledge_extracted_at": None,  # Knowledge depends on facts
-                "knowledge_error_count": 0,      # Reset error count
-                "summary_created_at": None,      # Summary depends on facts
-            }).eq("id", url_id).execute()
-            
-            logger.info(f"Deleted {len(existing_facts)} facts + embeddings, entities, topics in {(len(existing_facts) + chunk_size - 1) // chunk_size} batches")
+            # Single-call cascade: embeddings → entity links → topic links →
+            # facts → story_embeddings → reset news_urls stage timestamps.
+            deleted = writer.delete_fact_data([url_id])
+            logger.info("Deleted %d facts + downstream data for %s", deleted, url_id)
     
     # Get content
     if args.content_file:
@@ -640,20 +575,37 @@ def process_single_article(
         print(f"\nDRY RUN: Would save {len(filtered_facts)} facts for {url_id}")
         return True
     
-    # Store facts
-    fact_ids = store_facts(client, url_id, filtered_facts, args.model)
-    
+    # Store facts (returns fact_id → fact_text map so embeddings skip a
+    # redundant SELECT against the rows we just wrote).
+    fact_ids, texts_by_id = writer.insert_facts_for_article(
+        url_id, filtered_facts, args.model
+    )
+
     if not fact_ids:
         # Facts may already exist, fetch them
-        fact_ids = fetch_existing_fact_ids(client, url_id)
-    
+        fact_ids = reader.fetch_existing_fact_ids(url_id)
+        texts_by_id = {}
+
     logger.info(f"Stored {len(fact_ids)} facts")
-    
-    # Create embeddings
+
+    # Create embeddings + pooled article embedding (reusing in-memory vectors).
     if not args.no_embeddings and fact_ids:
         try:
-            create_fact_embeddings_sync(client, fact_ids, api_key, args.embedding_model)
-            create_pooled_embedding(client, url_id, api_key, args.embedding_model)
+            _count, fresh_vectors = create_fact_embeddings_sync(
+                reader,
+                writer,
+                fact_ids,
+                api_key,
+                texts_by_id=texts_by_id,
+                model=args.embedding_model,
+            )
+            create_pooled_embedding(
+                reader,
+                writer,
+                url_id,
+                args.embedding_model,
+                known_vectors=fresh_vectors,
+            )
         except Exception as e:
             logger.error(f"Failed to create embeddings: {e}")
     
