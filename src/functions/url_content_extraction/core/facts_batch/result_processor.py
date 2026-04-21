@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from openai import OpenAI
 
 from src.shared.db.connection import get_supabase_client
+from ..db import FactsReader, FactsWriter
 from ..facts.parser import parse_fact_response, extract_json_from_text
 from ..facts.filter import filter_story_facts
 from ..facts.prompts import FACT_PROMPT_VERSION
@@ -76,6 +77,9 @@ class FactsBatchResultProcessor:
         self._openai: Optional[OpenAI] = (
             OpenAI(api_key=embedding_api_key) if embedding_api_key else None
         )
+        # Unified DB layer (single source of truth for facts schema I/O).
+        self._reader = FactsReader(self.client)
+        self._writer = FactsWriter(self.client)
 
     def process(
         self,
@@ -288,176 +292,33 @@ class FactsBatchResultProcessor:
             logger.warning("Failed to extract facts from response: %s", e)
             return []
 
+    # ------------------------------------------------------------------
+    # DB operations — thin wrappers over FactsReader / FactsWriter so the
+    # batch path shares a single source of truth with the realtime path.
+    # ------------------------------------------------------------------
+
     def _check_existing_facts(self, article_ids: List[str]) -> Set[str]:
-        """Check which articles already have facts.
-        
-        Returns:
-            Set of article IDs that have existing facts
-        """
-        existing: Set[str] = set()
-
-        # Page through all matching rows per chunk. The prior `.limit(len(chunk))`
-        # silently truncated if some articles had many existing facts, letting
-        # already-extracted articles re-enter the insert path.
-        page_size = 1000
-        for i in range(0, len(article_ids), self.chunk_size):
-            chunk = article_ids[i:i + self.chunk_size]
-            offset = 0
-            while True:
-                response = (
-                    self.client.table("news_facts")
-                    .select("news_url_id")
-                    .in_("news_url_id", chunk)
-                    .eq("prompt_version", FACT_PROMPT_VERSION)
-                    .range(offset, offset + page_size - 1)
-                    .execute()
-                )
-                rows = getattr(response, "data", []) or []
-                if not rows:
-                    break
-                existing.update(
-                    row.get("news_url_id") for row in rows if row.get("news_url_id")
-                )
-                # Once every article in the chunk is known-existing we can stop.
-                if set(chunk).issubset(existing):
-                    break
-                if len(rows) < page_size:
-                    break
-                offset += page_size
-
-        return existing
+        return self._reader.check_existing_facts(
+            article_ids, chunk_size=self.chunk_size
+        )
 
     def _bulk_delete_existing_data(self, article_ids: List[str]) -> None:
-        """Delete all existing facts and downstream data for articles.
-        
-        This is used for force re-extraction mode.
-        """
-        # First get all fact IDs for these articles
-        all_fact_ids: List[str] = []
-        
-        for i in range(0, len(article_ids), self.chunk_size):
-            chunk = article_ids[i:i + self.chunk_size]
-            response = (
-                self.client.table("news_facts")
-                .select("id")
-                .in_("news_url_id", chunk)
-                .execute()
+        deleted = self._writer.delete_fact_data(
+            article_ids, chunk_size=self.chunk_size
+        )
+        if deleted:
+            logger.info(
+                "Deleted %d facts from %d articles", deleted, len(article_ids)
             )
-            rows = getattr(response, "data", []) or []
-            all_fact_ids.extend(row.get("id") for row in rows if row.get("id"))
-        
-        if not all_fact_ids:
-            logger.debug("No existing facts to delete")
-            return
-        
-        logger.info(f"Deleting {len(all_fact_ids)} existing facts and downstream data...")
-        
-        # Delete in chunks to avoid URL length limits
-        for i in range(0, len(all_fact_ids), self.chunk_size):
-            chunk = all_fact_ids[i:i + self.chunk_size]
-            # 1. Delete fact embeddings
-            self.client.table("facts_embeddings").delete().in_("news_fact_id", chunk).execute()
-            # 2. Delete entity links
-            self.client.table("news_fact_entities").delete().in_("news_fact_id", chunk).execute()
-            # 3. Delete topic links
-            self.client.table("news_fact_topics").delete().in_("news_fact_id", chunk).execute()
-            # 4. Delete the facts themselves
-            self.client.table("news_facts").delete().in_("id", chunk).execute()
-        
-        # Delete story-level embeddings for these articles
-        for i in range(0, len(article_ids), self.chunk_size):
-            chunk = article_ids[i:i + self.chunk_size]
-            self.client.table("story_embeddings").delete().in_("news_url_id", chunk).execute()
-        
-        # Reset timestamps on news_urls
-        for i in range(0, len(article_ids), self.chunk_size):
-            chunk = article_ids[i:i + self.chunk_size]
-            self.client.table("news_urls").update({
-                "facts_extracted_at": None,
-                "facts_count": None,
-                "article_difficulty": None,
-                "knowledge_extracted_at": None,
-                "knowledge_error_count": 0,
-                "summary_created_at": None,
-            }).in_("id", chunk).execute()
-        
-        logger.info(f"Deleted {len(all_fact_ids)} facts from {len(article_ids)} articles")
 
     def _bulk_insert_facts(
         self,
         facts_by_article: Dict[str, List[str]],
         model: str,
     ) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
-        """Bulk insert facts for all articles.
-
-        Returns:
-            ``(result_ids, texts_by_id)`` where ``result_ids`` maps article_id
-            to the list of created fact IDs, and ``texts_by_id`` maps each
-            created fact ID back to its fact_text. The text map lets downstream
-            stages (embeddings, pooling) skip a redundant ``SELECT`` against
-            the rows we just wrote.
-        """
-        # Build all records with tracking
-        all_records = []
-        record_to_article: List[str] = []
-        record_texts: List[str] = []
-
-        for article_id, facts in facts_by_article.items():
-            for fact in facts:
-                all_records.append({
-                    "news_url_id": article_id,
-                    "fact_text": fact,
-                    "llm_model": model,
-                    "prompt_version": FACT_PROMPT_VERSION,
-                })
-                record_to_article.append(article_id)
-                record_texts.append(fact)
-
-        if not all_records:
-            return {}, {}
-
-        # Insert in chunks
-        result_ids: Dict[str, List[str]] = {aid: [] for aid in facts_by_article}
-        texts_by_id: Dict[str, str] = {}
-        record_idx = 0
-
-        for i in range(0, len(all_records), self.chunk_size):
-            chunk = all_records[i:i + self.chunk_size]
-            try:
-                response = self.client.table("news_facts").insert(chunk).execute()
-                data = getattr(response, "data", []) or []
-
-                # PostgREST insert returns one row per inserted record in input
-                # order. If the count diverges we cannot safely attribute IDs to
-                # articles — skip mapping this chunk rather than corrupt the
-                # downstream result map.
-                if len(data) != len(chunk):
-                    logger.error(
-                        "Insert returned %d rows for chunk of %d; skipping ID "
-                        "attribution for this chunk to avoid desync",
-                        len(data),
-                        len(chunk),
-                    )
-                else:
-                    for offset, row in enumerate(data):
-                        if isinstance(row, dict) and row.get("id"):
-                            article_id = record_to_article[record_idx + offset]
-                            result_ids[article_id].append(row["id"])
-                            texts_by_id[row["id"]] = record_texts[record_idx + offset]
-
-                record_idx += len(chunk)
-
-                logger.debug(
-                    "Inserted facts batch %d/%d",
-                    i // self.chunk_size + 1,
-                    (len(all_records) + self.chunk_size - 1) // self.chunk_size,
-                )
-
-            except Exception as e:
-                logger.error("Failed to insert facts batch: %s", e)
-                record_idx += len(chunk)
-
-        return result_ids, texts_by_id
+        return self._writer.insert_facts(
+            facts_by_article, model, chunk_size=self.chunk_size
+        )
 
     def _bulk_create_embeddings(
         self,
@@ -465,118 +326,54 @@ class FactsBatchResultProcessor:
         *,
         texts_by_id: Optional[Dict[str, str]] = None,
     ) -> int:
-        """Create embeddings for facts in bulk.
+        """Generate embeddings for ``fact_ids`` and persist them.
 
-        ``texts_by_id`` (optional): text already known from the insert step.
-        When provided, skips the ``SELECT fact_text`` round-trip. Missing
-        entries are filled by a fallback fetch so legacy callers keep working.
+        ``texts_by_id`` (optional) avoids a ``SELECT`` against rows we just
+        inserted; missing entries are filled via ``FactsReader`` so legacy
+        callers continue to work.
         """
-        texts: Dict[str, str] = dict(texts_by_id or {})
-
-        missing = [fid for fid in fact_ids if fid not in texts]
-        for i in range(0, len(missing), self.chunk_size):
-            chunk = missing[i:i + self.chunk_size]
-            response = (
-                self.client.table("news_facts")
-                .select("id,fact_text")
-                .in_("id", chunk)
-                .execute()
-            )
-            rows = getattr(response, "data", []) or []
-            for row in rows:
-                if row.get("id") and row.get("fact_text"):
-                    texts[row["id"]] = row["fact_text"]
-
-        texts_by_id = {fid: texts[fid] for fid in fact_ids if fid in texts}
-        if not texts_by_id:
-            return 0
-
-        # Generate embeddings in batches
-        total_created = 0
-        ids_list = list(texts_by_id.keys())
-        
         if self._openai is None:
             logger.error(
                 "Embedding creation requested but no embedding_api_key was provided"
             )
             return 0
 
-        for i in range(0, len(ids_list), self.chunk_size):
-            chunk_ids = ids_list[i:i + self.chunk_size]
-            chunk_texts = [texts_by_id[fid] for fid in chunk_ids]
+        texts: Dict[str, str] = dict(texts_by_id or {})
+        missing = [fid for fid in fact_ids if fid not in texts]
+        if missing:
+            texts.update(
+                self._reader.fetch_fact_texts(missing, chunk_size=self.chunk_size)
+            )
 
+        ordered_ids = [fid for fid in fact_ids if fid in texts]
+        if not ordered_ids:
+            return 0
+
+        records: List[Dict[str, Any]] = []
+        for i in range(0, len(ordered_ids), self.chunk_size):
+            chunk_ids = ordered_ids[i : i + self.chunk_size]
+            chunk_texts = [texts[fid] for fid in chunk_ids]
             try:
                 embed_response = self._openai.embeddings.create(
                     model=self.embedding_model,
                     input=chunk_texts,
                 )
-
-                records = []
                 for idx, embedding_data in enumerate(embed_response.data):
-                    records.append({
-                        "news_fact_id": chunk_ids[idx],
-                        "embedding_vector": embedding_data.embedding,
-                        "model_name": self.embedding_model,
-                    })
+                    records.append(
+                        {
+                            "news_fact_id": chunk_ids[idx],
+                            "embedding_vector": embedding_data.embedding,
+                            "model_name": self.embedding_model,
+                        }
+                    )
+            except Exception as exc:
+                logger.error("Failed to create embeddings batch: %s", exc)
 
-                if records:
-                    self.client.table("facts_embeddings").insert(records).execute()
-                    total_created += len(records)
-
-            except Exception as e:
-                logger.error("Failed to create embeddings batch: %s", e)
-
-        return total_created
+        return self._writer.insert_fact_embeddings(
+            records, chunk_size=self.chunk_size
+        )
 
     def _bulk_mark_completed(self, facts_by_article: Dict[str, List[str]]) -> None:
-        """Mark articles as having facts extracted and update stats.
-
-        Updates facts_extracted_at, facts_count, and article_difficulty. To
-        avoid N sequential UPDATEs (~50-100ms each → 25-50s for a 500-batch)
-        we bucket articles by (difficulty, facts_count) and emit one UPDATE
-        per bucket via ``in_("id", [...])``. ``facts_count`` collapses into
-        relatively few buckets per batch (usually < 30), so this reduces DB
-        round-trips by ~10-100x for typical inputs.
-        """
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        buckets: Dict[Tuple[int, str], List[str]] = {}
-        for article_id, facts in facts_by_article.items():
-            facts_count = len(facts)
-            difficulty = self._calculate_difficulty_from_facts(facts_count)
-            buckets.setdefault((facts_count, difficulty), []).append(article_id)
-
-        for (facts_count, difficulty), article_ids in buckets.items():
-            # Split into chunks to respect PostgREST URL length limits.
-            for i in range(0, len(article_ids), self.chunk_size):
-                chunk = article_ids[i:i + self.chunk_size]
-                try:
-                    self.client.table("news_urls").update({
-                        "facts_extracted_at": now_iso,
-                        "facts_count": facts_count,
-                        "article_difficulty": difficulty,
-                    }).in_("id", chunk).execute()
-                except Exception as e:
-                    logger.error(
-                        "Failed to mark facts_extracted_at for bucket "
-                        "(count=%d, difficulty=%s, %d articles): %s",
-                        facts_count,
-                        difficulty,
-                        len(chunk),
-                        e,
-                    )
-
-    def _calculate_difficulty_from_facts(self, facts_count: int) -> str:
-        """Calculate article difficulty based on facts count.
-        
-        Simple heuristic when content is not available:
-        - < 10 facts: easy
-        - 10-30 facts: medium  
-        - > 30 facts: hard
-        """
-        if facts_count < 10:
-            return "easy"
-        elif facts_count <= 30:
-            return "medium"
-        else:
-            return "hard"
+        self._writer.mark_facts_extracted(
+            facts_by_article, chunk_size=self.chunk_size
+        )
