@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from openai import OpenAI
 
@@ -167,8 +167,11 @@ class FactsBatchResultProcessor:
             result.facts_written = sum(len(f) for f in facts_by_article.values())
             return result
 
-        # Phase 4: Bulk insert facts
-        fact_ids_by_article = self._bulk_insert_facts(facts_by_article, model)
+        # Phase 4: Bulk insert facts (returns text map so embeddings can skip
+        # a redundant SELECT against the rows we just wrote).
+        fact_ids_by_article, texts_by_id = self._bulk_insert_facts(
+            facts_by_article, model
+        )
         result.articles_processed = len(fact_ids_by_article)
         result.facts_written = sum(len(ids) for ids in fact_ids_by_article.values())
 
@@ -178,7 +181,9 @@ class FactsBatchResultProcessor:
                 fid for ids in fact_ids_by_article.values() for fid in ids
             ]
             if all_fact_ids:
-                result.embeddings_created = self._bulk_create_embeddings(all_fact_ids)
+                result.embeddings_created = self._bulk_create_embeddings(
+                    all_fact_ids, texts_by_id=texts_by_id
+                )
 
         # Phase 6: Mark facts_extracted_at and update stats
         if fact_ids_by_article:
@@ -382,15 +387,20 @@ class FactsBatchResultProcessor:
         self,
         facts_by_article: Dict[str, List[str]],
         model: str,
-    ) -> Dict[str, List[str]]:
+    ) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
         """Bulk insert facts for all articles.
-        
+
         Returns:
-            Dict mapping article_id to list of created fact IDs
+            ``(result_ids, texts_by_id)`` where ``result_ids`` maps article_id
+            to the list of created fact IDs, and ``texts_by_id`` maps each
+            created fact ID back to its fact_text. The text map lets downstream
+            stages (embeddings, pooling) skip a redundant ``SELECT`` against
+            the rows we just wrote.
         """
         # Build all records with tracking
         all_records = []
         record_to_article: List[str] = []
+        record_texts: List[str] = []
 
         for article_id, facts in facts_by_article.items():
             for fact in facts:
@@ -401,12 +411,14 @@ class FactsBatchResultProcessor:
                     "prompt_version": FACT_PROMPT_VERSION,
                 })
                 record_to_article.append(article_id)
+                record_texts.append(fact)
 
         if not all_records:
-            return {}
+            return {}, {}
 
         # Insert in chunks
         result_ids: Dict[str, List[str]] = {aid: [] for aid in facts_by_article}
+        texts_by_id: Dict[str, str] = {}
         record_idx = 0
 
         for i in range(0, len(all_records), self.chunk_size):
@@ -431,6 +443,7 @@ class FactsBatchResultProcessor:
                         if isinstance(row, dict) and row.get("id"):
                             article_id = record_to_article[record_idx + offset]
                             result_ids[article_id].append(row["id"])
+                            texts_by_id[row["id"]] = record_texts[record_idx + offset]
 
                 record_idx += len(chunk)
 
@@ -444,19 +457,25 @@ class FactsBatchResultProcessor:
                 logger.error("Failed to insert facts batch: %s", e)
                 record_idx += len(chunk)
 
-        return result_ids
+        return result_ids, texts_by_id
 
-    def _bulk_create_embeddings(self, fact_ids: List[str]) -> int:
+    def _bulk_create_embeddings(
+        self,
+        fact_ids: List[str],
+        *,
+        texts_by_id: Optional[Dict[str, str]] = None,
+    ) -> int:
         """Create embeddings for facts in bulk.
-        
-        Returns:
-            Number of embeddings created
-        """
-        # Fetch fact texts
-        texts_by_id: Dict[str, str] = {}
 
-        for i in range(0, len(fact_ids), self.chunk_size):
-            chunk = fact_ids[i:i + self.chunk_size]
+        ``texts_by_id`` (optional): text already known from the insert step.
+        When provided, skips the ``SELECT fact_text`` round-trip. Missing
+        entries are filled by a fallback fetch so legacy callers keep working.
+        """
+        texts: Dict[str, str] = dict(texts_by_id or {})
+
+        missing = [fid for fid in fact_ids if fid not in texts]
+        for i in range(0, len(missing), self.chunk_size):
+            chunk = missing[i:i + self.chunk_size]
             response = (
                 self.client.table("news_facts")
                 .select("id,fact_text")
@@ -466,8 +485,9 @@ class FactsBatchResultProcessor:
             rows = getattr(response, "data", []) or []
             for row in rows:
                 if row.get("id") and row.get("fact_text"):
-                    texts_by_id[row["id"]] = row["fact_text"]
+                    texts[row["id"]] = row["fact_text"]
 
+        texts_by_id = {fid: texts[fid] for fid in fact_ids if fid in texts}
         if not texts_by_id:
             return 0
 
@@ -510,24 +530,41 @@ class FactsBatchResultProcessor:
 
     def _bulk_mark_completed(self, facts_by_article: Dict[str, List[str]]) -> None:
         """Mark articles as having facts extracted and update stats.
-        
-        Updates facts_extracted_at, facts_count, and article_difficulty.
+
+        Updates facts_extracted_at, facts_count, and article_difficulty. To
+        avoid N sequential UPDATEs (~50-100ms each → 25-50s for a 500-batch)
+        we bucket articles by (difficulty, facts_count) and emit one UPDATE
+        per bucket via ``in_("id", [...])``. ``facts_count`` collapses into
+        relatively few buckets per batch (usually < 30), so this reduces DB
+        round-trips by ~10-100x for typical inputs.
         """
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Update each article with its specific stats
+        buckets: Dict[Tuple[int, str], List[str]] = {}
         for article_id, facts in facts_by_article.items():
             facts_count = len(facts)
             difficulty = self._calculate_difficulty_from_facts(facts_count)
-            
-            try:
-                self.client.table("news_urls").update({
-                    "facts_extracted_at": now_iso,
-                    "facts_count": facts_count,
-                    "article_difficulty": difficulty,
-                }).eq("id", article_id).execute()
-            except Exception as e:
-                logger.error("Failed to mark facts_extracted_at for %s: %s", article_id, e)
+            buckets.setdefault((facts_count, difficulty), []).append(article_id)
+
+        for (facts_count, difficulty), article_ids in buckets.items():
+            # Split into chunks to respect PostgREST URL length limits.
+            for i in range(0, len(article_ids), self.chunk_size):
+                chunk = article_ids[i:i + self.chunk_size]
+                try:
+                    self.client.table("news_urls").update({
+                        "facts_extracted_at": now_iso,
+                        "facts_count": facts_count,
+                        "article_difficulty": difficulty,
+                    }).in_("id", chunk).execute()
+                except Exception as e:
+                    logger.error(
+                        "Failed to mark facts_extracted_at for bucket "
+                        "(count=%d, difficulty=%s, %d articles): %s",
+                        facts_count,
+                        difficulty,
+                        len(chunk),
+                        e,
+                    )
 
     def _calculate_difficulty_from_facts(self, facts_count: int) -> str:
         """Calculate article difficulty based on facts count.

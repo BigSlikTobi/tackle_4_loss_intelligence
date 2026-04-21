@@ -36,6 +36,20 @@ def find_amp_alternate(html: str, base_url: str) -> str | None:
     return None
 
 
+def _parse_amp_link_header(link_header: str, base_url: str) -> Optional[str]:
+    """Extract the AMP target from an RFC 5988 ``Link`` header, if present."""
+    # Example: '<https://example.com/page?amp>; rel="amphtml"'
+    for part in link_header.split(","):
+        part = part.strip()
+        if 'rel="amphtml"' not in part and "rel=amphtml" not in part:
+            continue
+        if "<" in part and ">" in part:
+            href = part[part.index("<") + 1 : part.index(">")].strip()
+            if href:
+                return urljoin(base_url, href)
+    return None
+
+
 def probe_for_amp(
     url: str,
     *,
@@ -45,18 +59,34 @@ def probe_for_amp(
 ) -> Tuple[str, bool]:
     """Return an AMP variant for ``url`` when one is available.
 
-    The function performs a lightweight HTTP request to discover ``<link rel="amphtml">``
-    references and returns the resolved AMP URL if present. Any network failures are
-    swallowed and treated as "no AMP" so callers can safely fall back to their normal
-    extraction escalation chain.
+    Tries a HEAD request first and parses the ``Link: rel="amphtml"`` header.
+    Only falls back to a full GET (with HTML parsing) when HEAD doesn't
+    surface an AMP advertisement. Any network failure is swallowed.
     """
 
     if is_amp_url(url):
         return url, True
 
+    request_headers = {**_DEFAULT_HEADERS, **(headers or {})}
     try:
-        request_headers = {**_DEFAULT_HEADERS, **(headers or {})}
         with httpx.Client(headers=request_headers, follow_redirects=True, timeout=timeout) as client:
+            try:
+                head = client.head(url)
+                link_header = head.headers.get("Link") or head.headers.get("link")
+                if link_header:
+                    amp_candidate = _parse_amp_link_header(link_header, str(head.url))
+                    if amp_candidate:
+                        if logger:
+                            logger.debug(
+                                "AMP variant discovered via HEAD Link: %s -> %s",
+                                url,
+                                amp_candidate,
+                            )
+                        return amp_candidate, True
+            except httpx.HTTPError:
+                # HEAD can fail on sites that reject the method; fall through to GET.
+                pass
+
             response = client.get(url)
             response.raise_for_status()
             amp_candidate = find_amp_alternate(response.text, str(response.url))

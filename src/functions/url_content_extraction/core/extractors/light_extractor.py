@@ -121,9 +121,24 @@ class LightExtractor:
             content.error = content.error or "Insufficient content extracted by light strategy"
             return content
 
+        # Before paying the Playwright cost, try the richer selector set from
+        # PlaywrightExtractor._parse_html against the HTML we already have.
+        # Many sites have article content in markup we simply didn't target in
+        # the first pass; re-parsing is nearly free.
         from .playwright_extractor import PlaywrightExtractor  # Local import to avoid circular dependency
 
-        return PlaywrightExtractor(logger=self._logger).extract(
+        pw = PlaywrightExtractor(logger=self._logger)
+        reparsed = pw._parse_html(html, target_url)  # noqa: SLF001 - intentional reuse
+        if reparsed.paragraphs:
+            reparsed.metadata = content.metadata
+            reparsed = enrich_metadata(reparsed, html=html, extractor_name="light")
+            reparsed = deduplicate_paragraphs(reparsed)
+            reparsed = clean_content(reparsed)
+            reparsed.trim(max_paragraphs=options.max_paragraphs)
+            if reparsed.is_valid(min_paragraphs=1):
+                return reparsed
+
+        return pw.extract(
             url=str(options.url),
             options=options.model_dump(),
         )
