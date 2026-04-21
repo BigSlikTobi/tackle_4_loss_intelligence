@@ -7,11 +7,10 @@ Optimized for production with concurrent processing and comprehensive monitoring
 
 from __future__ import annotations
 
-import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 import logging
 
 from ..config import load_feed_config, FeedConfig
@@ -22,6 +21,7 @@ from ..data.transformers import NewsTransformer
 from ..db import NewsUrlWriter
 from ..db.watermarks import NewsSourceWatermarkStore
 from ..utils import HttpClient
+from ..utils.dates import ensure_utc
 from ..monitoring import PerformanceMonitor
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,9 @@ class NewsExtractionPipeline:
         config: Optional[FeedConfig] = None,
         config_path: Optional[str] = None,
         writer: Optional[NewsUrlWriter] = None,
-        max_workers: int = 4,
+        watermark_store: Optional[NewsSourceWatermarkStore] = None,
+        http_client: Optional[HttpClient] = None,
+        max_workers: Optional[int] = None,
     ):
         """
         Initialize extraction pipeline.
@@ -48,15 +50,52 @@ class NewsExtractionPipeline:
         Args:
             config: Pre-loaded FeedConfig (optional)
             config_path: Path to feeds.yaml (used if config not provided)
-            writer: Optional NewsUrlWriter (for testing or dry-run mode)
-            max_workers: Maximum concurrent workers for source extraction
+            writer: Optional NewsUrlWriter (for testing, dry-run, or request-
+                scoped credentials)
+            watermark_store: Optional NewsSourceWatermarkStore (for testing or
+                request-scoped credentials)
+            http_client: Optional pre-built HttpClient. When omitted, one is
+                constructed from the config and shared across all sources — this
+                gives cross-source connection pooling, cache reuse, and correct
+                rate-limit behavior for sources that share a host.
+            max_workers: Override for the config's max_workers setting.
         """
         self.config = config or load_feed_config(config_path)
-        self.processor = UrlProcessor()
         self.transformer = NewsTransformer()
-        self.writer = writer  # Will be lazily initialized if needed
-        self.max_workers = max_workers
-        self.watermarks = NewsSourceWatermarkStore()
+        self.writer = writer  # Lazily initialized on first real write.
+        self.watermarks = watermark_store or NewsSourceWatermarkStore()
+
+        resolved_workers = max_workers if max_workers is not None else getattr(
+            self.config, "max_workers", 4
+        )
+        self.max_workers = resolved_workers
+
+        self._owns_http_client = http_client is None
+        if http_client is not None:
+            self.http_client = http_client
+        else:
+            self.http_client = HttpClient(
+                user_agent=self.config.user_agent,
+                timeout=self.config.timeout_seconds,
+                max_requests_per_minute=getattr(
+                    self.config, "max_requests_per_minute_per_source", 60
+                ),
+            )
+
+    def close(self) -> None:
+        """Release resources held by the pipeline (HTTP session)."""
+        if self._owns_http_client and self.http_client is not None:
+            try:
+                self.http_client.close()
+            except Exception:  # defensive; close() already swallows its own errors
+                logger.debug("HttpClient close raised", exc_info=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     def extract(
         self,
@@ -66,24 +105,10 @@ class NewsExtractionPipeline:
         dry_run: bool = False,
         clear: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Run the complete extraction pipeline.
-
-        Args:
-            source_filter: Optional filter for source names (substring match)
-            days_back: Override days_back filter from config
-            max_articles: Override max_articles from config
-            dry_run: Simulate without writing to database
-            clear: Clear existing records before writing
-
-        Returns:
-            Dictionary with extraction results and comprehensive metrics
-        """
-        # Initialize performance monitoring
+        """Run the complete extraction pipeline."""
         monitor = PerformanceMonitor()
         logger.info("Starting news extraction pipeline")
 
-        # Get enabled sources
         sources = self.config.get_enabled_sources(source_filter)
 
         if not sources:
@@ -98,11 +123,9 @@ class NewsExtractionPipeline:
 
         logger.info(f"Processing {len(sources)} sources")
 
-        # Initialize writer only when needed (not for dry-run without credentials)
         if not dry_run and self.writer is None:
             self.writer = NewsUrlWriter()
 
-        # Clear existing data if requested
         if clear:
             if dry_run:
                 logger.info("[DRY RUN] Would clear existing data")
@@ -115,66 +138,60 @@ class NewsExtractionPipeline:
                         "error": "Failed to clear existing data",
                     }
 
-        # Extract from all sources concurrently
         with monitor.time_operation("source_extraction"):
             extraction_results = self._extract_sources_concurrent(
                 sources, days_back, max_articles
             )
 
-        # Load existing watermarks to avoid reprocessing stale items
         source_watermarks = self.watermarks.fetch_watermarks()
 
-        # Compile all items and record metrics
+        # Compile items, filter by watermark, and remember which source each
+        # item came from so we can advance watermarks only for sources that
+        # actually contribute a surviving record.
         all_items: List[NewsItem] = []
-        new_watermarks: Dict[str, datetime] = {}
-        
+        item_source_by_url: Dict[str, str] = {}
+        filtered_by_source: Dict[str, List[NewsItem]] = {}
+
         for source_name, result in extraction_results.items():
             filtered_items: List[NewsItem] = []
-
             if result["success"]:
                 filtered_items = self._filter_items_by_watermark(
                     result["items"],
-                    source_watermarks.get(source_name)
+                    source_watermarks.get(source_name),
                 )
-
-                if filtered_items:
-                    latest_date = self._get_latest_published_date(filtered_items)
-                    if latest_date:
-                        new_watermarks[source_name] = max(
-                            latest_date,
-                            new_watermarks.get(source_name, latest_date)
-                        )
+                for item in filtered_items:
+                    item_source_by_url.setdefault(item.url, source_name)
                 all_items.extend(filtered_items)
+            filtered_by_source[source_name] = filtered_items
 
             monitor.record_source_result(
                 source_name=source_name,
                 success=result["success"],
                 items_count=len(filtered_items) if result["success"] else 0,
-                error=result.get("error") if not result["success"] else None
+                error=result.get("error") if not result["success"] else None,
             )
 
         logger.info(f"Total items extracted: {len(all_items)}")
 
-        # Process items (deduplicate, validate, filter)
+        # Process items (dedup / validate / filter). UrlProcessor uses local
+        # state internally so repeated calls don't leak "seen" URLs.
+        processor = UrlProcessor()
         with monitor.time_operation("item_processing"):
-            processed_items = self.processor.process(
+            processed_items = processor.process(
                 all_items,
                 deduplicate=True,
                 days_back=days_back,
-                nfl_only=None,  # Use per-source nfl_only setting
+                nfl_only=None,
             )
 
-        # Record processing metrics
         items_filtered = len(all_items) - len(processed_items)
         monitor.record_processing_result(len(processed_items), items_filtered)
 
-        # Transform to database records
         with monitor.time_operation("data_transformation"):
             records = self.transformer.transform(processed_items)
 
         logger.info(f"Records to write: {len(records)}")
 
-        # Write to database
         if dry_run:
             write_result = {"success": True, "dry_run": True, "records_written": len(records)}
             logger.info("[DRY RUN] Skipping database write")
@@ -182,19 +199,35 @@ class NewsExtractionPipeline:
             with monitor.time_operation("database_write"):
                 write_result = self.writer.write(records, dry_run=False)
         else:
-            # Should not happen, but handle gracefully
             write_result = {"success": False, "error": "Writer not initialized"}
 
-        # Record database metrics
         monitor.record_database_result(write_result)
 
-        if write_result.get("success") and write_result.get("new_records", 0) > 0 and new_watermarks:
+        # Advance watermarks only for sources that actually had a record survive
+        # dedup/validation. Prior logic advanced watermarks based on extracted
+        # items even when every one of them was later dropped, which could
+        # permanently skip that source's backlog.
+        processed_sources = {
+            item_source_by_url.get(item.url)
+            for item in processed_items
+            if item_source_by_url.get(item.url)
+        }
+        new_watermarks: Dict[str, datetime] = {}
+        for source_name in processed_sources:
+            source_items = [
+                item
+                for item in processed_items
+                if item_source_by_url.get(item.url) == source_name
+            ]
+            latest = self._get_latest_published_date(source_items)
+            if latest is not None:
+                new_watermarks[source_name] = latest
+
+        if write_result.get("success") and not dry_run and new_watermarks:
             self.watermarks.update_watermarks(new_watermarks)
 
-        # Finish monitoring and get final metrics
         final_metrics = monitor.finish_extraction()
 
-        # Compile results with enhanced metrics
         result = {
             "success": write_result["success"],
             "sources_processed": len(sources),
@@ -216,8 +249,8 @@ class NewsExtractionPipeline:
                     "item_processing": monitor.get_operation_timing("item_processing"),
                     "data_transformation": monitor.get_operation_timing("data_transformation"),
                     "database_write": monitor.get_operation_timing("database_write"),
-                }
-            }
+                },
+            },
         }
 
         if dry_run:
@@ -229,133 +262,100 @@ class NewsExtractionPipeline:
         return result
 
     @staticmethod
-    def _filter_items_by_watermark(items: List[NewsItem], watermark: Optional[datetime]) -> List[NewsItem]:
+    def _filter_items_by_watermark(
+        items: List[NewsItem], watermark: Optional[datetime]
+    ) -> List[NewsItem]:
         """Filter items that are older than the stored watermark."""
         if not watermark:
             return items
 
+        watermark_utc = ensure_utc(watermark)
         filtered: List[NewsItem] = []
         for item in items:
-            published = item.published_date
-            if not published:
-                filtered.append(item)
-                continue
-
-            if published.replace(tzinfo=None) > watermark.replace(tzinfo=None):
+            published = ensure_utc(item.published_date)
+            if not published or published > watermark_utc:
                 filtered.append(item)
 
         if len(filtered) != len(items):
             logger.info(
                 "Filtered %d items older than watermark %s",
                 len(items) - len(filtered),
-                watermark.isoformat(),
+                watermark_utc.isoformat(),
             )
 
         return filtered
 
     @staticmethod
     def _get_latest_published_date(items: List[NewsItem]) -> Optional[datetime]:
-        dates = [item.published_date for item in items if item.published_date]
+        dates = [ensure_utc(item.published_date) for item in items if item.published_date]
+        dates = [d for d in dates if d is not None]
         if not dates:
             return None
-        # Normalize by dropping tzinfo for comparison consistency
-        latest = max(date.replace(tzinfo=None) for date in dates)
-        return latest
+        return max(dates)
 
     def _extract_sources_concurrent(
-        self, 
-        sources: List[Any], 
-        days_back: Optional[int], 
-        max_articles: Optional[int]
+        self,
+        sources: List[Any],
+        days_back: Optional[int],
+        max_articles: Optional[int],
     ) -> Dict[str, Dict[str, Any]]:
-        """
-        Extract from multiple sources concurrently.
+        """Extract from multiple sources concurrently."""
+        results: Dict[str, Dict[str, Any]] = {}
 
-        Args:
-            sources: List of source configurations
-            days_back: Days back filter
-            max_articles: Max articles filter
+        # Don't spin up idle threads when there are fewer sources than workers.
+        workers = max(1, min(self.max_workers, len(sources)))
 
-        Returns:
-            Dictionary mapping source names to extraction results
-        """
-        results = {}
-        
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all extraction tasks
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_source = {
                 executor.submit(
-                    self._extract_single_source, 
-                    source, 
-                    days_back, 
-                    max_articles
+                    self._extract_single_source,
+                    source,
+                    days_back,
+                    max_articles,
                 ): source
                 for source in sources
             }
-            
-            # Collect results as they complete
+
             for future in as_completed(future_to_source):
                 source = future_to_source[future]
                 try:
-                    source_result = future.result()
-                    results[source.name] = source_result
+                    results[source.name] = future.result()
                 except Exception as e:
                     logger.error(f"Unexpected error processing {source.name}: {e}")
                     results[source.name] = {
                         "success": False,
                         "error": str(e),
-                        "items": []
+                        "items": [],
                     }
-        
+
         return results
 
     def _extract_single_source(
-        self, 
-        source: Any, 
-        days_back: Optional[int], 
-        max_articles: Optional[int]
+        self,
+        source: Any,
+        days_back: Optional[int],
+        max_articles: Optional[int],
     ) -> Dict[str, Any]:
-        """
-        Extract from a single source.
-
-        Args:
-            source: Source configuration
-            days_back: Days back filter
-            max_articles: Max articles filter
-
-        Returns:
-            Dictionary with extraction result
-        """
+        """Extract from a single source using the shared HTTP client."""
         try:
-            with HttpClient(
-                user_agent=self.config.user_agent,
-                timeout=self.config.timeout_seconds,
-                max_requests_per_minute=self.config.max_parallel_fetches,
-            ) as http_client:
-                
-                # Get appropriate extractor
-                extractor = get_extractor(source.type, http_client)
-                
-                # Prepare extraction arguments
-                kwargs = {}
-                if days_back:
-                    kwargs["days_back"] = days_back
-                if max_articles:
-                    kwargs["max_articles"] = max_articles
-                
-                # Extract items
-                items = extractor.extract(source, **kwargs)
-                
-                return {
-                    "success": True,
-                    "items": items,
-                    "count": len(items)
-                }
-                
+            extractor = get_extractor(source.type, self.http_client)
+
+            kwargs: Dict[str, Any] = {}
+            if days_back:
+                kwargs["days_back"] = days_back
+            if max_articles:
+                kwargs["max_articles"] = max_articles
+
+            items = extractor.extract(source, **kwargs)
+            return {
+                "success": True,
+                "items": items,
+                "count": len(items),
+            }
         except Exception as e:
             logger.error(f"Error extracting from {source.name}: {e}")
             return {
                 "success": False,
                 "error": str(e),
-                "items": []
+                "items": [],
             }

@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.functions.news_extraction.core.pipelines import NewsExtractionPipeline
+from src.shared.utils.logging import setup_logging
 
 # Global flag for graceful shutdown
 shutdown_requested = False
@@ -136,18 +137,8 @@ def setup_cli_parser() -> argparse.ArgumentParser:
 
 def setup_logging_from_args(args: argparse.Namespace) -> None:
     """Configure logging based on CLI arguments."""
-    import logging
-
-    if args.verbose:
-        log_level = "DEBUG"
-    else:
-        log_level = args.log_level
-
-    # Configure root logger
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    log_level = "DEBUG" if args.verbose else args.log_level
+    setup_logging(level=log_level)
 
 
 def print_results(result: dict, pretty: bool = False) -> None:
@@ -163,29 +154,29 @@ def print_results(result: dict, pretty: bool = False) -> None:
     print("=" * 60)
 
     if not result.get("success"):
-        print(f"❌ FAILED: {result.get('error', 'Unknown error')}")
+        print(f"FAILED: {result.get('error', 'Unknown error')}")
         return
 
-    print(f"✅ SUCCESS")
+    print("SUCCESS")
     print(f"\nSources processed: {result.get('sources_processed', 0)}")
     print(f"Items extracted:   {result.get('items_extracted', 0)}")
     print(f"Items filtered:    {result.get('items_filtered', 0)}")
     print(f"Records to write:  {result.get('total_records', result.get('records_written', 0))}")
-    
+
     # Show deduplication statistics
     new_records = result.get('new_records', 0)
     skipped_records = result.get('skipped_records', 0)
-    
+
     if new_records > 0 or skipped_records > 0:
-        print(f"\n📊 Database Write Statistics:")
-        print(f"   • New URLs written:    {new_records}")
-        print(f"   • Duplicate URLs (skipped): {skipped_records}")
+        print("\nDatabase Write Statistics:")
+        print(f"   - New URLs written:    {new_records}")
+        print(f"   - Duplicate URLs (skipped): {skipped_records}")
         if new_records + skipped_records > 0:
             skip_rate = (skipped_records / (new_records + skipped_records)) * 100
-            print(f"   • Duplicate rate:      {skip_rate:.1f}%")
+            print(f"   - Duplicate rate:      {skip_rate:.1f}%")
 
     if result.get("dry_run"):
-        print("\n⚠️  DRY RUN - No data was written to database")
+        print("\nDRY RUN - No data was written to database")
 
         if result.get("records") and pretty:
             print("\nSample records (first 5):")
@@ -202,15 +193,8 @@ def print_results(result: dict, pretty: bool = False) -> None:
 def signal_handler(signum, frame):
     """Handle graceful shutdown signals."""
     global shutdown_requested
-    print(f"\n🛑 Received signal {signum}. Initiating graceful shutdown...")
+    print(f"\nReceived signal {signum}. Initiating graceful shutdown...")
     shutdown_requested = True
-
-
-def print_progress_update(current: int, total: int, operation: str = "Processing"):
-    """Print progress update with percentage."""
-    if total > 0:
-        percentage = (current / total) * 100
-        print(f"⏳ {operation}: {current}/{total} ({percentage:.1f}%)")
 
 
 def save_metrics_to_file(metrics: Dict[str, Any], filepath: str):
@@ -218,9 +202,9 @@ def save_metrics_to_file(metrics: Dict[str, Any], filepath: str):
     try:
         with open(filepath, 'w') as f:
             json.dump(metrics, f, indent=2, default=str)
-        print(f"📊 Metrics saved to: {filepath}")
+        print(f"Metrics saved to: {filepath}")
     except Exception as e:
-        print(f"❌ Failed to save metrics: {e}")
+        print(f"Failed to save metrics: {e}")
 
 
 def print_json_results(result: Dict[str, Any]):
@@ -267,63 +251,57 @@ def main() -> int:
     # Validate arguments
     validation_errors = validate_args(args)
     if validation_errors:
-        print("❌ Argument validation errors:")
+        print("Argument validation errors:")
         for error in validation_errors:
-            print(f"   • {error}")
+            print(f"   - {error}")
         return 1
 
     setup_logging_from_args(args)
-    
+
     logger = logging.getLogger(__name__)
-    
+
     start_time = time.time()
 
     try:
-        logger.info("🚀 Starting news extraction")
-        
-        # Check for shutdown signal before starting
+        logger.info("Starting news extraction")
+
         if shutdown_requested:
-            print("⏹️  Shutdown requested before start. Exiting.")
+            print("Shutdown requested before start. Exiting.")
             return 0
 
-        # Initialize pipeline with production settings
         pipeline = NewsExtractionPipeline(
             config_path=args.config,
-            max_workers=args.max_workers
+            max_workers=args.max_workers,
         )
 
-        # Run extraction with progress monitoring
-        print("⏳ Initializing extraction pipeline...")
-        
-        result = pipeline.extract(
-            source_filter=args.source,
-            days_back=args.days_back,
-            max_articles=args.max_articles,
-            dry_run=args.dry_run,
-            clear=args.clear,
-        )
-        
+        print("Initializing extraction pipeline...")
+
+        try:
+            result = pipeline.extract(
+                source_filter=args.source,
+                days_back=args.days_back,
+                max_articles=args.max_articles,
+                dry_run=args.dry_run,
+                clear=args.clear,
+            )
+        finally:
+            pipeline.close()
+
         duration = time.time() - start_time
-        
-        # Add CLI timing to results
         result["cli_duration_seconds"] = duration
-        
-        # Check for shutdown signal during execution
+
         if shutdown_requested:
-            print("⏹️  Graceful shutdown completed.")
+            print("Graceful shutdown completed.")
             result["shutdown_requested"] = True
 
-        # Output results based on format
         if args.output_format == "json":
             print_json_results(result)
         else:
             print_results(result, pretty=args.pretty)
-        
-        # Save detailed metrics if requested
+
         if args.metrics_file:
             save_metrics_to_file(result.get("metrics", {}), args.metrics_file)
-        
-        # Save inserted URL IDs if requested (for pipeline chaining)
+
         if args.output_ids_file:
             inserted_ids = result.get("inserted_ids", [])
             if inserted_ids:
@@ -332,22 +310,19 @@ def main() -> int:
                         f.write(f"{url_id}\n")
                 logger.info(f"Saved {len(inserted_ids)} URL IDs to {args.output_ids_file}")
             else:
-                # Create empty file to indicate no new URLs
                 with open(args.output_ids_file, "w") as f:
                     pass
                 logger.info(f"No new URLs - created empty file {args.output_ids_file}")
-        
-        # Performance summary
+
         if result.get("performance"):
             perf = result["performance"]
-            print(f"⚡ Performance Summary:")
+            print("Performance Summary:")
             print(f"   Total time: {duration:.2f}s")
             if perf.get("items_per_second"):
                 print(f"   Items/sec: {perf['items_per_second']:.1f}")
             if perf.get("records_per_second"):
                 print(f"   Records/sec: {perf['records_per_second']:.1f}")
 
-        # Return appropriate exit code
         if not result.get("success"):
             logger.error("Extraction completed with errors")
             return 1
@@ -355,34 +330,33 @@ def main() -> int:
             logger.warning("No items were extracted")
             return 0
         else:
-            logger.info(f"✅ Extraction completed successfully in {duration:.2f}s")
+            logger.info(f"Extraction completed successfully in {duration:.2f}s")
             return 0
 
     except KeyboardInterrupt:
-        logger.info("⏹️  Extraction interrupted by user")
-        print("\n⏹️  Extraction interrupted. Exiting gracefully...")
-        return 130  # Standard exit code for SIGINT
+        logger.info("Extraction interrupted by user")
+        print("\nExtraction interrupted. Exiting gracefully...")
+        return 130
 
     except FileNotFoundError as e:
         logger.error(f"Configuration file not found: {e}")
-        print(f"❌ Configuration error: {e}")
-        print("💡 Make sure the feeds.yaml file exists or specify --config path")
+        print(f"Configuration error: {e}")
+        print("Make sure the feeds.yaml file exists or specify --config path")
         return 2
 
     except ValueError as e:
         logger.error(f"Configuration validation error: {e}")
-        print(f"❌ Configuration error: {e}")
-        print("💡 Check your feeds.yaml file for syntax or validation errors")
+        print(f"Configuration error: {e}")
+        print("Check your feeds.yaml file for syntax or validation errors")
         return 2
 
     except Exception as e:
         logger.error(f"Unexpected error during extraction: {e}", exc_info=True)
-        print(f"❌ UNEXPECTED ERROR: {e}")
-        print("💡 Enable --verbose for detailed error information")
+        print(f"UNEXPECTED ERROR: {e}")
+        print("Enable --verbose for detailed error information")
         return 1
 
     finally:
-        # Cleanup logging handlers to prevent resource leaks
         logging.shutdown()
 
 

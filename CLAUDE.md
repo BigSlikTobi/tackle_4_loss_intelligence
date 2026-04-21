@@ -50,6 +50,8 @@ export LOG_LEVEL=DEBUG  # before invoking any script
 
 This is an **NFL data intelligence platform** built on **function-based isolation**: each module under `src/functions/` is completely self-contained and can be developed, tested, and deployed independently.
 
+**Modules** (`src/functions/`): core content pipeline uses `news_extraction`, `url_content_extraction`, `knowledge_extraction`, `content_summarization`, `story_embeddings`, `story_grouping`, and `data_loading`. Additional modules: `article_summarization`, `article_translation`, `article_validation`, `daily_team_update`, `fuzzy_search`, `game_analysis_package`, `gemini_tts`, `gemini_tts_batch`, `image_selection`, `team_article_generation`, `youtube_search`.
+
 ### Module Structure
 
 Every module follows the same layout:
@@ -101,11 +103,11 @@ The automated content pipeline (GitHub Actions, every 30 min) processes articles
 2. **Content Fetching** (`url_content_extraction`) — Playwright HTML fetch
 3. **Facts Extraction** (`url_content_extraction`) — OpenAI Batch API (~24h, 50% cheaper)
 4. **Knowledge Extraction** (`knowledge_extraction`) — Topics + entities via GPT-5-mini, fuzzy matching
-5. **Summary Generation** (`content_summarization`) — Summaries + embeddings via Google Gemini
-6. **Story Embeddings** (`story_embeddings`) — text-embedding-3-small vectors
+5. **Summary Generation** (`content_summarization`) — Summaries + *summary* embeddings via Google Gemini (distinct from story embeddings in stage 6)
+6. **Story Embeddings** (`story_embeddings`) — OpenAI `text-embedding-3-small` vectors over summaries
 7. **Story Grouping** (`story_grouping`) — Cosine similarity clustering
 
-Two coordinated workflows handle this: `content-pipeline-create.yml` (creates batches) and `content-pipeline-poll.yml` (polls and promotes). Promotions are gated by `MIN_PROMOTION_ITEMS=100`.
+Two coordinated workflows handle this: `content-pipeline-create.yml` (creates batches) and `content-pipeline-poll.yml` (polls and promotes). The `batch_jobs` table tracks stage, status, retry count, and OpenAI file IDs to coordinate both workflows and prevent duplicate processing. Promotions between stages are gated by `MIN_PROMOTION_ITEMS=100`. Manual workflow triggers accept knobs like `force_content_fetch`, `skip news extraction`, and `facts limit`.
 
 ### Key Implementation Patterns
 
@@ -115,7 +117,7 @@ Two coordinated workflows handle this: `content-pipeline-create.yml` (creates ba
 
 **Cloud Function deployment**: Always use `mktemp -d` for a temp directory when assembling deployment files. Set up a `trap` to clean up on exit. Only set generic env vars (e.g., `LOG_LEVEL`) in the function; credentials come per-request.
 
-**Request-scoped credentials**: New Cloud Functions should accept optional `llm`, `search`, and `supabase` blocks in the HTTP payload and degrade gracefully when omitted (see `image_selection` module as the canonical example).
+**Request-scoped credentials**: New Cloud Functions should accept optional `llm`, `search`, and `supabase` blocks in the HTTP payload and degrade gracefully when omitted (see `image_selection` module as the canonical example). For the full build checklist, see AGENTS.md → "Cloud Function Build Workflow (Image Selection Pattern)".
 
 **Configuration**: All modules share a single `.env` at the project root. Load it with `load_env()` from `src.shared.utils.env`. Module-specific vars are documented in each module's `.env.example`.
 

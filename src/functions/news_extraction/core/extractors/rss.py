@@ -12,11 +12,11 @@ from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
 import feedparser
-from dateutil import parser as date_parser
 import logging
 
 from ..contracts import NewsItem
 from ..config import SourceConfig
+from ..utils.dates import parse_feed_date
 from .base import BaseExtractor
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,8 @@ class RssExtractor(BaseExtractor):
             max_articles = kwargs.get("max_articles") or source.max_articles
             days_back = kwargs.get("days_back") or source.days_back
 
-            # Process each entry
-            for entry in feed.entries:
+            # Process each entry (capped to prevent memory issues on huge feeds)
+            for entry in feed.entries[:MAX_ENTRIES_TO_PROCESS]:
                 try:
                     news_item = self._parse_entry(entry, source, days_back)
                     if news_item:
@@ -119,30 +119,23 @@ class RssExtractor(BaseExtractor):
             logger.debug("RSS entry missing link, skipping")
             return None
 
-        # Extract publish date
-        published_date = None
-        if hasattr(entry, "published_parsed") and entry.published_parsed:
-            try:
-                published_date = datetime(*entry.published_parsed[:6])
-            except (TypeError, ValueError):
-                pass
+        # Extract publish date (always tz-aware UTC)
+        published_date = parse_feed_date(getattr(entry, "published_parsed", None))
 
-        # Try alternative date fields
         if not published_date:
             for date_field in ["published", "updated", "created"]:
                 date_str = entry.get(date_field)
                 if date_str:
-                    try:
-                        published_date = date_parser.parse(date_str)
+                    published_date = parse_feed_date(date_str)
+                    if published_date:
                         break
-                    except (ValueError, TypeError):
-                        continue
 
         # Filter by date if specified
         if days_back and published_date:
-            cutoff = datetime.utcnow()
-            cutoff = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
-            age_days = (cutoff - published_date.replace(tzinfo=None)).days
+            cutoff = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            age_days = (cutoff - published_date).days
 
             if age_days > days_back:
                 logger.debug(f"Filtering out old article ({age_days} days old)")
