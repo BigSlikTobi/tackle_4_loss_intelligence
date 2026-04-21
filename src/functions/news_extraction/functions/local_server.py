@@ -34,7 +34,10 @@ def local_handler():
     if request.method == "OPTIONS":
         return _cors_response({}, status=204)
 
-    payload: Dict[str, Any] = request.get_json(silent=True) or {}
+    # Default only on missing body; pass through non-object payloads so the
+    # handler's validation path is exercised.
+    parsed = request.get_json(silent=True)
+    payload: Any = {} if parsed is None else parsed
     result = handle_request(payload)
     status = 200 if result.get("success", True) else 500
     return _cors_response(result, status=status)

@@ -145,14 +145,17 @@ class NewsExtractionPipeline:
 
         source_watermarks = self.watermarks.fetch_watermarks()
 
-        # Compile items, filter by watermark, and remember which source each
-        # item came from so we can advance watermarks only for sources that
-        # actually contribute a surviving record.
+        # Compile items in a deterministic order (input source order, not the
+        # nondeterministic as_completed order) so dedup "winner" selection and
+        # watermark attribution are stable across runs.
         all_items: List[NewsItem] = []
         item_source_by_url: Dict[str, str] = {}
-        filtered_by_source: Dict[str, List[NewsItem]] = {}
 
-        for source_name, result in extraction_results.items():
+        for source in sources:
+            source_name = source.name
+            result = extraction_results.get(
+                source_name, {"success": False, "error": "missing result", "items": []}
+            )
             filtered_items: List[NewsItem] = []
             if result["success"]:
                 filtered_items = self._filter_items_by_watermark(
@@ -162,7 +165,6 @@ class NewsExtractionPipeline:
                 for item in filtered_items:
                     item_source_by_url.setdefault(item.url, source_name)
                 all_items.extend(filtered_items)
-            filtered_by_source[source_name] = filtered_items
 
             monitor.record_source_result(
                 source_name=source_name,

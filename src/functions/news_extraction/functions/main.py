@@ -99,7 +99,12 @@ def news_extractor(request: flask.Request) -> flask.Response:
     if request.method != "POST":
         return _cors_response({"error": "Method not allowed", "status": 405}, status=405)
 
-    payload = request.get_json(silent=True) or {}
+    # Only default to {} when the body is absent. A non-object payload (e.g. a
+    # JSON array) must reach handle_request so it can return the proper
+    # "must be a JSON object" error instead of silently running with defaults.
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
     result = handle_request(payload)
     status = 200 if result.get("success", True) else 500
     return _cors_response(result, status=status)

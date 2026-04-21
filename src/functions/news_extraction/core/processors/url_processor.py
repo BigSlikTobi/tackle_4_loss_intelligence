@@ -66,7 +66,10 @@ class UrlProcessor:
                 logger.debug(f"Filtering out old article: {item.url}")
                 continue
 
-            if nfl_only is not None and not item.is_nfl_content:
+            # Only filter when nfl_only is explicitly True. `False` means "don't
+            # enforce an NFL check" (not "exclude NFL items"), matching the
+            # documented "Filter to NFL content only" semantics.
+            if nfl_only is True and not item.is_nfl_content:
                 logger.debug(f"Filtering out non-NFL content: {item.url}")
                 continue
 

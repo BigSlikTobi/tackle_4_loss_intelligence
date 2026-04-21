@@ -214,6 +214,60 @@ def test_parse_feed_date_normalises_to_utc():
     assert ensure_utc(datetime(2026, 4, 10, 12, 0)).tzinfo == timezone.utc
 
 
+def test_nfl_only_false_does_not_filter():
+    """`nfl_only=False` must mean 'don't enforce NFL filter', not 'exclude NFL'."""
+    processor = UrlProcessor()
+    items = [
+        NewsItem(
+            url="https://example.com/a",
+            title="nfl",
+            publisher="p",
+            source_name="s",
+            is_nfl_content=True,
+        ),
+        NewsItem(
+            url="https://example.com/b",
+            title="other",
+            publisher="p",
+            source_name="s",
+            is_nfl_content=False,
+        ),
+    ]
+    passed = processor.process(items, nfl_only=False)
+    assert len(passed) == 2
+
+    # Explicit True filters out non-NFL:
+    nfl_only = processor.process(items, nfl_only=True)
+    assert len(nfl_only) == 1
+    assert nfl_only[0].is_nfl_content is True
+
+
+def test_rate_limiter_is_thread_safe():
+    """Concurrent acquire() calls must never raise or exceed the cap."""
+    import threading
+    from src.functions.news_extraction.core.utils.client import RateLimiter
+
+    limiter = RateLimiter(max_requests=100, window_seconds=60)
+    errors = []
+
+    def worker():
+        try:
+            for _ in range(10):
+                limiter.acquire()
+        except Exception as exc:  # pragma: no cover - shouldn't happen
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"thread-safety violation: {errors}"
+    # 8 workers * 10 calls = 80 acquires; well under the 100 cap so no blocking.
+    assert len(limiter.requests) == 80
+
+
 def test_simple_cache_reports_real_hit_rate():
     from src.functions.news_extraction.core.utils.client import SimpleCache
 

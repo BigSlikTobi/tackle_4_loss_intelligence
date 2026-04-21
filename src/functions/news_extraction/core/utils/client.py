@@ -37,8 +37,10 @@ class CircuitState(Enum):
 class CircuitBreaker:
     """
     Circuit breaker pattern implementation.
-    
-    Prevents cascading failures by opening the circuit when failures exceed threshold.
+
+    Prevents cascading failures by opening the circuit when failures exceed
+    threshold. State transitions are guarded by a lock so a single instance
+    can be safely shared across threads.
     """
 
     def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
@@ -54,62 +56,66 @@ class CircuitBreaker:
         self.failure_count = 0
         self.last_failure_time: Optional[datetime] = None
         self.state = CircuitState.CLOSED
+        self._lock = threading.Lock()
 
     def call(self, func, *args, **kwargs):
-        """
-        Execute function with circuit breaker protection.
-
-        Args:
-            func: Function to execute
-            *args: Function arguments
-            **kwargs: Function keyword arguments
-
-        Returns:
-            Function result
-
-        Raises:
-            RuntimeError: When circuit is open
-        """
-        if self.state == CircuitState.OPEN:
-            if self._should_attempt_reset():
-                self.state = CircuitState.HALF_OPEN
-            else:
-                raise RuntimeError("Circuit breaker is OPEN - service unavailable")
+        """Execute *func* with circuit-breaker protection."""
+        # Gate check: read/advance state transactionally. The actual function
+        # call runs outside the lock so one slow request doesn't serialize the
+        # whole pipeline.
+        with self._lock:
+            if self.state == CircuitState.OPEN:
+                if self._should_attempt_reset_locked():
+                    self.state = CircuitState.HALF_OPEN
+                else:
+                    raise RuntimeError("Circuit breaker is OPEN - service unavailable")
 
         try:
             result = func(*args, **kwargs)
-            self._on_success()
-            return result
-        except Exception as e:
+        except Exception:
             self._on_failure()
             raise
+        self._on_success()
+        return result
 
-    def _should_attempt_reset(self) -> bool:
-        """Check if enough time has passed to attempt reset."""
+    def _should_attempt_reset_locked(self) -> bool:
+        """Check if enough time has passed to attempt reset. Caller holds the lock."""
         if not self.last_failure_time:
             return True
-        return (datetime.now(timezone.utc) - self.last_failure_time).total_seconds() >= self.recovery_timeout
+        return (
+            datetime.now(timezone.utc) - self.last_failure_time
+        ).total_seconds() >= self.recovery_timeout
 
     def _on_success(self):
         """Handle successful call."""
-        self.failure_count = 0
-        self.state = CircuitState.CLOSED
+        with self._lock:
+            self.failure_count = 0
+            self.state = CircuitState.CLOSED
 
     def _on_failure(self):
         """Handle failed call."""
-        self.failure_count += 1
-        self.last_failure_time = datetime.now(timezone.utc)
-        
-        if self.failure_count >= self.failure_threshold:
-            self.state = CircuitState.OPEN
-            logger.warning(f"Circuit breaker OPENED after {self.failure_count} failures")
+        opened = False
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = datetime.now(timezone.utc)
+            if self.failure_count >= self.failure_threshold:
+                if self.state != CircuitState.OPEN:
+                    opened = True
+                self.state = CircuitState.OPEN
+        if opened:
+            logger.warning(
+                "Circuit breaker OPENED after %d failures", self.failure_count
+            )
 
 
 class RateLimiter:
     """
-    Simple rate limiter based on sliding window.
+    Simple rate limiter based on a sliding window.
 
-    Tracks request timestamps and blocks if rate limit would be exceeded.
+    Tracks request timestamps and blocks if the rate limit would be exceeded.
+    Safe to share across threads: deque mutations and window sweeps are
+    serialized by an internal lock (released before sleeping, so waiting
+    threads don't serialize on a blocked peer).
     """
 
     def __init__(self, max_requests: int = 60, window_seconds: int = 60):
@@ -123,29 +129,27 @@ class RateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.requests: deque[datetime] = deque()
+        self._lock = threading.Lock()
 
     def acquire(self) -> None:
-        """
-        Wait if necessary to respect rate limit.
-
-        Blocks until a request slot is available within the rate limit.
-        """
+        """Wait if necessary to respect the rate limit."""
         while True:
-            now = datetime.now(timezone.utc)
-            cutoff = now - timedelta(seconds=self.window_seconds)
+            with self._lock:
+                now = datetime.now(timezone.utc)
+                cutoff = now - timedelta(seconds=self.window_seconds)
 
-            # Remove old requests outside the window
-            while self.requests and self.requests[0] < cutoff:
-                self.requests.popleft()
+                while self.requests and self.requests[0] < cutoff:
+                    self.requests.popleft()
 
-            if len(self.requests) < self.max_requests:
-                self.requests.append(now)
-                return
+                if len(self.requests) < self.max_requests:
+                    self.requests.append(now)
+                    return
 
-            oldest = self.requests[0]
-            sleep_time = (oldest - cutoff).total_seconds()
+                oldest = self.requests[0]
+                sleep_time = (oldest - cutoff).total_seconds()
+
+            # Lock released before sleeping so peers can make progress.
             if sleep_time <= 0:
-                # Window already advanced past the oldest entry; loop re-sweeps.
                 continue
             logger.debug(f"Rate limit reached, sleeping {sleep_time:.2f}s")
             time.sleep(sleep_time)
