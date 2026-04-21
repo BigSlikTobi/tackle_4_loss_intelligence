@@ -1,72 +1,162 @@
 """Cloud Function entry point for news extraction.
 
-This function is deployed independently from data_loading.
+This function is deployed independently from data_loading. It accepts an
+optional ``supabase`` credentials block in the request payload so callers can
+run the function with request-scoped credentials (matching the
+``image_selection`` pattern documented in CLAUDE.md).
 """
 
 from __future__ import annotations
+
+import json
 import logging
-from typing import Any
+import os
+from typing import Any, Dict, Optional
+
 import flask
 
-# Use shared logging
+from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
 
-# TODO: Import from news_extraction core when implemented
-# from ..core.pipelines.extraction_pipeline import extract_news_urls
-# from ..core.contracts import NewsExtractionRequest
+from src.functions.news_extraction.core.db import NewsUrlWriter
+from src.functions.news_extraction.core.db.watermarks import NewsSourceWatermarkStore
+from src.functions.news_extraction.core.pipelines import NewsExtractionPipeline
 
-setup_logging()
+load_env()
+setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 
-def news_extractor(request: flask.Request) -> flask.Response:
-    """Handle news extraction requests.
-    
-    Args:
-        request: Flask request object with JSON payload
-    
-    Returns:
-        Flask response with extracted news URLs
+def handle_request(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a news-extraction invocation from a JSON payload.
+
+    Supported keys (all optional):
+        source_filter (str): case-insensitive substring filter over source names.
+        days_back (int): override per-source ``days_back`` filter.
+        max_articles (int): override per-source ``max_articles`` filter.
+        dry_run (bool): if True, don't write to the database.
+        clear (bool): if True, clear the target table before writing.
+        max_workers (int): override parallel-worker count.
+        supabase (dict): optional ``{"url": ..., "key": ...}`` credentials block.
+            When provided, a request-scoped Supabase client is passed to the
+            writer and watermark store. When omitted, both fall back to the
+            module's shared client (i.e. the deploy-time env vars).
+
+    Returns the pipeline result dictionary, or an error envelope.
     """
-    
-    if request.method == "OPTIONS":
-        return _cors_response({}, 204)
-    
-    if request.method != "POST":
-        return _error_response("Method not allowed", 405)
-    
+    if not isinstance(payload, dict):
+        return _error("Request body must be a JSON object")
+
+    client = _build_supabase_client(payload.get("supabase"))
+
+    source_filter = _coerce_str(payload.get("source_filter"))
+    days_back = _coerce_int(payload.get("days_back"))
+    max_articles = _coerce_int(payload.get("max_articles"))
+    max_workers = _coerce_int(payload.get("max_workers"))
+    dry_run = bool(payload.get("dry_run", False))
+    clear = bool(payload.get("clear", False))
+
     try:
-        payload = request.get_json()
-        
-        # TODO: Implement extraction logic
-        # extraction_request = NewsExtractionRequest.from_dict(payload)
-        # results = extract_news_urls(extraction_request)
-        
-        # Return 501 Not Implemented until pipeline is wired in
-        # See: https://github.com/BigSlikTobi/tackle_4_loss_intelligence/issues/87
-        return _cors_response({
-            "error": "Not Implemented",
-            "message": "News extraction pipeline is not yet implemented. "
-                       "This endpoint will return extracted URLs once the "
-                       "core extraction logic is wired in.",
-            "status": 501
-        }, 501)
-        
+        writer = None if dry_run else NewsUrlWriter(client=client) if client is not None else NewsUrlWriter()
+        watermark_store = (
+            NewsSourceWatermarkStore(client=client)
+            if client is not None
+            else NewsSourceWatermarkStore()
+        )
+        pipeline = NewsExtractionPipeline(
+            writer=writer,
+            watermark_store=watermark_store,
+            max_workers=max_workers,
+        )
+    except Exception as exc:
+        logger.exception("Failed to initialize news extraction pipeline")
+        return _error(f"Pipeline initialization failed: {exc}")
+
+    try:
+        result = pipeline.extract(
+            source_filter=source_filter,
+            days_back=days_back,
+            max_articles=max_articles,
+            dry_run=dry_run,
+            clear=clear,
+        )
     except Exception as exc:
         logger.exception("News extraction failed")
-        return _error_response(str(exc), 500)
+        return _error(str(exc))
+    finally:
+        pipeline.close()
+
+    # Drop non-JSON-serializable or bulky fields before returning.
+    result.pop("records", None)
+    return result
 
 
-def _cors_response(data: dict[str, Any], status: int = 200) -> flask.Response:
-    """Create CORS-enabled response."""
-    response = flask.jsonify(data)
-    response.status_code = status
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+def news_extractor(request: flask.Request) -> flask.Response:
+    """Flask entry point used by Cloud Functions."""
+    if request.method == "OPTIONS":
+        return _cors_response({}, status=204)
+
+    if request.method != "POST":
+        return _cors_response({"error": "Method not allowed", "status": 405}, status=405)
+
+    # Only default to {} when the body is absent. A non-object payload (e.g. a
+    # JSON array) must reach handle_request so it can return the proper
+    # "must be a JSON object" error instead of silently running with defaults.
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    result = handle_request(payload)
+    status = 200 if result.get("success", True) else 500
+    return _cors_response(result, status=status)
+
+
+def _build_supabase_client(block: Any) -> Optional[Any]:
+    """Create a Supabase client from an in-request credentials block.
+
+    Returns None when no block is supplied so callers fall back to the
+    deploy-time environment credentials.
+    """
+    if not isinstance(block, dict):
+        return None
+    url = block.get("url")
+    key = block.get("key")
+    if not url or not key:
+        logger.warning("supabase block present but missing url/key; ignoring")
+        return None
+    try:
+        from supabase import create_client
+
+        return create_client(url, key)
+    except Exception as exc:
+        logger.warning("Failed to build request-scoped Supabase client: %s", exc)
+        return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_str(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _cors_response(body: Dict[str, Any], status: int = 200) -> flask.Response:
+    response = flask.make_response(json.dumps(body, ensure_ascii=False, default=str), status)
+    headers = response.headers
+    headers["Content-Type"] = "application/json"
+    headers["Access-Control-Allow-Origin"] = "*"
+    headers["Access-Control-Allow-Methods"] = "POST,OPTIONS"
+    headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
     return response
 
 
-def _error_response(message: str, status: int = 400) -> flask.Response:
-    """Create error response."""
-    return _cors_response({"error": message, "status": status}, status)
+def _error(message: str) -> Dict[str, Any]:
+    return {"success": False, "error": message}

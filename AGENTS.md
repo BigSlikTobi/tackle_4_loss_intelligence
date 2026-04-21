@@ -225,11 +225,21 @@ cp .env.example .env  # Edit with module-specific config
 
 ## Testing Guidelines
 
-- No automated test suite exists yet
-- For manual verification: 
+- Automated test suite exists under `tests/` at the project root
+- Run tests from the project root using the venv python:
+  ```bash
+  # Full suite
+  venv/bin/python -m pytest
+
+  # Module-specific
+  venv/bin/python -m pytest tests/news_extraction -v
+  ```
+- Current coverage: `tests/news_extraction/` (7 tests — pipeline integration + regressions)
+- For manual verification:
   - Run loaders with `--dry-run` and confirm record counts
   - Test module independence: `rm -rf src/functions/<module>` and verify others work
   - Test locally: `cd src/functions/data_loading/functions && ./run_local.sh`
+- Note: `tests/knowledge_extraction` has pre-existing failures unrelated to recent changes
 
 ## Architecture Guidelines
 

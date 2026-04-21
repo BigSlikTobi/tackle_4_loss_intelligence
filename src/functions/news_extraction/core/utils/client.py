@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import time
 import hashlib
+import threading
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from enum import Enum
 
@@ -36,8 +37,10 @@ class CircuitState(Enum):
 class CircuitBreaker:
     """
     Circuit breaker pattern implementation.
-    
-    Prevents cascading failures by opening the circuit when failures exceed threshold.
+
+    Prevents cascading failures by opening the circuit when failures exceed
+    threshold. State transitions are guarded by a lock so a single instance
+    can be safely shared across threads.
     """
 
     def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 60):
@@ -53,62 +56,66 @@ class CircuitBreaker:
         self.failure_count = 0
         self.last_failure_time: Optional[datetime] = None
         self.state = CircuitState.CLOSED
+        self._lock = threading.Lock()
 
     def call(self, func, *args, **kwargs):
-        """
-        Execute function with circuit breaker protection.
-
-        Args:
-            func: Function to execute
-            *args: Function arguments
-            **kwargs: Function keyword arguments
-
-        Returns:
-            Function result
-
-        Raises:
-            RuntimeError: When circuit is open
-        """
-        if self.state == CircuitState.OPEN:
-            if self._should_attempt_reset():
-                self.state = CircuitState.HALF_OPEN
-            else:
-                raise RuntimeError("Circuit breaker is OPEN - service unavailable")
+        """Execute *func* with circuit-breaker protection."""
+        # Gate check: read/advance state transactionally. The actual function
+        # call runs outside the lock so one slow request doesn't serialize the
+        # whole pipeline.
+        with self._lock:
+            if self.state == CircuitState.OPEN:
+                if self._should_attempt_reset_locked():
+                    self.state = CircuitState.HALF_OPEN
+                else:
+                    raise RuntimeError("Circuit breaker is OPEN - service unavailable")
 
         try:
             result = func(*args, **kwargs)
-            self._on_success()
-            return result
-        except Exception as e:
+        except Exception:
             self._on_failure()
             raise
+        self._on_success()
+        return result
 
-    def _should_attempt_reset(self) -> bool:
-        """Check if enough time has passed to attempt reset."""
+    def _should_attempt_reset_locked(self) -> bool:
+        """Check if enough time has passed to attempt reset. Caller holds the lock."""
         if not self.last_failure_time:
             return True
-        return (datetime.utcnow() - self.last_failure_time).seconds >= self.recovery_timeout
+        return (
+            datetime.now(timezone.utc) - self.last_failure_time
+        ).total_seconds() >= self.recovery_timeout
 
     def _on_success(self):
         """Handle successful call."""
-        self.failure_count = 0
-        self.state = CircuitState.CLOSED
+        with self._lock:
+            self.failure_count = 0
+            self.state = CircuitState.CLOSED
 
     def _on_failure(self):
         """Handle failed call."""
-        self.failure_count += 1
-        self.last_failure_time = datetime.utcnow()
-        
-        if self.failure_count >= self.failure_threshold:
-            self.state = CircuitState.OPEN
-            logger.warning(f"Circuit breaker OPENED after {self.failure_count} failures")
+        opened = False
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = datetime.now(timezone.utc)
+            if self.failure_count >= self.failure_threshold:
+                if self.state != CircuitState.OPEN:
+                    opened = True
+                self.state = CircuitState.OPEN
+        if opened:
+            logger.warning(
+                "Circuit breaker OPENED after %d failures", self.failure_count
+            )
 
 
 class RateLimiter:
     """
-    Simple rate limiter based on sliding window.
+    Simple rate limiter based on a sliding window.
 
-    Tracks request timestamps and blocks if rate limit would be exceeded.
+    Tracks request timestamps and blocks if the rate limit would be exceeded.
+    Safe to share across threads: deque mutations and window sweeps are
+    serialized by an internal lock (released before sleeping, so waiting
+    threads don't serialize on a blocked peer).
     """
 
     def __init__(self, max_requests: int = 60, window_seconds: int = 60):
@@ -122,118 +129,43 @@ class RateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.requests: deque[datetime] = deque()
+        self._lock = threading.Lock()
 
     def acquire(self) -> None:
-        """
-        Wait if necessary to respect rate limit.
+        """Wait if necessary to respect the rate limit."""
+        while True:
+            with self._lock:
+                now = datetime.now(timezone.utc)
+                cutoff = now - timedelta(seconds=self.window_seconds)
 
-        Blocks until a request slot is available within the rate limit.
-        """
-        now = datetime.utcnow()
-        cutoff = now - timedelta(seconds=self.window_seconds)
+                while self.requests and self.requests[0] < cutoff:
+                    self.requests.popleft()
 
-        # Remove old requests outside the window
-        while self.requests and self.requests[0] < cutoff:
-            self.requests.popleft()
+                if len(self.requests) < self.max_requests:
+                    self.requests.append(now)
+                    return
 
-        # If at limit, wait until oldest request expires
-        if len(self.requests) >= self.max_requests:
-            oldest = self.requests[0]
-            sleep_time = (oldest - cutoff).total_seconds()
-            if sleep_time > 0:
-                logger.debug(f"Rate limit reached, sleeping {sleep_time:.2f}s")
-                time.sleep(sleep_time)
-                # Recursively acquire after waiting
-                self.acquire()
-                return
+                oldest = self.requests[0]
+                sleep_time = (oldest - cutoff).total_seconds()
 
-        # Record this request
-        self.requests.append(now)
-
-
-class CircuitBreaker:
-    """
-    Circuit breaker pattern implementation.
-    
-    Prevents cascading failures by temporarily blocking requests
-    to failing services.
-    """
-    
-    def __init__(self, failure_threshold: int = 5, timeout_seconds: int = 60):
-        """
-        Initialize circuit breaker.
-        
-        Args:
-            failure_threshold: Number of failures before opening circuit
-            timeout_seconds: Time to wait before attempting to close circuit
-        """
-        self.failure_threshold = failure_threshold
-        self.timeout_seconds = timeout_seconds
-        self.failure_count = 0
-        self.last_failure_time = None
-        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
-    
-    def call(self, func, *args, **kwargs):
-        """
-        Execute function with circuit breaker protection.
-        
-        Args:
-            func: Function to execute
-            *args: Function arguments
-            **kwargs: Function keyword arguments
-            
-        Returns:
-            Function result
-            
-        Raises:
-            RuntimeError: When circuit is open
-        """
-        if self.state == "OPEN":
-            if self._should_attempt_reset():
-                self.state = "HALF_OPEN"
-            else:
-                raise RuntimeError("Circuit breaker is OPEN - requests blocked")
-        
-        try:
-            result = func(*args, **kwargs)
-            self._on_success()
-            return result
-        except Exception as e:
-            self._on_failure()
-            raise
-    
-    def _should_attempt_reset(self) -> bool:
-        """Check if circuit should attempt to reset."""
-        if self.last_failure_time is None:
-            return True
-        return (datetime.utcnow() - self.last_failure_time).total_seconds() > self.timeout_seconds
-    
-    def _on_success(self):
-        """Handle successful request."""
-        self.failure_count = 0
-        self.state = "CLOSED"
-    
-    def _on_failure(self):
-        """Handle failed request."""
-        self.failure_count += 1
-        self.last_failure_time = datetime.utcnow()
-        
-        if self.failure_count >= self.failure_threshold:
-            self.state = "OPEN"
-            logger.warning(f"Circuit breaker opened after {self.failure_count} failures")
+            # Lock released before sleeping so peers can make progress.
+            if sleep_time <= 0:
+                continue
+            logger.debug(f"Rate limit reached, sleeping {sleep_time:.2f}s")
+            time.sleep(sleep_time)
 
 
 class SimpleCache:
     """
     Simple in-memory cache with TTL support.
-    
+
     Thread-safe cache for HTTP responses to reduce redundant requests.
     """
-    
+
     def __init__(self, max_size: int = MAX_CACHE_SIZE, default_ttl: int = DEFAULT_CACHE_TTL_SECONDS):
         """
         Initialize cache.
-        
+
         Args:
             max_size: Maximum number of cached items
             default_ttl: Default time-to-live in seconds
@@ -242,78 +174,89 @@ class SimpleCache:
         self.default_ttl = default_ttl
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._access_times: Dict[str, datetime] = {}
-    
+        self._lock = threading.Lock()
+        self._hits = 0
+        self._misses = 0
+
     def _generate_key(self, url: str, **kwargs) -> str:
         """Generate cache key from URL and parameters."""
         key_data = f"{url}:{str(sorted(kwargs.items()))}"
         return hashlib.md5(key_data.encode()).hexdigest()
-    
+
     def get(self, url: str, **kwargs) -> Optional[requests.Response]:
         """Get cached response if available and not expired."""
         key = self._generate_key(url, **kwargs)
-        
-        if key not in self._cache:
-            return None
-        
-        entry = self._cache[key]
-        now = datetime.utcnow()
-        
-        # Check expiration
-        if now > entry["expires_at"]:
-            self._remove(key)
-            return None
-        
-        # Update access time
-        self._access_times[key] = now
-        logger.debug(f"Cache hit for {url}")
-        
-        return entry["response"]
-    
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                self._misses += 1
+                return None
+
+            if now > entry["expires_at"]:
+                self._remove_locked(key)
+                self._misses += 1
+                return None
+
+            self._access_times[key] = now
+            self._hits += 1
+            logger.debug(f"Cache hit for {url}")
+            return entry["response"]
+
     def put(self, url: str, response: requests.Response, ttl: Optional[int] = None, **kwargs):
         """Cache response with TTL."""
         key = self._generate_key(url, **kwargs)
         ttl = ttl or self.default_ttl
-        now = datetime.utcnow()
-        
-        # Evict if at capacity
-        if len(self._cache) >= self.max_size and key not in self._cache:
-            self._evict_lru()
-        
-        self._cache[key] = {
-            "response": response,
-            "expires_at": now + timedelta(seconds=ttl),
-            "cached_at": now
-        }
-        self._access_times[key] = now
-        
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            if len(self._cache) >= self.max_size and key not in self._cache:
+                self._evict_lru_locked()
+
+            self._cache[key] = {
+                "response": response,
+                "expires_at": now + timedelta(seconds=ttl),
+                "cached_at": now,
+            }
+            self._access_times[key] = now
+
         logger.debug(f"Cached response for {url} (TTL: {ttl}s)")
-    
-    def _remove(self, key: str):
-        """Remove entry from cache."""
+
+    def _remove_locked(self, key: str):
+        """Remove entry from cache. Caller must hold self._lock."""
         self._cache.pop(key, None)
         self._access_times.pop(key, None)
-    
-    def _evict_lru(self):
-        """Evict least recently used entry."""
+
+    def _evict_lru_locked(self):
+        """Evict least recently used entry. Caller must hold self._lock."""
         if not self._access_times:
             return
-        
+
         lru_key = min(self._access_times.keys(), key=lambda k: self._access_times[k])
-        self._remove(lru_key)
+        self._remove_locked(lru_key)
         logger.debug(f"Evicted LRU cache entry: {lru_key}")
-    
+
     def clear(self):
         """Clear all cached entries."""
-        self._cache.clear()
-        self._access_times.clear()
-    
+        with self._lock:
+            self._cache.clear()
+            self._access_times.clear()
+            self._hits = 0
+            self._misses = 0
+
     def stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
-        return {
-            "size": len(self._cache),
-            "max_size": self.max_size,
-            "hit_rate": "N/A",  # Would need hit/miss counters
-        }
+        with self._lock:
+            total = self._hits + self._misses
+            hit_rate = (self._hits / total) if total > 0 else 0.0
+            return {
+                "size": len(self._cache),
+                "max_size": self.max_size,
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": round(hit_rate, 4),
+            }
 
 
 class HttpClient:
@@ -452,10 +395,8 @@ class HttpClient:
         return {"cache_enabled": False}
 
     def close(self) -> None:
-        """Close the HTTP session and clear cache."""
+        """Close the HTTP session."""
         self.session.close()
-        if self.cache:
-            self.cache.clear()
 
     def __enter__(self):
         """Context manager entry."""

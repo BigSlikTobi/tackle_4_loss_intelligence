@@ -6,12 +6,14 @@ each source so scheduled runs can avoid re-processing the same feeds.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Dict
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 from src.shared.db.connection import get_supabase_client
 
 logger = logging.getLogger(__name__)
+
+_PAGE_SIZE = 1000
 
 
 class NewsSourceWatermarkStore:
@@ -19,9 +21,18 @@ class NewsSourceWatermarkStore:
 
     TABLE_NAME = "news_source_watermarks"
 
-    def __init__(self) -> None:
-        # Watermarks are an optimization. If Supabase isn't configured (common in
-        # unit tests / local runs), degrade gracefully to "no watermarks".
+    def __init__(self, client: Optional[Any] = None) -> None:
+        """Initialize the store.
+
+        Args:
+            client: Optional Supabase client. If omitted, falls back to
+                ``src.shared.db.connection.get_supabase_client``. Watermarks are
+                an optimization; if no client is available (unit tests / local
+                runs without credentials) the store degrades gracefully.
+        """
+        if client is not None:
+            self.client = client
+            return
         try:
             self.client = get_supabase_client()
         except (ValueError, ImportError) as exc:
@@ -29,33 +40,40 @@ class NewsSourceWatermarkStore:
             logger.info("News source watermarks disabled (Supabase unavailable): %s", exc)
 
     def fetch_watermarks(self) -> Dict[str, datetime]:
-        """Return the latest published date per source.
-
-        Returns:
-            Mapping of source name to last processed published timestamp.
-        """
+        """Return the latest published date per source."""
         if self.client is None:
             return {}
         try:
-            response = (
-                self.client.table(self.TABLE_NAME)
-                .select("source_name,last_published_at")
-                .execute()
-            )
-            rows = getattr(response, "data", []) or []
             watermarks: Dict[str, datetime] = {}
-            for row in rows:
-                value = row.get("last_published_at")
-                if not value:
-                    continue
-                if isinstance(value, str):
-                    try:
-                        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                    except ValueError:
-                        logger.warning("Skipping invalid watermark value for %s", row.get("source_name"))
+            offset = 0
+            while True:
+                response = (
+                    self.client.table(self.TABLE_NAME)
+                    .select("source_name,last_published_at")
+                    .range(offset, offset + _PAGE_SIZE - 1)
+                    .execute()
+                )
+                rows = getattr(response, "data", []) or []
+                if not rows:
+                    break
+                for row in rows:
+                    value = row.get("last_published_at")
+                    if not value:
                         continue
-                if isinstance(value, datetime):
-                    watermarks[row.get("source_name", "")] = value
+                    if isinstance(value, str):
+                        try:
+                            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                        except ValueError:
+                            logger.warning(
+                                "Skipping invalid watermark value for %s",
+                                row.get("source_name"),
+                            )
+                            continue
+                    if isinstance(value, datetime):
+                        watermarks[row.get("source_name", "")] = value
+                if len(rows) < _PAGE_SIZE:
+                    break
+                offset += _PAGE_SIZE
             logger.info("Loaded %d source watermarks", len(watermarks))
             return watermarks
         except Exception as exc:
@@ -63,11 +81,7 @@ class NewsSourceWatermarkStore:
             return {}
 
     def update_watermarks(self, updates: Dict[str, datetime]) -> None:
-        """Upsert new watermarks.
-
-        Args:
-            updates: Mapping of source name to newest published timestamp.
-        """
+        """Upsert new watermarks."""
         if not updates:
             return
         if self.client is None:
@@ -82,7 +96,7 @@ class NewsSourceWatermarkStore:
                     "source_name": source,
                     "last_published_at": watermark.isoformat(),
                     "last_seen_at": watermark.isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
 

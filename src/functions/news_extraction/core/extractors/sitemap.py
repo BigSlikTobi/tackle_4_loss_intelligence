@@ -12,11 +12,11 @@ from typing import List, Optional
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
-from dateutil import parser as date_parser
 import logging
 
 from ..contracts import NewsItem
 from ..config import SourceConfig
+from ..utils.dates import parse_feed_date
 from .base import BaseExtractor
 
 logger = logging.getLogger(__name__)
@@ -133,14 +133,11 @@ class SitemapExtractor(BaseExtractor):
 
         url = loc_elem.text.strip()
 
-        # Extract lastmod date
+        # Extract lastmod date (tz-aware UTC)
         published_date = None
         lastmod_elem = url_elem.find("ns:lastmod", namespaces)
         if lastmod_elem is not None and lastmod_elem.text:
-            try:
-                published_date = date_parser.parse(lastmod_elem.text)
-            except (ValueError, TypeError) as e:
-                logger.debug(f"Could not parse lastmod date: {e}")
+            published_date = parse_feed_date(lastmod_elem.text)
 
         # Try to extract title from news:news element
         title = None
@@ -150,21 +147,16 @@ class SitemapExtractor(BaseExtractor):
             if title_elem is not None and title_elem.text:
                 title = title_elem.text.strip()
 
-            # Also try to get publication date from news namespace
             if not published_date:
                 pub_date_elem = news_elem.find("news:publication_date", namespaces)
                 if pub_date_elem is not None and pub_date_elem.text:
-                    try:
-                        published_date = date_parser.parse(pub_date_elem.text)
-                    except (ValueError, TypeError) as e:
-                        logger.debug(f"Could not parse news publication date: {e}")
+                    published_date = parse_feed_date(pub_date_elem.text)
 
         # Filter by date if specified
         if days_back and published_date:
-            cutoff = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            if published_date.tzinfo is None:
-                published_date = published_date.replace(tzinfo=timezone.utc)
-                
+            cutoff = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
             age_days = (cutoff - published_date).days
 
             if age_days > days_back:
@@ -189,7 +181,7 @@ class SitemapExtractor(BaseExtractor):
         Returns:
             Dict with YYYY, MM keys for current date (or overrides)
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         return {
             "YYYY": kwargs.get("YYYY", str(now.year)),
             "MM": kwargs.get("MM", f"{now.month:02d}"),

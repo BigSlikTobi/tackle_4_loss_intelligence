@@ -149,19 +149,34 @@ class FeedConfig:
         """Validate default settings."""
         if not isinstance(self.defaults, dict):
             raise ValueError("Defaults must be a dictionary")
-        
+
         # Validate timeout
         timeout = self.defaults.get("timeout_seconds")
         if timeout is not None:
             if not isinstance(timeout, int) or not (MIN_TIMEOUT_SECONDS <= timeout <= MAX_TIMEOUT_SECONDS):
                 raise ValueError(f"timeout_seconds must be between {MIN_TIMEOUT_SECONDS} and {MAX_TIMEOUT_SECONDS}")
-        
-        # Validate max_parallel_fetches
+
+        # Validate max_workers (actual thread-pool concurrency)
+        max_workers = self.defaults.get("max_workers")
+        if max_workers is not None:
+            if not isinstance(max_workers, int) or not (1 <= max_workers <= 32):
+                raise ValueError("max_workers must be between 1 and 32")
+
+        # Validate max_requests_per_minute_per_source (per-source HTTP rate cap)
+        max_rpm = self.defaults.get("max_requests_per_minute_per_source")
+        if max_rpm is not None:
+            if not isinstance(max_rpm, int) or not (1 <= max_rpm <= 1000):
+                raise ValueError("max_requests_per_minute_per_source must be between 1 and 1000")
+
+        # Validate deprecated alias `max_parallel_fetches`. Kept for backward
+        # compatibility: historically this value was (incorrectly) passed to the
+        # HTTP rate limiter. It now maps to `max_workers`. A warning is emitted
+        # elsewhere so users can migrate.
         max_parallel = self.defaults.get("max_parallel_fetches")
         if max_parallel is not None:
             if not isinstance(max_parallel, int) or not (1 <= max_parallel <= 50):
                 raise ValueError("max_parallel_fetches must be between 1 and 50")
-        
+
         # Validate user_agent
         user_agent = self.defaults.get("user_agent")
         if user_agent is not None:
@@ -195,9 +210,34 @@ class FeedConfig:
         return self.defaults.get("timeout_seconds", 30)
 
     @property
+    def max_workers(self) -> int:
+        """Concurrent thread-pool workers for source extraction."""
+        if "max_workers" in self.defaults:
+            return self.defaults["max_workers"]
+        # Back-compat: honour the old (misleadingly-named) `max_parallel_fetches`
+        # as the parallelism setting it was always intended to be.
+        if "max_parallel_fetches" in self.defaults:
+            logger.warning(
+                "`max_parallel_fetches` is deprecated; rename to `max_workers` "
+                "in feeds.yaml. Using its value (%s) as max_workers.",
+                self.defaults["max_parallel_fetches"],
+            )
+            return self.defaults["max_parallel_fetches"]
+        return 4
+
+    @property
+    def max_requests_per_minute_per_source(self) -> int:
+        """Per-source HTTP rate cap (requests per 60s window)."""
+        return self.defaults.get("max_requests_per_minute_per_source", 60)
+
+    @property
     def max_parallel_fetches(self) -> int:
-        """Get max number of parallel fetch operations."""
-        return self.defaults.get("max_parallel_fetches", 10)
+        """Deprecated alias retained for backward compatibility.
+
+        Historically this key was (incorrectly) wired to the HTTP rate limiter.
+        It now returns `max_workers` so existing callers continue to work.
+        """
+        return self.max_workers
 
     def get_enabled_sources(self, source_filter: Optional[str] = None) -> List[SourceConfig]:
         """
@@ -341,7 +381,9 @@ def _apply_env_var_overrides(defaults: Dict[str, Any]) -> Dict[str, Any]:
     """Apply environment variable overrides to defaults."""
     env_mappings = {
         "NEWS_HTTP_TIMEOUT": ("timeout_seconds", int),
-        "NEWS_MAX_PARALLEL": ("max_parallel_fetches", int),
+        "NEWS_MAX_WORKERS": ("max_workers", int),
+        "NEWS_MAX_PARALLEL": ("max_parallel_fetches", int),  # deprecated alias
+        "NEWS_MAX_RPM_PER_SOURCE": ("max_requests_per_minute_per_source", int),
         "NEWS_USER_AGENT": ("user_agent", str),
     }
     
