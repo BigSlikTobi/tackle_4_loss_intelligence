@@ -78,15 +78,16 @@ def test_build_options_drops_nested_options_key():
 # ---------------------------------------------------------------------------
 
 
-def test_post_processor_reuses_shared_prompt_version():
-    from src.functions.url_content_extraction.core.post_processors import (
-        fact_extraction as pp,
-    )
+def test_writer_defaults_to_canonical_prompt_version():
+    """FactsWriter must default to the canonical FACT_PROMPT_VERSION so the
+    realtime and batch paths (and any future caller) can't drift."""
+    from src.functions.url_content_extraction.core.db import FactsWriter
     from src.functions.url_content_extraction.core.facts.prompts import (
         FACT_PROMPT_VERSION as canonical,
     )
 
-    assert pp.FACT_PROMPT_VERSION == canonical
+    writer = FactsWriter(client=object())
+    assert writer.prompt_version == canonical
 
 
 def test_filter_story_facts_rejects_author_bio_and_keeps_story():
@@ -238,6 +239,172 @@ def test_handle_request_raises_become_per_url_errors(monkeypatch):
     assert result["counts"]["total"] == 1
     assert result["counts"]["succeeded"] == 0
     assert result["articles"][0]["error"] == "network nope"
+
+
+# ---------------------------------------------------------------------------
+# FactsWriter / FactsReader (Phase 3: core/db consolidation)
+# ---------------------------------------------------------------------------
+
+
+class _FakeQuery:
+    """Minimal PostgREST-like query builder that records calls and returns
+    data from a list-per-call queue. Not exhaustive — just enough for the
+    writer/reader paths we actually exercise."""
+
+    def __init__(self, client: "_FakeSupabase", table_name: str, operation: str):
+        self.client = client
+        self.table_name = table_name
+        self.operation = operation
+        self.filters: Dict[str, Any] = {}
+        self.range_: tuple[int, int] | None = None
+        self.payload: Any = None
+
+    def select(self, *_args, **_kwargs): return self
+    def insert(self, payload): self.payload = payload; return self
+    def update(self, payload): self.payload = payload; return self
+    def delete(self): return self
+
+    def eq(self, col, val): self.filters[col] = val; return self
+    def in_(self, col, vals): self.filters[col] = ("in", list(vals)); return self
+    def is_(self, col, val): self.filters[col] = ("is", val); return self
+    def gt(self, col, val): self.filters[col] = (">", val); return self
+    def gte(self, col, val): self.filters[col] = (">=", val); return self
+    def order(self, *_args, **_kwargs): return self
+    def limit(self, *_args, **_kwargs): return self
+    def range(self, a, b): self.range_ = (a, b); return self
+
+    def execute(self):
+        self.client.calls.append(
+            {
+                "table": self.table_name,
+                "op": self.operation,
+                "filters": dict(self.filters),
+                "range": self.range_,
+                "payload": self.payload,
+            }
+        )
+        # Simulated insert: return one row per input record with generated IDs.
+        if self.operation == "insert" and isinstance(self.payload, list):
+            data = [
+                {"id": f"{self.table_name}-{i}", **row}
+                for i, row in enumerate(self.payload)
+            ]
+            return type("Resp", (), {"data": data})()
+        # Simulated select/update/delete: return canned data if queued.
+        queued = self.client.data_queue.get(self.table_name, [])
+        data = queued.pop(0) if queued else []
+        return type("Resp", (), {"data": data})()
+
+
+class _FakeSupabase:
+    def __init__(self):
+        self.calls: List[Dict[str, Any]] = []
+        self.data_queue: Dict[str, List[List[Dict[str, Any]]]] = {}
+
+    def queue(self, table: str, rows: List[Dict[str, Any]]):
+        self.data_queue.setdefault(table, []).append(rows)
+
+    def table(self, name):
+        # Return a query object whose operation is pinned on the next verb call.
+        q = _FakeQuery(self, name, operation="select")
+        # Shim the verb methods to flip the operation before delegating.
+        orig_insert, orig_update, orig_delete = q.insert, q.update, q.delete
+        def insert(payload):
+            q.operation = "insert"
+            return orig_insert(payload)
+        def update(payload):
+            q.operation = "update"
+            return orig_update(payload)
+        def delete():
+            q.operation = "delete"
+            return orig_delete()
+        q.insert, q.update, q.delete = insert, update, delete
+        return q
+
+
+def test_facts_writer_insert_facts_returns_ids_and_texts():
+    """Writer must return ``(ids_by_article, texts_by_id)`` so embedding
+    creation can skip a redundant SELECT against rows we just inserted."""
+    from src.functions.url_content_extraction.core.db import FactsWriter
+
+    client = _FakeSupabase()
+    writer = FactsWriter(client)
+    ids_by_article, texts_by_id = writer.insert_facts(
+        {"article-1": ["fact A", "fact B"]}, model="m"
+    )
+    assert set(ids_by_article["article-1"]) == {"news_facts-0", "news_facts-1"}
+    assert set(texts_by_id.values()) == {"fact A", "fact B"}
+
+
+def test_facts_writer_mark_facts_extracted_buckets_by_count_and_difficulty():
+    """Articles with the same (facts_count, difficulty) bucket collapse to a
+    single UPDATE. This is the perf fix we can't let regress."""
+    from src.functions.url_content_extraction.core.db import FactsWriter
+
+    client = _FakeSupabase()
+    writer = FactsWriter(client)
+    writer.mark_facts_extracted(
+        {
+            "a1": ["f"] * 5,   # easy, count=5
+            "a2": ["f"] * 5,   # easy, count=5 — same bucket as a1
+            "a3": ["f"] * 20,  # medium, count=20
+            "a4": ["f"] * 40,  # hard, count=40
+        }
+    )
+    update_calls = [c for c in client.calls if c["op"] == "update" and c["table"] == "news_urls"]
+    # 3 buckets → 3 updates (a1+a2 collapse).
+    assert len(update_calls) == 3
+    ids_updated = []
+    for call in update_calls:
+        filt = call["filters"].get("id")
+        assert filt and filt[0] == "in"
+        ids_updated.extend(filt[1])
+    assert set(ids_updated) == {"a1", "a2", "a3", "a4"}
+
+
+def test_facts_writer_mark_single_article_only_backfills_null_content_stamp():
+    """Realtime path must leave content_extracted_at alone when it's already
+    populated, but backfill when it's null."""
+    from src.functions.url_content_extraction.core.db import FactsWriter
+
+    client = _FakeSupabase()
+    writer = FactsWriter(client)
+    writer.mark_single_article_facts_extracted("nid-1")
+    updates = [c for c in client.calls if c["op"] == "update"]
+    # First update: unconditional facts_extracted_at.
+    assert "facts_extracted_at" in updates[0]["payload"]
+    assert updates[0]["filters"].get("id") == "nid-1"
+    # Second update: guards on is("content_extracted_at", "null").
+    assert "content_extracted_at" in updates[1]["payload"]
+    assert updates[1]["filters"].get("content_extracted_at") == ("is", "null")
+
+
+def test_facts_writer_insert_pooled_embedding_averages():
+    """Pooled embedding averages the supplied vectors element-wise."""
+    from src.functions.url_content_extraction.core.db import FactsWriter
+
+    client = _FakeSupabase()
+    writer = FactsWriter(client)
+    ok = writer.insert_pooled_embedding(
+        "nid-1",
+        vectors=[[1.0, 2.0, 3.0], [3.0, 4.0, 5.0]],
+        model="m",
+    )
+    assert ok is True
+    insert_calls = [c for c in client.calls if c["op"] == "insert"]
+    payload = insert_calls[-1]["payload"]
+    assert payload["embedding_vector"] == [2.0, 3.0, 4.0]
+    assert payload["embedding_type"] == "fact_pooled"
+
+
+def test_facts_writer_insert_pooled_embedding_skips_when_no_vectors():
+    """No vectors → no write (returns False)."""
+    from src.functions.url_content_extraction.core.db import FactsWriter
+
+    client = _FakeSupabase()
+    writer = FactsWriter(client)
+    assert writer.insert_pooled_embedding("nid-1", vectors=[], model="m") is False
+    assert not [c for c in client.calls if c["op"] == "insert"]
 
 
 def test_handle_request_invalid_url_entry_does_not_abort(monkeypatch):

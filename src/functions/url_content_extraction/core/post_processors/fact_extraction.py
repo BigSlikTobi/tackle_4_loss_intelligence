@@ -1,22 +1,23 @@
 """Streamlined fact extraction post-processor for URL content extraction integration.
 
 This module provides lightweight fact extraction for real-time processing (1-10 articles).
-For bulk processing (1000+ articles), use backlog_processor.py instead.
+For bulk processing (1000+ articles), use the ``facts_batch`` pipeline instead.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Tuple
 
 import httpx
 
-# Import the single source of truth for the prompt and filter so the realtime
-# path cannot drift from the batch path.
-from ..facts.prompts import FACT_PROMPT_VERSION, get_formatted_prompt
+# Single source of truth for the prompt and filter so the realtime path
+# cannot drift from the batch path.
+from ..facts.prompts import get_formatted_prompt
 from ..facts.filter import filter_story_facts
+from ..db import FactsReader, FactsWriter
 
 logger = logging.getLogger(__name__)
 
@@ -32,351 +33,248 @@ def extract_and_store_facts(
     embedding_config: Dict[str, str],
 ) -> Dict[str, Any]:
     """Extract facts from article content and store to database.
-    
-    This is a streamlined version for real-time processing with the url_extraction
-    Cloud Function. It processes a single article without checkpoint or retry logic.
-    
-    Args:
-        article_content: Extracted article text
-        news_url_id: News URL ID from database
-        supabase_config: Dict with 'url' and 'key'
-        llm_config: Dict with 'api_url', 'api_key', 'model'
-        embedding_config: Dict with 'api_url', 'api_key', 'model'
-        
-    Returns:
-        Dict with:
-            - facts_count: Number of facts extracted
-            - facts_extracted: Boolean success flag
-            - embedding_count: Number of embeddings created
-            - error: Error message if failed, else None
+
+    Streamlined single-article entry point for the url_extraction Cloud
+    Function. Shares the facts schema layer (``FactsReader`` / ``FactsWriter``)
+    with the batch path, so both paths insert, mark, and pool identically.
+
+    Returns a dict with ``facts_count``, ``facts_extracted``, ``embedding_count``,
+    and ``error``.
     """
     try:
-        # Initialize Supabase client
         from supabase import create_client
-        client = create_client(
-            supabase_config["url"],
-            supabase_config["key"]
-        )
-        
-        # Extract facts using LLM
+
+        client = create_client(supabase_config["url"], supabase_config["key"])
+        reader = FactsReader(client)
+        writer = FactsWriter(client)
+
+        model = llm_config.get("model", DEFAULT_FACT_MODEL)
+        embedding_model = embedding_config.get("model", DEFAULT_EMBEDDING_MODEL)
+
+        # 1. Extract facts via LLM.
         facts = _extract_facts_llm(
             article_content,
             llm_config["api_url"],
             llm_config["api_key"],
-            llm_config.get("model", DEFAULT_FACT_MODEL)
+            model,
         )
-        
         if not facts:
-            return {
-                "facts_count": 0,
-                "facts_extracted": False,
-                "embedding_count": 0,
-                "error": "No facts extracted from article"
-            }
-        
-        # Filter non-story facts using the shared filter (same rules as the
-        # batch path) so realtime and batch never diverge.
+            return _result(0, False, 0, "No facts extracted from article")
+
+        # 2. Filter (shared with batch path).
         filtered_facts, _rejected = filter_story_facts(facts)
-        
         if not filtered_facts:
-            return {
-                "facts_count": 0,
-                "facts_extracted": False,
-                "embedding_count": 0,
-                "error": "All extracted facts were filtered as non-story content"
-            }
-        
-        # Store facts in database
-        fact_ids = _store_facts(
-            client,
-            news_url_id,
-            filtered_facts,
-            llm_config.get("model", DEFAULT_FACT_MODEL)
+            return _result(
+                0, False, 0,
+                "All extracted facts were filtered as non-story content",
+            )
+
+        # 3. Skip if already stored.
+        if reader.fetch_existing_fact_ids(news_url_id):
+            logger.info("Facts already exist for %s", news_url_id)
+            return _result(
+                len(filtered_facts), True, 0,
+                "Facts already exist or storage failed",
+            )
+
+        # 4. Insert — get back (ids, texts_by_id) so downstream stages skip a
+        # redundant SELECT.
+        fact_ids, texts_by_id = writer.insert_facts_for_article(
+            news_url_id, filtered_facts, model
         )
-        
         if not fact_ids:
-            return {
-                "facts_count": len(filtered_facts),
-                "facts_extracted": True,
-                "embedding_count": 0,
-                "error": "Facts already exist or storage failed"
-            }
-        
-        # Generate and store embeddings; reuse the in-memory vectors for the
-        # pooled embedding so we don't re-read them from the database.
+            return _result(
+                len(filtered_facts), True, 0,
+                "Facts already exist or storage failed",
+            )
+
+        # 5. Embeddings + pooled article embedding (reusing in-memory vectors).
         embedding_count, fresh_vectors = _create_embeddings(
-            client,
+            reader,
+            writer,
             fact_ids,
+            texts_by_id,
             embedding_config["api_url"],
             embedding_config["api_key"],
-            embedding_config.get("model", DEFAULT_EMBEDDING_MODEL),
+            embedding_model,
         )
+        if not reader.pooled_embedding_exists(news_url_id):
+            writer.insert_pooled_embedding(
+                news_url_id,
+                fresh_vectors or reader.fetch_fact_embeddings(fact_ids),
+                embedding_model,
+            )
 
-        _create_pooled_embedding(
-            client,
-            news_url_id,
-            embedding_config.get("model", DEFAULT_EMBEDDING_MODEL),
-            known_vectors=fresh_vectors,
-        )
-        
-        # Mark facts timestamp; leave content_extracted_at untouched (another
-        # stage owns it). Backfill only if still null so we don't overwrite a
-        # truer extraction timestamp.
-        now_iso = datetime.now(timezone.utc).isoformat()
-        client.table("news_urls").update(
-            {"facts_extracted_at": now_iso}
-        ).eq("id", news_url_id).execute()
-        client.table("news_urls").update(
-            {"content_extracted_at": now_iso}
-        ).eq("id", news_url_id).is_("content_extracted_at", "null").execute()
-        
-        return {
-            "facts_count": len(fact_ids),
-            "facts_extracted": True,
-            "embedding_count": embedding_count,
-            "error": None
-        }
-        
+        # 6. Stamp facts_extracted_at; backfill content_extracted_at only
+        # when still null (so we don't overwrite a truer upstream value).
+        writer.mark_single_article_facts_extracted(news_url_id)
+
+        return _result(len(fact_ids), True, embedding_count, None)
+
     except Exception as e:
-        logger.error(f"Fact extraction failed for {news_url_id}: {e}", exc_info=True)
-        return {
-            "facts_count": 0,
-            "facts_extracted": False,
-            "embedding_count": 0,
-            "error": str(e)
-        }
+        logger.error(
+            "Fact extraction failed for %s: %s", news_url_id, e, exc_info=True
+        )
+        return _result(0, False, 0, str(e))
+
+
+def _result(
+    facts_count: int,
+    facts_extracted: bool,
+    embedding_count: int,
+    error: str | None,
+) -> Dict[str, Any]:
+    return {
+        "facts_count": facts_count,
+        "facts_extracted": facts_extracted,
+        "embedding_count": embedding_count,
+        "error": error,
+    }
+
+
+# ---------------------------------------------------------------------------
+# LLM fact extraction (Gemini)
+# ---------------------------------------------------------------------------
 
 
 def _extract_facts_llm(
     article_content: str,
     llm_api_url: str,
     llm_api_key: str,
-    model: str
+    model: str,
 ) -> List[str]:
-    """Call LLM to extract facts from article.
-    
-    Args:
-        article_content: Article text
-        llm_api_url: Gemini API base URL
-        llm_api_key: API key
-        model: Model name
-        
-    Returns:
-        List of extracted fact strings
-    """
+    """Call the Gemini API to extract facts and return them as a flat list."""
     formatted_prompt = get_formatted_prompt()
-    
-    # Build Gemini API URL
     url = f"{llm_api_url}/{model}:generateContent?key={llm_api_key}"
-    
     headers = {"Content-Type": "application/json"}
-    
     payload = {
-        "contents": [{
-            "parts": [{
-                "text": f"{formatted_prompt}\n\nArticle:\n{article_content}"
-            }]
-        }],
-        "generationConfig": {
-            "temperature": 0,
-            "maxOutputTokens": 32000,
-        }
+        "contents": [
+            {"parts": [{"text": f"{formatted_prompt}\n\nArticle:\n{article_content}"}]}
+        ],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 32000},
     }
-    
+
     try:
         with httpx.Client(timeout=60) as client:
             response = client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
+    except Exception as e:
+        logger.error("LLM fact extraction failed: %s", e)
+        return []
 
-        # Parse Gemini response
-        if isinstance(data, dict) and "candidates" in data:
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-            
-            # Clean control characters
-            text = ''.join(char for char in text if ord(char) >= 32 or char in '\t\n\r')
-            
-            # Extract JSON
-            import re
-            json_match = re.search(r'```(?:json)?\s*(\{.*)', text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-                json_str = re.sub(r'\s*```\s*$', '', json_str)
-                json_str = ''.join(char for char in json_str if ord(char) >= 32 or char in '\t\n\r')
-                
-                try:
-                    parsed = json.loads(json_str)
-                    facts = parsed.get("facts", [])
-                    if isinstance(facts, list):
-                        return [f.strip() for f in facts if isinstance(f, str) and f.strip()]
-                except json.JSONDecodeError:
-                    pass
-            
-            # Try parsing entire text
-            try:
-                parsed = json.loads(text.strip())
-                facts = parsed.get("facts", [])
-                if isinstance(facts, list):
-                    return [f.strip() for f in facts if isinstance(f, str) and f.strip()]
-            except json.JSONDecodeError:
-                pass
-        
+    if not isinstance(data, dict) or "candidates" not in data:
         logger.warning("Failed to parse LLM response for facts")
         return []
-        
-    except Exception as e:
-        logger.error(f"LLM fact extraction failed: {e}")
-        return []
 
-
-def _store_facts(
-    client,
-    news_url_id: str,
-    facts: List[str],
-    model: str
-) -> List[str]:
-    """Store facts in database.
-    
-    Args:
-        client: Supabase client
-        news_url_id: News URL ID
-        facts: List of fact strings
-        model: LLM model name
-        
-    Returns:
-        List of created fact IDs
-    """
-    if not facts:
-        return []
-    
-    # Check if facts already exist
-    existing = client.table("news_facts").select("id").eq(
-        "news_url_id", news_url_id
-    ).eq("prompt_version", FACT_PROMPT_VERSION).limit(1).execute()
-    
-    if getattr(existing, "data", []):
-        logger.info(f"Facts already exist for {news_url_id}")
-        return []
-    
-    # Prepare records
-    records = [
-        {
-            "news_url_id": news_url_id,
-            "fact_text": fact,
-            "llm_model": model,
-            "prompt_version": FACT_PROMPT_VERSION,
-        }
-        for fact in facts
-    ]
-    
-    # Insert
     try:
-        response = client.table("news_facts").insert(records).execute()
-        data = getattr(response, "data", []) or []
-        fact_ids = [row.get("id") for row in data if row.get("id")]
-        logger.info(f"Stored {len(fact_ids)} facts for {news_url_id}")
-        return fact_ids
-    except Exception as e:
-        logger.error(f"Failed to store facts: {e}")
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError):
+        logger.warning("Unexpected Gemini response shape")
         return []
+
+    # Strip control characters.
+    text = "".join(c for c in text if ord(c) >= 32 or c in "\t\n\r")
+
+    # First: look for a ```json code block.
+    json_match = re.search(r"```(?:json)?\s*(\{.*)", text, re.DOTALL)
+    if json_match:
+        json_str = re.sub(r"\s*```\s*$", "", json_match.group(1))
+        json_str = "".join(c for c in json_str if ord(c) >= 32 or c in "\t\n\r")
+        facts = _parse_facts_json(json_str)
+        if facts is not None:
+            return facts
+
+    # Fallback: parse the whole message.
+    facts = _parse_facts_json(text.strip())
+    if facts is not None:
+        return facts
+
+    logger.warning("Failed to parse LLM response for facts")
+    return []
+
+
+def _parse_facts_json(raw: str) -> List[str] | None:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    facts = parsed.get("facts") if isinstance(parsed, dict) else None
+    if not isinstance(facts, list):
+        return None
+    return [f.strip() for f in facts if isinstance(f, str) and f.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Embeddings
+# ---------------------------------------------------------------------------
 
 
 def _create_embeddings(
-    client,
+    reader: FactsReader,
+    writer: FactsWriter,
     fact_ids: List[str],
+    texts_by_id: Dict[str, str],
     embedding_api_url: str,
     embedding_api_key: str,
     model: str,
-) -> tuple[int, List[List[float]]]:
-    """Generate and store embeddings for facts.
+) -> Tuple[int, List[List[float]]]:
+    """Generate embeddings for ``fact_ids`` and persist them.
 
-    Returns ``(inserted_count, vectors)`` where ``vectors`` is the list of
-    newly-generated embedding vectors that this call persisted. The caller can
-    feed ``vectors`` straight into a pooled-embedding computation without a
-    follow-up ``SELECT`` against ``facts_embeddings``.
+    Returns ``(inserted_count, vectors)``. ``vectors`` lets the caller feed
+    the freshly-computed embeddings straight into pooled embedding creation
+    without re-reading ``facts_embeddings``.
     """
     if not fact_ids:
         return 0, []
 
-    # Check existing embeddings
-    existing = client.table("facts_embeddings").select("news_fact_id").in_(
-        "news_fact_id", fact_ids
-    ).execute()
-    existing_ids = {row.get("news_fact_id") for row in (getattr(existing, "data", []) or [])}
-
-    facts_to_embed = [fid for fid in fact_ids if fid not in existing_ids]
+    existing = reader.check_existing_embeddings(fact_ids)
+    facts_to_embed = [fid for fid in fact_ids if fid not in existing]
     if not facts_to_embed:
         return 0, []
 
-    # Fetch fact texts
-    facts_response = client.table("news_facts").select("id,fact_text").in_(
-        "id", facts_to_embed
-    ).execute()
-    fact_rows = getattr(facts_response, "data", []) or []
-
-    if not fact_rows:
+    ordered_texts = [(fid, texts_by_id.get(fid, "")) for fid in facts_to_embed]
+    ordered_texts = [(fid, text) for fid, text in ordered_texts if text]
+    if not ordered_texts:
         return 0, []
 
-    texts = [row.get("fact_text", "") for row in fact_rows]
+    texts = [text for _, text in ordered_texts]
     embeddings = _generate_embeddings_batch(
-        texts,
-        embedding_api_url,
-        embedding_api_key,
-        model,
+        texts, embedding_api_url, embedding_api_key, model
     )
-
-    if not embeddings or len(embeddings) != len(fact_rows):
+    if not embeddings or len(embeddings) != len(ordered_texts):
         logger.error("Embedding generation failed or count mismatch")
         return 0, []
 
-    # Prepare records and track the vectors we actually keep.
-    embedding_records: List[Dict[str, Any]] = []
+    records: List[Dict[str, Any]] = []
     kept_vectors: List[List[float]] = []
-    for idx, row in enumerate(fact_rows):
-        vector = embeddings[idx] if idx < len(embeddings) else []
+    for (fid, _text), vector in zip(ordered_texts, embeddings):
         if vector:
-            embedding_records.append({
-                "news_fact_id": row.get("id"),
-                "embedding_vector": vector,
-                "model_name": model,
-            })
+            records.append(
+                {
+                    "news_fact_id": fid,
+                    "embedding_vector": vector,
+                    "model_name": model,
+                }
+            )
             kept_vectors.append(vector)
 
-    if embedding_records:
-        try:
-            response = client.table("facts_embeddings").insert(embedding_records).execute()
-            inserted = len(getattr(response, "data", []) or [])
-            logger.info(f"Created {inserted} embeddings")
-            return inserted, kept_vectors
-        except Exception as e:
-            logger.error(f"Failed to insert embeddings: {e}")
-            return 0, []
-
-    return 0, []
+    inserted = writer.insert_fact_embeddings(records)
+    if inserted:
+        logger.info("Created %d embeddings", inserted)
+    return inserted, kept_vectors
 
 
 def _generate_embeddings_batch(
     texts: List[str],
     api_url: str,
     api_key: str,
-    model: str
+    model: str,
 ) -> List[List[float]]:
-    """Generate embeddings for batch of texts.
-    
-    Args:
-        texts: List of text strings
-        api_url: OpenAI API URL
-        api_key: API key
-        model: Model name
-        
-    Returns:
-        List of embedding vectors
-    """
+    """Generate embeddings for ``texts`` in batches of 100 over a shared client."""
     if not texts:
         return []
-    
-    # Process in batches of 100 over a shared httpx.Client so connection
-    # pooling survives across batches for the single call.
+
     BATCH_SIZE = 100
     all_embeddings: List[List[float]] = []
     headers = {
@@ -386,7 +284,7 @@ def _generate_embeddings_batch(
 
     with httpx.Client(timeout=30) as client:
         for i in range(0, len(texts), BATCH_SIZE):
-            batch = texts[i:i + BATCH_SIZE]
+            batch = texts[i : i + BATCH_SIZE]
             try:
                 response = client.post(
                     api_url,
@@ -403,92 +301,8 @@ def _generate_embeddings_batch(
                         batch_embeddings.append(embedding)
 
                 all_embeddings.extend(batch_embeddings)
-
             except Exception as e:
-                logger.error(f"Embedding batch failed: {e}")
+                logger.error("Embedding batch failed: %s", e)
                 all_embeddings.extend([[] for _ in batch])
 
     return all_embeddings
-
-
-def _create_pooled_embedding(
-    client,
-    news_url_id: str,
-    model: str,
-    *,
-    known_vectors: List[List[float]] | None = None,
-) -> None:
-    """Create article-level pooled embedding by averaging fact embeddings.
-
-    ``known_vectors`` (optional): embedding vectors already computed in the
-    current request. When provided, we skip the two DB round-trips
-    (``news_facts`` + ``facts_embeddings``) and average directly. Falls back
-    to fetching from the DB when none are supplied (e.g. when facts were
-    already embedded from a prior run).
-    """
-    # Check if already exists
-    existing = client.table("story_embeddings").select("id").eq(
-        "news_url_id", news_url_id
-    ).eq("embedding_type", "fact_pooled").limit(1).execute()
-
-    if getattr(existing, "data", []):
-        return
-
-    vectors: List[List[float]] = [v for v in (known_vectors or []) if v]
-
-    if not vectors:
-        # Fallback: DB-backed path for callers that don't have vectors in
-        # memory (or when embeddings were created by a prior invocation).
-        facts_response = client.table("news_facts").select("id").eq(
-            "news_url_id", news_url_id
-        ).execute()
-        fact_rows = getattr(facts_response, "data", []) or []
-        fact_ids = [row.get("id") for row in fact_rows if row.get("id")]
-
-        if not fact_ids:
-            return
-
-        embeddings_response = client.table("facts_embeddings").select(
-            "embedding_vector"
-        ).in_("news_fact_id", fact_ids).execute()
-        embedding_rows = getattr(embeddings_response, "data", []) or []
-
-        for row in embedding_rows:
-            vector = row.get("embedding_vector")
-            if isinstance(vector, str):
-                try:
-                    vector = json.loads(vector.strip('[]'))
-                except Exception:
-                    pass
-            if isinstance(vector, list) and vector:
-                vectors.append(vector)
-
-    if not vectors:
-        return
-    
-    # Average vectors
-    dimension = len(vectors[0])
-    totals = [0.0] * dimension
-    
-    for vector in vectors:
-        if len(vector) != dimension:
-            continue
-        for idx, val in enumerate(vector):
-            totals[idx] += float(val)
-    
-    averaged = [val / len(vectors) for val in totals]
-    
-    # Insert pooled embedding
-    try:
-        client.table("story_embeddings").insert({
-            "news_url_id": news_url_id,
-            "embedding_vector": averaged,
-            "model_name": model,
-            "embedding_type": "fact_pooled",
-            "scope": "article",
-            "primary_topic": None,
-            "primary_team": None,
-        }).execute()
-        logger.info(f"Created pooled embedding for {news_url_id}")
-    except Exception as e:
-        logger.error(f"Failed to create pooled embedding: {e}")
