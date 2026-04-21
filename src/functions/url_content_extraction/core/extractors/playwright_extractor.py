@@ -228,13 +228,19 @@ class PlaywrightExtractor:
                 # Wait a bit for consent dialog to be dismissed and page to reflow
                 await page.wait_for_timeout(500)
                 
-                # Scroll to trigger lazy-loaded content (critical for ESPN)
-                try:
-                    for _ in range(3):
-                        await page.mouse.wheel(0, 800)
-                        await page.wait_for_timeout(250)
-                except PlaywrightError:
-                    pass
+                # Scroll to trigger lazy-loaded content — only on hosts known
+                # to lazy-render articles. For everyone else the unconditional
+                # 3×800px + 3×250ms dance added ~1-2s per URL for no gain.
+                from .extractor_factory import is_heavy_url
+
+                host_is_heavy = is_heavy_url(str(options.url))
+                if host_is_heavy:
+                    try:
+                        for _ in range(3):
+                            await page.mouse.wheel(0, 800)
+                            await page.wait_for_timeout(250)
+                    except PlaywrightError:
+                        pass
                 
                 # Give ESPN's JavaScript time to populate content
                 is_espn = "espn.com" in str(options.url).lower()

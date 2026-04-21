@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-import requests
+import httpx
 
 # Import the single source of truth for the prompt and filter so the realtime
 # path cannot drift from the batch path.
@@ -102,20 +102,21 @@ def extract_and_store_facts(
                 "error": "Facts already exist or storage failed"
             }
         
-        # Generate and store embeddings
-        embedding_count = _create_embeddings(
+        # Generate and store embeddings; reuse the in-memory vectors for the
+        # pooled embedding so we don't re-read them from the database.
+        embedding_count, fresh_vectors = _create_embeddings(
             client,
             fact_ids,
             embedding_config["api_url"],
             embedding_config["api_key"],
-            embedding_config.get("model", DEFAULT_EMBEDDING_MODEL)
+            embedding_config.get("model", DEFAULT_EMBEDDING_MODEL),
         )
-        
-        # Create pooled embedding for article
+
         _create_pooled_embedding(
             client,
             news_url_id,
-            embedding_config.get("model", DEFAULT_EMBEDDING_MODEL)
+            embedding_config.get("model", DEFAULT_EMBEDDING_MODEL),
+            known_vectors=fresh_vectors,
         )
         
         # Mark facts timestamp; leave content_extracted_at untouched (another
@@ -183,10 +184,11 @@ def _extract_facts_llm(
     }
     
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        with httpx.Client(timeout=60) as client:
+            response = client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
-        
+
         # Parse Gemini response
         if isinstance(data, dict) and "candidates" in data:
             text = data["candidates"][0]["content"]["parts"][0]["text"]
@@ -284,77 +286,73 @@ def _create_embeddings(
     fact_ids: List[str],
     embedding_api_url: str,
     embedding_api_key: str,
-    model: str
-) -> int:
+    model: str,
+) -> tuple[int, List[List[float]]]:
     """Generate and store embeddings for facts.
-    
-    Args:
-        client: Supabase client
-        fact_ids: List of fact IDs
-        embedding_api_url: OpenAI API URL
-        embedding_api_key: API key
-        model: Embedding model name
-        
-    Returns:
-        Number of embeddings created
+
+    Returns ``(inserted_count, vectors)`` where ``vectors`` is the list of
+    newly-generated embedding vectors that this call persisted. The caller can
+    feed ``vectors`` straight into a pooled-embedding computation without a
+    follow-up ``SELECT`` against ``facts_embeddings``.
     """
     if not fact_ids:
-        return 0
-    
+        return 0, []
+
     # Check existing embeddings
     existing = client.table("facts_embeddings").select("news_fact_id").in_(
         "news_fact_id", fact_ids
     ).execute()
     existing_ids = {row.get("news_fact_id") for row in (getattr(existing, "data", []) or [])}
-    
+
     facts_to_embed = [fid for fid in fact_ids if fid not in existing_ids]
     if not facts_to_embed:
-        return 0
-    
+        return 0, []
+
     # Fetch fact texts
     facts_response = client.table("news_facts").select("id,fact_text").in_(
         "id", facts_to_embed
     ).execute()
     fact_rows = getattr(facts_response, "data", []) or []
-    
+
     if not fact_rows:
-        return 0
-    
-    # Generate embeddings (batch up to 100)
+        return 0, []
+
     texts = [row.get("fact_text", "") for row in fact_rows]
     embeddings = _generate_embeddings_batch(
         texts,
         embedding_api_url,
         embedding_api_key,
-        model
+        model,
     )
-    
+
     if not embeddings or len(embeddings) != len(fact_rows):
-        logger.error(f"Embedding generation failed or count mismatch")
-        return 0
-    
-    # Prepare embedding records
-    embedding_records = []
+        logger.error("Embedding generation failed or count mismatch")
+        return 0, []
+
+    # Prepare records and track the vectors we actually keep.
+    embedding_records: List[Dict[str, Any]] = []
+    kept_vectors: List[List[float]] = []
     for idx, row in enumerate(fact_rows):
-        if idx < len(embeddings) and embeddings[idx]:
+        vector = embeddings[idx] if idx < len(embeddings) else []
+        if vector:
             embedding_records.append({
                 "news_fact_id": row.get("id"),
-                "embedding_vector": embeddings[idx],
+                "embedding_vector": vector,
                 "model_name": model,
             })
-    
-    # Insert embeddings
+            kept_vectors.append(vector)
+
     if embedding_records:
         try:
             response = client.table("facts_embeddings").insert(embedding_records).execute()
             inserted = len(getattr(response, "data", []) or [])
             logger.info(f"Created {inserted} embeddings")
-            return inserted
+            return inserted, kept_vectors
         except Exception as e:
             logger.error(f"Failed to insert embeddings: {e}")
-            return 0
-    
-    return 0
+            return 0, []
+
+    return 0, []
 
 
 def _generate_embeddings_batch(
@@ -377,95 +375,94 @@ def _generate_embeddings_batch(
     if not texts:
         return []
     
-    # Process in batches of 100
+    # Process in batches of 100 over a shared httpx.Client so connection
+    # pooling survives across batches for the single call.
     BATCH_SIZE = 100
-    all_embeddings = []
-    
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i:i + BATCH_SIZE]
-        
-        try:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": model,
-                "input": batch,
-            }
-            
-            response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Extract embeddings in order
-            batch_embeddings = []
-            for item in data.get("data", []):
-                embedding = item.get("embedding", [])
-                if isinstance(embedding, list):
-                    batch_embeddings.append(embedding)
-            
-            all_embeddings.extend(batch_embeddings)
-            
-        except Exception as e:
-            logger.error(f"Embedding batch failed: {e}")
-            # Return empty for failed batch
-            all_embeddings.extend([[] for _ in batch])
-    
+    all_embeddings: List[List[float]] = []
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    with httpx.Client(timeout=30) as client:
+        for i in range(0, len(texts), BATCH_SIZE):
+            batch = texts[i:i + BATCH_SIZE]
+            try:
+                response = client.post(
+                    api_url,
+                    headers=headers,
+                    json={"model": model, "input": batch},
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                batch_embeddings: List[List[float]] = []
+                for item in data.get("data", []):
+                    embedding = item.get("embedding", [])
+                    if isinstance(embedding, list):
+                        batch_embeddings.append(embedding)
+
+                all_embeddings.extend(batch_embeddings)
+
+            except Exception as e:
+                logger.error(f"Embedding batch failed: {e}")
+                all_embeddings.extend([[] for _ in batch])
+
     return all_embeddings
 
 
 def _create_pooled_embedding(
     client,
     news_url_id: str,
-    model: str
+    model: str,
+    *,
+    known_vectors: List[List[float]] | None = None,
 ) -> None:
     """Create article-level pooled embedding by averaging fact embeddings.
-    
-    Args:
-        client: Supabase client
-        news_url_id: News URL ID
-        model: Embedding model name
+
+    ``known_vectors`` (optional): embedding vectors already computed in the
+    current request. When provided, we skip the two DB round-trips
+    (``news_facts`` + ``facts_embeddings``) and average directly. Falls back
+    to fetching from the DB when none are supplied (e.g. when facts were
+    already embedded from a prior run).
     """
     # Check if already exists
     existing = client.table("story_embeddings").select("id").eq(
         "news_url_id", news_url_id
     ).eq("embedding_type", "fact_pooled").limit(1).execute()
-    
+
     if getattr(existing, "data", []):
         return
-    
-    # Get fact IDs
-    facts_response = client.table("news_facts").select("id").eq(
-        "news_url_id", news_url_id
-    ).execute()
-    fact_rows = getattr(facts_response, "data", []) or []
-    fact_ids = [row.get("id") for row in fact_rows if row.get("id")]
-    
-    if not fact_ids:
-        return
-    
-    # Get embeddings
-    embeddings_response = client.table("facts_embeddings").select(
-        "embedding_vector"
-    ).in_("news_fact_id", fact_ids).execute()
-    embedding_rows = getattr(embeddings_response, "data", []) or []
-    
-    vectors = []
-    for row in embedding_rows:
-        vector = row.get("embedding_vector")
-        
-        # Parse if string (Supabase VECTOR returns as string)
-        if isinstance(vector, str):
-            try:
-                import re
-                vector = json.loads(vector.strip('[]'))
-            except:
-                pass
-        
-        if isinstance(vector, list) and vector:
-            vectors.append(vector)
-    
+
+    vectors: List[List[float]] = [v for v in (known_vectors or []) if v]
+
+    if not vectors:
+        # Fallback: DB-backed path for callers that don't have vectors in
+        # memory (or when embeddings were created by a prior invocation).
+        facts_response = client.table("news_facts").select("id").eq(
+            "news_url_id", news_url_id
+        ).execute()
+        fact_rows = getattr(facts_response, "data", []) or []
+        fact_ids = [row.get("id") for row in fact_rows if row.get("id")]
+
+        if not fact_ids:
+            return
+
+        embeddings_response = client.table("facts_embeddings").select(
+            "embedding_vector"
+        ).in_("news_fact_id", fact_ids).execute()
+        embedding_rows = getattr(embeddings_response, "data", []) or []
+
+        for row in embedding_rows:
+            vector = row.get("embedding_vector")
+            if isinstance(vector, str):
+                try:
+                    vector = json.loads(vector.strip('[]'))
+                except Exception:
+                    pass
+            if isinstance(vector, list) and vector:
+                vectors.append(vector)
+
     if not vectors:
         return
     

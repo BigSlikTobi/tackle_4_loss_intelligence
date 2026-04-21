@@ -153,10 +153,30 @@ class FactsBatchRequestGenerator:
 
         # Parallel content fetching with overall timeout protection
         CONTENT_FETCH_TIMEOUT = 600  # 10 minutes max for all fetching
-        logger.info(f"Fetching content for {len(unique_articles)} articles using {self.max_workers} workers (timeout: {CONTENT_FETCH_TIMEOUT}s)...")
         fetched_contents: Dict[str, str] = {}
         failed_fetches = 0
-        
+
+        # Split into heavy (Playwright-required) and light pools. Light URLs
+        # parallelize cheaply over HTTP; heavy URLs each spin up Chromium and
+        # can OOM a 2-CPU Cloud Function if too many run at once. Capping the
+        # heavy pool at 2 keeps memory bounded while letting the light pool
+        # use the full `max_workers`.
+        from ..extractors.extractor_factory import is_heavy_url
+
+        heavy_articles = [a for a in unique_articles if is_heavy_url(a.get("url", ""))]
+        light_articles = [a for a in unique_articles if not is_heavy_url(a.get("url", ""))]
+        heavy_workers = min(2, max(1, len(heavy_articles)))
+
+        logger.info(
+            "Fetching content for %d articles (%d heavy @ %d workers, %d light @ %d workers, timeout: %ds)...",
+            len(unique_articles),
+            len(heavy_articles),
+            heavy_workers,
+            len(light_articles),
+            self.max_workers,
+            CONTENT_FETCH_TIMEOUT,
+        )
+
         def fetch_article_content(article: Dict[str, Any]) -> Tuple[str, str, bool]:
             """Fetch content for a single article. Returns (id, content, success)."""
             news_url_id = article["id"]
@@ -168,29 +188,34 @@ class FactsBatchRequestGenerator:
                 logger.warning(f"Failed to fetch {url[:60]}: {e}")
                 return (news_url_id, "", False)
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {
-                executor.submit(fetch_article_content, article): article
-                for article in unique_articles
-            }
-            
-            completed = 0
-            # Use as_completed with timeout to prevent indefinite hangs
-            for future in as_completed(futures, timeout=CONTENT_FETCH_TIMEOUT):
-                completed += 1
-                try:
-                    news_url_id, content, success = future.result(timeout=5)  # Quick result extraction
-                    if success:
-                        fetched_contents[news_url_id] = content
-                    else:
+        def run_pool(articles: List[Dict[str, Any]], workers: int) -> None:
+            nonlocal failed_fetches
+            if not articles:
+                return
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(fetch_article_content, a): a for a in articles}
+                completed = 0
+                for future in as_completed(futures, timeout=CONTENT_FETCH_TIMEOUT):
+                    completed += 1
+                    try:
+                        news_url_id, content, success = future.result(timeout=5)
+                        if success:
+                            fetched_contents[news_url_id] = content
+                        else:
+                            failed_fetches += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to get result for article: {e}")
                         failed_fetches += 1
-                except Exception as e:
-                    logger.warning(f"Failed to get result for article: {e}")
-                    failed_fetches += 1
-                
-                # Progress logging every 50 articles
-                if completed % 50 == 0 or completed == len(unique_articles):
-                    logger.info(f"Content fetch progress: {completed}/{len(unique_articles)} ({len(fetched_contents)} successful)")
+                    if completed % 50 == 0 or completed == len(articles):
+                        logger.info(
+                            "Content fetch progress: %d/%d (%d successful)",
+                            completed,
+                            len(articles),
+                            len(fetched_contents),
+                        )
+
+        run_pool(light_articles, self.max_workers)
+        run_pool(heavy_articles, heavy_workers)
 
         logger.info(f"Content fetching complete: {len(fetched_contents)} successful, {failed_fetches} failed")
 
