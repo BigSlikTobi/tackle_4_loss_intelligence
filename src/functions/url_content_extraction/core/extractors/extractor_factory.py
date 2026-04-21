@@ -19,7 +19,7 @@ class Extractor(Protocol):
         """Extract article content for the provided URL."""
 
 
-_HEAVY_HOSTS = {
+HEAVY_HOSTS = {
     "www.espn.com",
     "www.nfl.com",
     "sports.yahoo.com",
@@ -31,11 +31,24 @@ _HEAVY_HOSTS = {
     "www.nbcsportswashington.com",
 }
 
-_LIGHT_HOSTS = {
+LIGHT_HOSTS = {
     "apnews.com",
     "www.si.com",
     "bleacherreport.com",
 }
+
+# Backwards-compatible private aliases
+_HEAVY_HOSTS = HEAVY_HOSTS
+_LIGHT_HOSTS = LIGHT_HOSTS
+
+
+def is_heavy_url(url: str) -> bool:
+    """Return True if ``url`` targets a host that requires Playwright."""
+    try:
+        hostname = urlparse(url).hostname or ""
+        return hostname in HEAVY_HOSTS
+    except Exception:
+        return False
 
 
 def get_extractor(

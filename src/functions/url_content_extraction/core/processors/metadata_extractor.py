@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from bs4 import BeautifulSoup
@@ -47,7 +47,7 @@ def enrich_metadata(content: ExtractedContent, *, html: str, extractor_name: str
 
     if not content.metadata:
         content.metadata = ExtractionMetadata(
-            fetched_at=datetime.utcnow(),
+            fetched_at=datetime.now(timezone.utc),
             extractor=extractor_name,
             duration_seconds=0.0,
         )

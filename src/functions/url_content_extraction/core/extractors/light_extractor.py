@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -101,7 +101,7 @@ class LightExtractor:
             paragraphs=paragraphs,
             quotes=quotes,
             metadata=ExtractionMetadata(
-                fetched_at=datetime.utcnow(),
+                fetched_at=datetime.now(timezone.utc),
                 extractor="light",
                 duration_seconds=time.perf_counter() - start,
                 raw_url=str(options.url),

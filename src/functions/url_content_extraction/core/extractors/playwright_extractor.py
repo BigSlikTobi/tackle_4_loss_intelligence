@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from bs4 import BeautifulSoup
@@ -119,50 +118,6 @@ class PlaywrightExtractor:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(asyncio.run, self._extract(options))
             return future.result(timeout=options.timeout_seconds + 10)
-
-    @asynccontextmanager
-    async def _browser_context(self, options: ExtractionOptions):  # pragma: no cover - thin wrapper
-        if async_playwright is None:
-            msg = "Playwright is not available in the current environment"
-            raise RuntimeError(msg)
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True, args=self._STEALTH_ARGS)
-            context = await browser.new_context(
-                user_agent=self._USER_AGENT,
-                locale="en-US",
-                timezone_id="America/New_York",  # ESPN is US-centric
-                ignore_https_errors=True,
-                viewport={"width": 1280, "height": 1600},
-                extra_http_headers={
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Upgrade-Insecure-Requests": "1",
-                },
-            )
-            
-            # Anti-detection script (like your JS init script)
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                window.chrome = window.chrome || { runtime: {} };
-                const originalQuery = navigator.permissions && navigator.permissions.query;
-                if (originalQuery) {
-                    navigator.permissions.query = (parameters) => (
-                        parameters && parameters.name === 'notifications'
-                            ? Promise.resolve({ state: 'denied', onchange: null })
-                            : originalQuery(parameters)
-                    );
-                }
-                Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
-                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-            """)
-            
-            context.set_default_navigation_timeout(options.timeout_seconds * 1000)
-            try:
-                yield context
-            finally:
-                await context.close()
-                await browser.close()
 
     async def _extract(self, options: ExtractionOptions) -> ExtractedContent:
         start = time.perf_counter()
@@ -352,13 +307,13 @@ class PlaywrightExtractor:
                     await context.close()
                 if browser:
                     await browser.close()
-            except:
-                pass
+            except Exception:
+                self._logger.debug("Cleanup error after extraction failure", exc_info=True)
             return ExtractedContent(url=str(options.url), error=str(exc))
 
         elapsed = time.perf_counter() - start
         metadata = content.metadata or ExtractionMetadata(
-            fetched_at=datetime.utcnow(),
+            fetched_at=datetime.now(timezone.utc),
             extractor="playwright",
             duration_seconds=elapsed,
         )
@@ -383,117 +338,6 @@ class PlaywrightExtractor:
             raise RuntimeError(f"Navigation timeout for {url}") from exc
         except PlaywrightError as exc:  # pragma: no cover - unexpected Playwright error
             raise RuntimeError(f"Playwright navigation failed: {exc}") from exc
-
-    async def _await_content(self, page: Any, options: ExtractionOptions, *, phase: str) -> None:
-        """Wait for the main article markup to be present before parsing."""
-
-        timeout_ms = max(3000, min(15000, int(options.timeout_seconds * 1000 * 0.3)))
-        try:
-            await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
-        except PlaywrightTimeoutError:
-            self._logger.debug("DOM content load timed out for %s during %s", page.url, phase)
-        
-        # Perform small scrolls to trigger lazy-loaded content (ESPN technique)
-        try:
-            for _ in range(3):
-                await page.mouse.wheel(0, 800)
-                await page.wait_for_timeout(250)
-        except PlaywrightError:
-            pass
-        
-        # For JavaScript-heavy sites like ESPN, use shorter network idle timeout
-        is_espn = "espn.com" in str(page.url).lower()
-        if is_espn:
-            self._logger.debug("Detected ESPN - using enhanced extraction")
-            network_timeout = min(5000, timeout_ms)
-        else:
-            network_timeout = timeout_ms
-        
-        try:
-            await page.wait_for_load_state("networkidle", timeout=network_timeout)
-        except PlaywrightTimeoutError:
-            self._logger.debug("Network idle wait timed out for %s during %s", page.url, phase)
-
-        min_threshold = max(60, options.min_paragraph_chars // 4)
-        for selector in self._CONTENT_SELECTORS:
-            handle = None
-            try:
-                handle = await page.wait_for_selector(selector, timeout=3000)
-            except PlaywrightTimeoutError:
-                continue
-            except PlaywrightError:
-                continue
-            if not handle:
-                continue
-            try:
-                await handle.scroll_into_view_if_needed()
-            except PlaywrightError:
-                pass
-            try:
-                snippet = await handle.inner_text()
-            except PlaywrightError:
-                snippet = ""
-            if snippet and len(snippet.strip()) >= min_threshold:
-                await handle.dispose()
-                return
-            paragraph_handle = None
-            try:
-                paragraph_handle = await handle.query_selector("p")
-                if paragraph_handle:
-                    text = await paragraph_handle.inner_text()
-                    if text and len(text.strip()) >= min_threshold:
-                        await paragraph_handle.dispose()
-                        paragraph_handle = None
-                        await handle.dispose()
-                        return
-            except PlaywrightError:
-                pass
-            finally:
-                if paragraph_handle:
-                    try:
-                        await paragraph_handle.dispose()
-                    except PlaywrightError:
-                        pass
-            await handle.dispose()
-
-        paragraphs = await self._probe_paragraphs(page, min_threshold)
-        if paragraphs:
-            return
-
-        self._logger.debug("No article selectors matched for %s after %s", page.url, phase)
-
-    async def _probe_paragraphs(self, page: Any, min_threshold: int) -> list[str]:
-        """Inspect the DOM for paragraph nodes using JavaScript for dynamic layouts."""
-
-        selectors = list(self._PARAGRAPH_SELECTORS)
-        script = (
-            "(args) => {"
-            "const selectors = args.selectors;"
-            "const minLength = args.minLength;"
-            "const seen = new Set();"
-            "const all = [];"
-            "for (const selector of selectors) {"
-            "  const nodes = document.querySelectorAll(selector);"
-            "  for (const node of nodes) {"
-            "    if (!node || typeof node.innerText !== 'string') continue;"
-            "    const text = node.innerText.trim();"
-            "    if (!text || text.length < minLength) continue;"
-            "    if (seen.has(text)) continue;"
-            "    seen.add(text);"
-            "    all.push(text);"
-            "    if (all.length >= 3) return all;"
-            "  }"
-            "}"
-            "return all;"
-            "}"
-        )
-        try:
-            result = await page.evaluate(script, {"selectors": selectors, "minLength": min_threshold})
-        except PlaywrightError:
-            return []
-        if not isinstance(result, list):
-            return []
-        return [str(entry) for entry in result if isinstance(entry, str)]
 
     async def _extract_with_tree_walker(self, page: Any) -> list[str]:
         """Tree walker extraction (like the JS grab() function) - more robust for ESPN and NBC Sports."""
