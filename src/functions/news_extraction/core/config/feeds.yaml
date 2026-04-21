@@ -6,7 +6,12 @@ version: 1
 defaults:
   user_agent: T4L-End2End/1.0 (+contact@example.com)
   timeout_seconds: 30
-  max_parallel_fetches: 10
+  # Concurrent worker threads for source extraction. There are only a handful
+  # of sources today so 4 keeps the thread pool tight without idle workers.
+  max_workers: 4
+  # Per-source HTTP rate cap (requests per 60s window). Protects individual
+  # feed hosts from burst traffic when a sitemap expands into many sub-fetches.
+  max_requests_per_minute_per_source: 60
 
 sources:
   # --- RSS ---
