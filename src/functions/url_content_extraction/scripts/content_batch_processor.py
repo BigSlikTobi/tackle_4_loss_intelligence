@@ -143,6 +143,51 @@ def fetch_pending_urls(
         return all_urls
 
 
+def _batch_extract_heavy(
+    items: List[Dict[str, Any]],
+    *,
+    timeout: int = 45,
+) -> Dict[str, str]:
+    """Extract heavy (Playwright) URLs using one shared browser.
+
+    Launching Chromium costs ~2-3s per URL; reusing the browser across the
+    whole batch amortizes that to a single launch. Returns a ``{url_id:
+    content}`` map. Items with extraction errors are omitted so the
+    downstream per-URL path handles them through the standard failure flow.
+    """
+    if not items:
+        return {}
+
+    from src.functions.url_content_extraction.core.extractors.playwright_extractor import (
+        PlaywrightExtractor,
+    )
+
+    urls = [str(item.get("url", "")) for item in items]
+    extractor = PlaywrightExtractor(logger=logger)
+    try:
+        results = extractor.extract_many(urls, timeout=timeout)
+    except Exception as exc:
+        logger.warning(
+            "Shared Playwright batch failed (%s); falling back to per-URL extraction",
+            exc,
+        )
+        return {}
+
+    content_by_id: Dict[str, str] = {}
+    for item, result in zip(items, results):
+        url_id = str(item.get("id", ""))
+        if not url_id:
+            continue
+        if result.error:
+            logger.warning(
+                "Batched extraction error for %s: %s", url_id, result.error
+            )
+            continue
+        if result.paragraphs:
+            content_by_id[url_id] = "\n\n".join(result.paragraphs).strip()
+    return content_by_id
+
+
 def extract_content(url: str, timeout: int = 45) -> str:
     """Extract article content from URL.
     
@@ -250,18 +295,14 @@ def process_url(
     failure_tracker: FailureTracker,
     timeout: int = 45,
     max_attempts: int = 3,
+    *,
+    prefetched_content: Optional[str] = None,
 ) -> bool:
     """Process a single URL for content extraction.
-    
-    Args:
-        item: URL record with id and url
-        client: Supabase client
-        checkpoint: Checkpoint manager
-        failure_tracker: Failure tracker
-        timeout: Request timeout
-        
-    Returns:
-        True if successful
+
+    ``prefetched_content`` lets the batched heavy-URL path hand in content
+    that was already extracted via a shared Playwright browser, skipping the
+    per-URL Chromium startup cost.
     """
     url_id = str(item.get("id", ""))
     url = item.get("url", "")
@@ -281,8 +322,8 @@ def process_url(
         return False
 
     try:
-        # Extract content
-        content = extract_content(url, timeout=timeout)
+        # Extract content (or use the batched result when present)
+        content = prefetched_content if prefetched_content is not None else extract_content(url, timeout=timeout)
 
         if not content:
             register_stage_failure(
@@ -419,7 +460,7 @@ def run_batch_processor(
         failed = 0
         successful_url_ids: List[str] = []
 
-        def process_and_track(item):
+        def process_and_track(item, *, prefetched_content: str | None = None):
             """Process a URL and return success status."""
             nonlocal successful, failed
             try:
@@ -430,6 +471,7 @@ def run_batch_processor(
                     failure_tracker,
                     timeout,
                     max_attempts,
+                    prefetched_content=prefetched_content,
                 )
                 if success:
                     successful += 1
@@ -488,17 +530,30 @@ def run_batch_processor(
                     if progress.should_log():
                         progress.log_progress(extra_stats=memory_monitor.get_stats())
 
-        # Process heavy URLs sequentially (Playwright not thread-safe)
+        # Process heavy URLs in a single Playwright batch so we launch
+        # Chromium once per run instead of once per URL (~2-3s saved per URL).
         if heavy_urls:
-            logger.info("Processing %d heavy URLs sequentially (Playwright)...", len(heavy_urls))
+            logger.info(
+                "Processing %d heavy URLs via shared Playwright browser...",
+                len(heavy_urls),
+            )
+            # Pre-extract all heavy URLs in one batch (browser launched once).
+            pending_items = [
+                item
+                for item in heavy_urls
+                if not checkpoint.is_stage_complete(str(item.get("id", "")), "content")
+                and not failure_tracker.is_skipped("content", str(item.get("id", "")))
+            ]
+            content_by_id = _batch_extract_heavy(pending_items, timeout=timeout)
+
             for item in heavy_urls:
-                process_and_track(item)
-                
-                # Periodic checkpoint flush
+                url_id = str(item.get("id", ""))
+                # Feed the already-fetched content into the normal per-URL path.
+                prefetched = content_by_id.get(url_id)
+                process_and_track(item, prefetched_content=prefetched)
+
                 if progress.processed_count % flush_interval == 0:
                     checkpoint.flush()
-
-                # Log progress
                 if progress.should_log():
                     progress.log_progress(extra_stats=memory_monitor.get_stats())
 

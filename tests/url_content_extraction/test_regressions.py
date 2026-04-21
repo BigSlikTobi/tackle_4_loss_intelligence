@@ -242,6 +242,94 @@ def test_handle_request_raises_become_per_url_errors(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Phase 4: Playwright browser reuse (3.1) + LightExtractor shared client (3.2)
+# ---------------------------------------------------------------------------
+
+
+def test_playwright_extractor_exposes_extract_many():
+    """`extract_many` must exist on PlaywrightExtractor and accept a URL list."""
+    from src.functions.url_content_extraction.core.extractors.playwright_extractor import (
+        PlaywrightExtractor,
+    )
+
+    extractor = PlaywrightExtractor()
+    assert callable(getattr(extractor, "extract_many", None))
+    # Empty input is a defined no-op (returns []) — no browser launch.
+    assert extractor.extract_many([]) == []
+
+
+def test_playwright_extract_many_reuses_browser(monkeypatch):
+    """`extract_many` must launch the browser exactly once for N URLs."""
+    from src.functions.url_content_extraction.core.extractors import playwright_extractor as pe
+
+    launches: list[str] = []
+    contexts: list[str] = []
+    pages_per_context: list[int] = []
+
+    class FakePage:
+        def __init__(self, ctx): self.ctx = ctx; self.url = "about:blank"
+        async def close(self): pass
+
+    class FakeContext:
+        def __init__(self):
+            contexts.append("new")
+            pages_per_context.append(0)
+        def set_default_navigation_timeout(self, _): pass
+        async def new_page(self):
+            pages_per_context[-1] += 1
+            return FakePage(self)
+        async def close(self): pass
+        async def add_init_script(self, _): pass
+
+    class FakeBrowser:
+        async def new_context(self, **_kwargs):
+            return FakeContext()
+        async def close(self): pass
+
+    class FakePlaywright:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        @property
+        def chromium(self): return self
+        async def launch(self, **_kwargs):
+            launches.append("launch")
+            return FakeBrowser()
+
+    def _fake_playwright(): return FakePlaywright()
+
+    async def _fake_extract_one(self, context, options):
+        from src.functions.url_content_extraction.core.contracts.extracted_content import (
+            ExtractedContent,
+        )
+        return ExtractedContent(url=str(options.url), paragraphs=["ok"])
+
+    monkeypatch.setattr(pe, "async_playwright", _fake_playwright)
+    monkeypatch.setattr(pe.PlaywrightExtractor, "_extract_one", _fake_extract_one)
+
+    extractor = pe.PlaywrightExtractor()
+    results = extractor.extract_many(
+        ["https://example.com/a", "https://example.com/b", "https://example.com/c"]
+    )
+    assert len(results) == 3
+    assert all(r.paragraphs == ["ok"] for r in results)
+    # Single browser launch + single context shared across all URLs.
+    assert len(launches) == 1
+    assert len(contexts) == 1
+
+
+def test_light_extractor_uses_shared_httpx_client():
+    """All LightExtractor calls must resolve to the same `httpx.Client`."""
+    from src.functions.url_content_extraction.core.extractors import light_extractor
+
+    # Reset and then force two accesses; both should return the same instance.
+    light_extractor.close_shared_client()
+    c1 = light_extractor._get_shared_client()
+    c2 = light_extractor._get_shared_client()
+    assert c1 is c2
+    light_extractor.close_shared_client()
+
+
+# ---------------------------------------------------------------------------
 # FactsWriter / FactsReader (Phase 3: core/db consolidation)
 # ---------------------------------------------------------------------------
 

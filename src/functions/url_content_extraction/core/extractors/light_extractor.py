@@ -1,9 +1,15 @@
-"""HTTP-only extractor implementation using httpx and BeautifulSoup."""
+"""HTTP-only extractor implementation using httpx and BeautifulSoup.
+
+Uses a module-level ``httpx.Client`` so connection pooling, DNS caching,
+and TLS session resumption amortize across all ``LightExtractor`` calls in
+the same process. ``httpx.Client`` is thread-safe, so a single shared
+instance works fine for the ThreadPoolExecutor callers.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,17 +24,59 @@ from ..processors.text_deduplicator import deduplicate_paragraphs
 from ..utils import amp_detector
 
 
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/119.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+# Module-level shared client. Lazy-initialized, protected by a lock for
+# correctness under concurrent first-access. Lifetime is process-scope.
+_shared_client: Optional[httpx.Client] = None
+_shared_client_lock = threading.Lock()
+
+
+def _get_shared_client() -> httpx.Client:
+    global _shared_client
+    client = _shared_client
+    if client is not None:
+        return client
+    with _shared_client_lock:
+        if _shared_client is None:
+            _shared_client = httpx.Client(
+                headers=_DEFAULT_HEADERS,
+                follow_redirects=True,
+                # Reasonable default; per-call timeout is applied on .get() below.
+                timeout=30.0,
+                http2=True,
+                # Bound connection pool so a single pipeline run can't exhaust
+                # local file descriptors under high concurrency.
+                limits=httpx.Limits(
+                    max_connections=50, max_keepalive_connections=20
+                ),
+            )
+        return _shared_client
+
+
+def close_shared_client() -> None:
+    """Close the process-wide client (call at shutdown in long-running jobs)."""
+    global _shared_client
+    with _shared_client_lock:
+        if _shared_client is not None:
+            try:
+                _shared_client.close()
+            except Exception:
+                pass
+            _shared_client = None
+
+
 class LightExtractor:
     """Performs fast HTTP extraction for simple pages."""
 
-    _DEFAULT_HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/119.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+    _DEFAULT_HEADERS = _DEFAULT_HEADERS  # Kept for back-compat imports.
 
     def __init__(self, *, logger: Optional[logging.Logger] = None) -> None:
         self._logger = logger or logging.getLogger(__name__)
@@ -46,42 +94,26 @@ class LightExtractor:
         if options:
             merged.update(options if isinstance(options, dict) else options.model_dump())
         validated = parse_options(merged)
-        return self._run_sync(validated)
+        return self._extract(validated)
 
-    def _run_sync(self, options: ExtractionOptions) -> ExtractedContent:
-        """Execute async extraction synchronously, handling existing event loops."""
-        # Check if we're already in an event loop
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop - safe to use asyncio.run()
-            return asyncio.run(self._extract(options))
-        
-        # Running loop exists - create and use a new one in a thread-safe way
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, self._extract(options))
-            return future.result(timeout=options.timeout_seconds + 10)
-
-    async def _fetch(self, options: ExtractionOptions) -> tuple[str, str]:
-        async with httpx.AsyncClient(headers=self._DEFAULT_HEADERS, follow_redirects=True, timeout=options.timeout_seconds) as client:
-            response = await client.get(str(options.url))
+    def _fetch(self, options: ExtractionOptions) -> tuple[str, str]:
+        client = _get_shared_client()
+        response = client.get(str(options.url), timeout=options.timeout_seconds)
+        response.raise_for_status()
+        html = response.text
+        amp_alternate = amp_detector.find_amp_alternate(html, str(options.url))
+        if amp_alternate:
+            self._logger.debug("Discovered AMP alternate for %s", options.url)
+            response = client.get(amp_alternate, timeout=options.timeout_seconds)
             response.raise_for_status()
-            html = response.text
-            amp_alternate = amp_detector.find_amp_alternate(html, str(options.url))
-            if amp_alternate:
-                self._logger.debug("Discovered AMP alternate for %s", options.url)
-                response = await client.get(amp_alternate)
-                response.raise_for_status()
-                html = response.text
-                return amp_alternate, html
-            return str(options.url), html
+            return amp_alternate, response.text
+        return str(options.url), html
 
-    async def _extract(self, options: ExtractionOptions) -> ExtractedContent:
+    def _extract(self, options: ExtractionOptions) -> ExtractedContent:
         start = time.perf_counter()
         self._logger.debug("Starting lightweight extraction for %s", options.url)
         try:
-            target_url, html = await self._fetch(options)
+            target_url, html = self._fetch(options)
         except httpx.HTTPError as exc:
             self._logger.warning("HTTP extraction failed for %s: %s", options.url, exc)
             return ExtractedContent(url=str(options.url), error=str(exc))
