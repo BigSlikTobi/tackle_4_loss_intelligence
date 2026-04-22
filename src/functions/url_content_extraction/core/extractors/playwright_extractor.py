@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Iterable, List, Optional, Sequence
+from typing import Any, List, Optional, Sequence, Tuple
 
 from bs4 import BeautifulSoup
 
@@ -149,7 +149,9 @@ class PlaywrightExtractor:
         if not url_list:
             return []
 
-        option_sets: List[ExtractionOptions] = []
+        # Validate per URL so one malformed entry doesn't abort the whole batch
+        # and force a fallback to per-URL extraction (losing browser-reuse).
+        entries: List[Tuple[str, Optional[ExtractionOptions], Optional[str]]] = []
         for url in url_list:
             merged_options: dict[str, object] = {"url": url}
             if timeout:
@@ -158,21 +160,32 @@ class PlaywrightExtractor:
                 merged_options.update(
                     options if isinstance(options, dict) else options.model_dump()
                 )
-            option_sets.append(parse_options(merged_options))
+            try:
+                entries.append((url, parse_options(merged_options), None))
+            except Exception as exc:
+                entries.append((url, None, f"Invalid extraction options: {exc}"))
 
-        total_timeout = sum(opt.timeout_seconds for opt in option_sets) + 30
-        return self._run_async(self._extract_batch(option_sets), total_timeout)
+        valid_options = [opt for _, opt, err in entries if opt is not None and err is None]
+        if not valid_options:
+            return [
+                ExtractedContent(url=url, error=err or "Invalid URL")
+                for url, _, err in entries
+            ]
+
+        total_timeout = sum(opt.timeout_seconds for opt in valid_options) + 30
+        return self._run_async(self._extract_batch(entries), total_timeout)
 
     async def _extract_batch(
-        self, option_sets: List[ExtractionOptions]
+        self,
+        entries: List[Tuple[str, Optional[ExtractionOptions], Optional[str]]],
     ) -> List[ExtractedContent]:
         if async_playwright is None:  # pragma: no cover - optional dep missing
             return [
                 ExtractedContent(
-                    url=str(opt.url),
-                    error="Playwright is not available in the current environment",
+                    url=url,
+                    error=err or "Playwright is not available in the current environment",
                 )
-                for opt in option_sets
+                for url, _, err in entries
             ]
 
         results: List[ExtractedContent] = []
@@ -181,7 +194,12 @@ class PlaywrightExtractor:
             try:
                 context = await self._new_context(browser)
                 try:
-                    for opts in option_sets:
+                    for url, opts, err in entries:
+                        if opts is None or err is not None:
+                            results.append(
+                                ExtractedContent(url=url, error=err or "Invalid URL")
+                            )
+                            continue
                         context.set_default_navigation_timeout(
                             opts.timeout_seconds * 1000
                         )
