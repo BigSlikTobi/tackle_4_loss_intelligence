@@ -123,6 +123,15 @@ def main() -> int:
 
     import requests
 
+    # Stale `running` rows would otherwise be unclaimable — mark_running only
+    # transitions queued -> running. Reset them first so the worker can claim.
+    reset = store.reset_stale_running(
+        running_older_than_seconds=args.stale_running_seconds,
+        max_attempts=args.max_attempts,
+    )
+    if reset:
+        logger.info("Reset %d stale running rows back to queued", reset)
+
     stale = store.list_stale(
         queued_older_than_seconds=args.stale_queued_seconds,
         running_older_than_seconds=args.stale_running_seconds,

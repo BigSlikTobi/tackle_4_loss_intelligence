@@ -204,6 +204,44 @@ class JobStore:
         )
         return (stale_queued.data or []) + (stale_running.data or [])
 
+    def reset_stale_running(
+        self,
+        running_older_than_seconds: int = 600,
+        max_attempts: int = 3,
+    ) -> int:
+        """Atomically flip stale ``running`` rows back to ``queued``.
+
+        ``mark_running`` only claims rows currently in ``queued`` (atomic
+        compare-and-set), so a worker that crashed mid-job leaves the row
+        stuck in ``running`` forever from the requeue path's perspective.
+        This method resets such rows to ``queued`` (and clears
+        ``started_at``) so the next worker invocation can claim them
+        normally. Returns the number of rows reset.
+        """
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=running_older_than_seconds)
+        ).isoformat()
+        response = (
+            self._table.update(
+                {
+                    "status": JobStatus.QUEUED.value,
+                    "started_at": None,
+                    "updated_at": _iso_now(),
+                }
+            )
+            .eq("service", self._service)
+            .eq("status", JobStatus.RUNNING.value)
+            .lt("started_at", cutoff)
+            .lt("attempts", max_attempts)
+            .execute()
+        )
+        rows = response.data or []
+        count = len(rows) if isinstance(rows, list) else 0
+        if count:
+            logger.info("Reset %d stale running rows back to queued", count)
+        return count
+
     def delete_expired(self) -> int:
         """Delete this service's rows past `expires_at`. Returns deleted row count."""
         now_iso = _iso_now()

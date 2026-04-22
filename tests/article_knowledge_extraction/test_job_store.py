@@ -218,3 +218,43 @@ def test_delete_expired_removes_past_rows(store: JobStore):
     deleted = store.delete_expired()
     assert deleted == 1
     assert store.peek(job["job_id"]) is None
+
+
+def test_reset_stale_running_unlocks_crashed_workers(store: JobStore):
+    """Stale running rows must be reset to queued so mark_running can re-claim."""
+    job = store.create_job({"article": {"text": "t"}})
+    job_id = job["job_id"]
+    store.mark_running(job_id)
+    # Force the started_at timestamp far enough into the past to be "stale".
+    rows = store._client._tables["extraction_jobs"].rows
+    rows[0]["started_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).isoformat()
+
+    reset = store.reset_stale_running(running_older_than_seconds=600, max_attempts=3)
+    assert reset == 1
+
+    after = store.peek(job_id)
+    assert after["status"] == "queued"
+    assert after["started_at"] is None
+
+    # And mark_running can now claim it again.
+    claimed = store.mark_running(job_id)
+    assert claimed is not None
+    assert claimed["status"] == "running"
+
+
+def test_reset_stale_running_skips_max_attempts(store: JobStore):
+    """Don't reset rows that have already burned through max_attempts."""
+    job = store.create_job({"article": {"text": "t"}})
+    job_id = job["job_id"]
+    store.mark_running(job_id)
+    rows = store._client._tables["extraction_jobs"].rows
+    rows[0]["started_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).isoformat()
+    rows[0]["attempts"] = 5
+
+    reset = store.reset_stale_running(running_older_than_seconds=600, max_attempts=3)
+    assert reset == 0
+    assert store.peek(job_id)["status"] == "running"
