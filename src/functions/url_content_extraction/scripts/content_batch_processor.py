@@ -50,9 +50,8 @@ from src.shared.batch import (
     register_stage_failure,
     retry_on_network_error,
 )
-from src.functions.url_content_extraction.core.db import EphemeralContentWriter
-from src.functions.url_content_extraction.core.extractors import extractor_factory
-from src.functions.url_content_extraction.core.extractors.extractor_factory import (
+from src.shared.extractors import extractor_factory
+from src.shared.extractors.extractor_factory import (
     is_heavy_url,
 )
 
@@ -159,7 +158,7 @@ def _batch_extract_heavy(
     if not items:
         return {}
 
-    from src.functions.url_content_extraction.core.extractors.playwright_extractor import (
+    from src.shared.extractors.playwright_extractor import (
         PlaywrightExtractor,
     )
 
@@ -219,24 +218,20 @@ def extract_content(url: str, timeout: int = 45) -> str:
         return ""
 
 
-def store_content(
-    client,
-    url_id: str,
-    content: str,
-    *,
-    ephemeral_writer: Optional[EphemeralContentWriter] = None,
-    ephemeral_ttl_hours: Optional[int] = None,
-) -> bool:
-    """Stamp ``content_extracted_at`` on ``news_urls`` and optionally upsert
-    the extracted body into the ephemeral handoff table.
-
-    The legal-no-persistence constraint is preserved when
-    ``ephemeral_writer`` is ``None`` — only the timestamp is written. With
-    an ephemeral writer the body is stored with a bounded TTL so the
-    downstream facts stage can read it instead of re-fetching.
-
-    Returns ``True`` if the timestamp was stamped successfully (the
-    ephemeral upsert is best-effort and logs but does not fail the call).
+def store_content(client, url_id: str, content: str) -> bool:
+    """Mark content as extracted (content is fetched at facts extraction time).
+    
+    Note: Content is NOT stored in the database for legal reasons.
+    We only mark content_extracted_at to indicate extraction was successful.
+    The actual content will be re-fetched when generating facts batches.
+    
+    Args:
+        client: Supabase client
+        url_id: News URL ID
+        content: Extracted content (used for validation only, not stored)
+        
+    Returns:
+        True if successful
     """
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -248,23 +243,10 @@ def store_content(
             "content_quarantined_at": None,
             "content_quarantine_reason": None,
         }).eq("id", url_id).execute()
+        return True
     except Exception as e:
         logger.error("Failed to mark content extracted for %s: %s", url_id, e)
         return False
-
-    if ephemeral_writer is not None and content:
-        try:
-            ephemeral_writer.upsert_one(
-                {"news_url_id": url_id, "content": content},
-                ttl_hours=ephemeral_ttl_hours,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Ephemeral upsert failed for %s (timestamp still stamped): %s",
-                url_id,
-                exc,
-            )
-    return True
 
 
 def mark_content_failure(
@@ -315,8 +297,6 @@ def process_url(
     max_attempts: int = 3,
     *,
     prefetched_content: Optional[str] = None,
-    ephemeral_writer: Optional[EphemeralContentWriter] = None,
-    ephemeral_ttl_hours: Optional[int] = None,
 ) -> bool:
     """Process a single URL for content extraction.
 
@@ -363,13 +343,7 @@ def process_url(
 
         # Store content
         success = retry_on_network_error(
-            lambda: store_content(
-                client,
-                url_id,
-                content,
-                ephemeral_writer=ephemeral_writer,
-                ephemeral_ttl_hours=ephemeral_ttl_hours,
-            )
+            lambda: store_content(client, url_id, content)
         )
 
         if success:
@@ -421,8 +395,6 @@ def run_batch_processor(
     max_age_hours: Optional[int] = 24,
     max_error_threshold: int = 3,
     max_attempts: int = 3,
-    persist_ephemeral: bool = False,
-    ephemeral_ttl_hours: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run the content batch processor.
     
@@ -441,15 +413,6 @@ def run_batch_processor(
         Summary dict with statistics
     """
     client = get_supabase_client()
-
-    ephemeral_writer: Optional[EphemeralContentWriter] = (
-        EphemeralContentWriter(client) if persist_ephemeral else None
-    )
-    if persist_ephemeral:
-        logger.info(
-            "Ephemeral content persistence ENABLED (ttl_hours=%s)",
-            ephemeral_ttl_hours or "default",
-        )
 
     # Initialize infrastructure
     checkpoint_path = checkpoint_file or Path("./checkpoints/content_extraction.json")
@@ -509,8 +472,6 @@ def run_batch_processor(
                     timeout,
                     max_attempts,
                     prefetched_content=prefetched_content,
-                    ephemeral_writer=ephemeral_writer,
-                    ephemeral_ttl_hours=ephemeral_ttl_hours,
                 )
                 if success:
                     successful += 1
@@ -540,8 +501,6 @@ def run_batch_processor(
                         failure_tracker,
                         timeout,
                         max_attempts,
-                        ephemeral_writer=ephemeral_writer,
-                        ephemeral_ttl_hours=ephemeral_ttl_hours,
                     ): item
                     for item in light_urls
                 }
@@ -710,29 +669,6 @@ Examples:
     )
 
     parser.add_argument(
-        "--persist-ephemeral",
-        action="store_true",
-        default=None,
-        help="Write extracted content to news_url_content_ephemeral so the "
-             "facts stage can read it instead of re-fetching. Defaults to the "
-             "EPHEMERAL_CONTENT_ENABLED env var (off when unset).",
-    )
-
-    parser.add_argument(
-        "--no-persist-ephemeral",
-        dest="persist_ephemeral",
-        action="store_false",
-        help="Force ephemeral writes off, regardless of EPHEMERAL_CONTENT_ENABLED.",
-    )
-
-    parser.add_argument(
-        "--ephemeral-ttl-hours",
-        type=int,
-        default=None,
-        help="TTL for ephemeral content rows in hours (default: 48).",
-    )
-
-    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose logging",
@@ -786,14 +722,6 @@ def main():
     # Run processor
     # max_age_hours=0 means no limit
     max_age = args.max_age_hours if args.max_age_hours > 0 else None
-
-    # CLI flag wins; otherwise honor env var (off by default).
-    if args.persist_ephemeral is None:
-        env_flag = os.getenv("EPHEMERAL_CONTENT_ENABLED", "").strip().lower()
-        persist_ephemeral = env_flag in {"1", "true", "yes", "y"}
-    else:
-        persist_ephemeral = bool(args.persist_ephemeral)
-
     result = run_batch_processor(
         limit=args.limit,
         url_ids=url_ids,
@@ -803,8 +731,6 @@ def main():
         max_age_hours=max_age,
         max_error_threshold=args.max_error_threshold,
         max_attempts=args.max_attempts,
-        persist_ephemeral=persist_ephemeral,
-        ephemeral_ttl_hours=args.ephemeral_ttl_hours,
     )
 
     # Print summary

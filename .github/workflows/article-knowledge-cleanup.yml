@@ -31,6 +31,7 @@ jobs:
           LOG_LEVEL:    INFO
         run: |
           python -m src.functions.article_knowledge_extraction.scripts.cleanup_expired_jobs_cli \
+            --service article_knowledge_extraction \
             --requeue-stale \
             --stale-queued-seconds 120 \
             --stale-running-seconds 600 \

@@ -30,10 +30,6 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.11'
-  # Phase 6a: ephemeral content handoff stays off until the schema migration
-  # has been applied and stage 3 read-side has been verified. Flip to 'true'
-  # in phase 6c (writes) once both rails are ready.
-  EPHEMERAL_CONTENT_ENABLED: 'false'
 
 jobs:
   extract-news:

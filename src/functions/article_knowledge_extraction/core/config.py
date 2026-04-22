@@ -25,13 +25,7 @@ class LLMConfig:
     max_retries: int = 2
 
 
-@dataclass
-class SupabaseConfig:
-    """Supabase credentials for the ephemeral job store."""
-
-    url: str
-    key: str
-    jobs_table: str = "article_knowledge_extraction_jobs"
+from src.shared.jobs.contracts import SupabaseConfig  # noqa: E402,F401
 
 
 @dataclass

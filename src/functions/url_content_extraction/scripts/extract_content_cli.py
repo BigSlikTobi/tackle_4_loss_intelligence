@@ -14,8 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.functions.url_content_extraction.core.extractors import extractor_factory
-from src.functions.url_content_extraction.core.contracts.extracted_content import ExtractedContent
+from src.shared.extractors import extractor_factory
+from src.shared.contracts.extracted_content import ExtractedContent
 
 
 def parse_args() -> argparse.Namespace:

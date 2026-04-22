@@ -37,9 +37,8 @@ def local_handler():
         return _cors_response({}, status=204)
 
     payload: Dict[str, Any] = request.get_json(silent=True) or {}
-    result = handle_request(payload, headers=request.headers)
-    status = result.pop("status_code", 200) if isinstance(result, dict) else 200
-    return _cors_response(result, status=status)
+    result = handle_request(payload)
+    return _cors_response(result)
 
 
 if __name__ == "__main__":

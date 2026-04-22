@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from src.functions.url_content_extraction.core.extractors.playwright_extractor import PlaywrightExtractor
-from src.functions.url_content_extraction.core.processors.content_cleaner import clean_content
+from src.shared.extractors.playwright_extractor import PlaywrightExtractor
+from src.shared.processors.content_cleaner import clean_content
 
 
 def test_parse_html_handles_espn_like_markup() -> None:

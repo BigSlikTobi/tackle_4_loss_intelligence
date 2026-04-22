@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from src.shared.db import get_supabase_client
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
-from src.functions.url_content_extraction.core.extractors.extractor_factory import (
+from src.shared.extractors.extractor_factory import (
     get_extractor,
 )
 from src.functions.content_summarization.scripts.content_pipeline_cli import (

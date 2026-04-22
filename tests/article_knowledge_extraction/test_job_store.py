@@ -134,7 +134,7 @@ class _FakeClient:
         return _Query(table)
 
     def rpc(self, name: str, params: Dict[str, Any]):
-        assert name == "consume_article_knowledge_job"
+        assert name == "consume_extraction_job"
         job_id = params["p_job_id"]
         # Emulate the Postgres function: delete if terminal, return row
         for table in self._tables.values():
@@ -210,7 +210,7 @@ def test_consume_non_terminal_returns_none(store: JobStore):
 def test_delete_expired_removes_past_rows(store: JobStore):
     job = store.create_job({"article": {"text": "t"}})
     # Force expiry in the past
-    rows = store._client._tables["article_knowledge_extraction_jobs"].rows
+    rows = store._client._tables["extraction_jobs"].rows
     rows[0]["expires_at"] = (
         datetime.now(timezone.utc) - timedelta(hours=1)
     ).isoformat()

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from openai import OpenAI
 
 from src.shared.db.connection import get_supabase_client
-from ..db import EphemeralContentWriter, FactsReader, FactsWriter
+from ..db import FactsReader, FactsWriter
 from ..facts.parser import parse_fact_response, extract_json_from_text
 from ..facts.filter import filter_story_facts
 from ..facts.prompts import FACT_PROMPT_VERSION
@@ -80,10 +80,6 @@ class FactsBatchResultProcessor:
         # Unified DB layer (single source of truth for facts schema I/O).
         self._reader = FactsReader(self.client)
         self._writer = FactsWriter(self.client)
-        # Ephemeral writer is cheap to instantiate; mark_consumed is a no-op
-        # when the table is empty for the supplied IDs, so it's safe even
-        # when the ephemeral path is disabled upstream.
-        self._ephemeral_writer = EphemeralContentWriter(self.client)
 
     def process(
         self,
@@ -196,19 +192,6 @@ class FactsBatchResultProcessor:
         # Phase 6: Mark facts_extracted_at and update stats
         if fact_ids_by_article:
             self._bulk_mark_completed(facts_by_article)
-            # Phase 6b: signal ephemeral handoff complete so the sweep can
-            # delete the rows. No-op when ephemeral was never written.
-            try:
-                marked = self._ephemeral_writer.mark_consumed(
-                    list(fact_ids_by_article.keys()),
-                    chunk_size=self.chunk_size,
-                )
-                if marked:
-                    logger.info(
-                        "Marked %d ephemeral content rows consumed", marked
-                    )
-            except Exception as exc:
-                logger.warning("Ephemeral mark_consumed failed: %s", exc)
 
         logger.info(
             "Batch processing complete",

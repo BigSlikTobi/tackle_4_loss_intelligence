@@ -49,7 +49,7 @@ from src.shared.db import get_supabase_client
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
 
-from src.functions.url_content_extraction.core.extractors.extractor_factory import get_extractor
+from src.shared.extractors.extractor_factory import get_extractor
 from src.functions.url_content_extraction.core.facts import (
     FACT_PROMPT,
     FACT_PROMPT_VERSION,

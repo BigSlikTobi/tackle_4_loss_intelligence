@@ -50,7 +50,7 @@ export LOG_LEVEL=DEBUG  # before invoking any script
 
 This is an **NFL data intelligence platform** built on **function-based isolation**: each module under `src/functions/` is completely self-contained and can be developed, tested, and deployed independently.
 
-**Modules** (`src/functions/`): core content pipeline uses `news_extraction`, `url_content_extraction`, `knowledge_extraction`, `content_summarization`, `story_embeddings`, `story_grouping`, and `data_loading`. Additional modules: `article_knowledge_extraction`, `article_summarization`, `article_translation`, `article_validation`, `daily_team_update`, `fuzzy_search`, `game_analysis_package`, `gemini_tts`, `gemini_tts_batch`, `image_selection`, `team_article_generation`, `youtube_search`.
+**Modules** (`src/functions/`): core content pipeline uses `news_extraction`, `url_content_extraction`, `knowledge_extraction`, `content_summarization`, `story_embeddings`, `story_grouping`, and `data_loading`. Additional modules: `article_knowledge_extraction`, `article_summarization`, `article_translation`, `article_validation`, `daily_team_update`, `fuzzy_search`, `game_analysis_package`, `gemini_tts`, `gemini_tts_batch`, `image_selection`, `team_article_generation`, `url_content_extraction_service`, `youtube_search`.
 
 ### Module Structure
 
@@ -77,13 +77,19 @@ src/functions/<module>/
 Only truly generic code lives here:
 - `utils/env.py` — `load_env()` for loading the central `.env`
 - `utils/logging.py` — `setup_logging()`
+- `utils/amp_detector.py` — AMP URL detection helper
+- `utils/consent_handler.py` — cookie-consent bypass helper
 - `db/connection.py` — Supabase client
 - `batch/` — Checkpoint, retry, progress tracking, memory monitoring, OpenAI Batch API tracking
+- `extractors/` — `ExtractorFactory`, `PlaywrightExtractor`, `LightExtractor` (moved from `url_content_extraction`)
+- `processors/` — `ContentCleaner`, `MetadataExtractor`, `TextDeduplicator` (moved from `url_content_extraction`)
+- `contracts/extracted_content.py` — `ExtractedContent` dataclass shared between pipeline and service
+- `jobs/` — `JobStore`, `JobStatus`, `JobError`, `SupabaseConfig` async-job primitives (shared by `article_knowledge_extraction` and `url_content_extraction_service`)
 - `nlp/entity_resolver.py` — `EntityResolver` (fuzzy player/team/game matching; accepts injected Supabase client)
 - `nlp/team_aliases.py` — `NFL_TEAM_ALIASES` dict
 - `contracts/knowledge.py` — `ResolvedEntity` dataclass
 
-> `knowledge_extraction/core/resolution/entity_resolver.py` is now a re-export shim pointing at `src/shared/nlp/`. Do not add new logic there.
+> `knowledge_extraction/core/resolution/entity_resolver.py` and the `url_content_extraction` `core/extractors/`, `core/processors/`, `core/utils/amp_detector.py`, `core/utils/consent_handler.py`, and `core/contracts/extracted_content.py` paths are re-export shims pointing at `src/shared/`. Do not add new logic there.
 
 ### Import Rules
 
@@ -124,9 +130,7 @@ Two coordinated workflows handle this: `content-pipeline-create.yml` (creates ba
 
 **Request-scoped credentials**: New Cloud Functions should accept optional `llm`, `search`, and `supabase` blocks in the HTTP payload and degrade gracefully when omitted (see `image_selection` module as the canonical example). For the full build checklist, see AGENTS.md → "Cloud Function Build Workflow (Image Selection Pattern)".
 
-**Async job pattern**: On-demand modules that need async execution (e.g., `article_knowledge_extraction`) use a submit → poll → worker pattern: `/submit` enqueues a job and returns a `job_id`; `/poll` checks status; `/worker` executes the job. Jobs are stored in a Supabase table with atomic delete-on-read and a 24h TTL. A GitHub Actions cron workflow runs `cleanup_expired_jobs_cli.py` to sweep expired rows.
-
-**Ephemeral content handoff** (`url_content_extraction`): Stage 2 (fetch) can optionally write extracted HTML bodies to `news_url_content_ephemeral`; stage 3 (facts) can read from there instead of re-fetching. Controlled by `EPHEMERAL_CONTENT_ENABLED` env var (default `false` in all workflows). Schema in `src/functions/url_content_extraction/schema.sql`. Sweep CLI at `scripts/ephemeral_sweep_cli.py`; a step in `content-pipeline-poll.yml` runs it unconditionally after each poll.
+**Async job pattern**: On-demand modules that need async execution use a submit → poll → worker pattern: `/submit` enqueues a job and returns a `job_id`; `/poll` checks status; `/worker` executes the job. Jobs are stored in the shared `extraction_jobs` Supabase table with a `service` discriminator column, atomic delete-on-read (`consume_extraction_job(uuid)` RPC), and a 24h TTL. A GitHub Actions cron workflow runs `cleanup_expired_jobs_cli.py` to sweep expired rows. Current services using this pattern: `article_knowledge_extraction` and `url_content_extraction_service`. Shared primitives live in `src/shared/jobs/` (`JobStore`, `JobStatus`, `JobError`, `SupabaseConfig`).
 
 **Configuration**: All modules share a single `.env` at the project root. Load it with `load_env()` from `src.shared.utils.env`. Module-specific vars are documented in each module's `.env.example`.
 

@@ -14,9 +14,13 @@ This platform uses **function-based isolation** to separate different problem do
 ```
 src/
 ├── shared/                    # Minimal shared utilities ONLY
-│   ├── utils/                 # Generic logging, env loading
+│   ├── utils/                 # Generic logging, env loading, amp_detector, consent_handler
 │   ├── db/                    # Generic database helpers
-│   └── batch/                 # Batch processing infrastructure
+│   ├── batch/                 # Batch processing infrastructure
+│   ├── extractors/            # PlaywrightExtractor, LightExtractor, ExtractorFactory
+│   ├── processors/            # ContentCleaner, MetadataExtractor, TextDeduplicator
+│   ├── contracts/             # Shared dataclasses (ExtractedContent, ResolvedEntity, etc.)
+│   └── jobs/                  # JobStore, JobStatus, JobError, SupabaseConfig (async-job primitives)
 │
 └── functions/                 # Independent functional modules
     ├── data_loading/          # Module 1: NFL data ingestion
@@ -83,7 +87,7 @@ src/
 ```
 
 ### What Goes Where
-- **`src/shared/`**: ONLY truly generic utilities (logging, db connection, env loading)
+- **`src/shared/`**: Truly generic utilities (logging, db, env, extractors, processors, contracts, jobs)
 - **`src/functions/<module>/core/`**: ALL business logic for that module
 - **`src/functions/<module>/scripts/`**: CLI tools for that module
 - **`src/functions/<module>/functions/`**: Cloud Function deployment code
@@ -94,7 +98,8 @@ src/
 **Current Modules**:
 - **data_loading**: Source in `src/functions/data_loading/core/`, split into `data` loaders/transformers, `db` connection helpers, `providers` for on-demand data, and `utils` for CLI/logging code
 - **news_extraction**: Extracts news URLs from various sources for NFL content
-- **url_content_extraction**: Fetches article content AND extracts atomic facts using GPT-5-nano
+- **url_content_extraction**: Fetches article content AND extracts atomic facts using GPT-5-nano (pipeline batch mode)
+- **url_content_extraction_service**: On-demand async extraction service using the submit/poll/worker pattern; shares extractors and processors from `src/shared/`; stores jobs in the shared `extraction_jobs` table with `service='url_content_extraction'`
 - **knowledge_extraction**: Extracts key topics and NFL entities (players, teams, games) from facts using GPT-5-mini with fuzzy entity resolution
 - **content_summarization**: AI-powered summarization of facts using GPT-5-nano (summary-only module)
 - **story_embeddings**: Generates vector embeddings for story summaries using OpenAI's text-embedding-3-small model for similarity search and clustering
@@ -206,7 +211,7 @@ cp .env.example .env  # Edit with module-specific config
 
 - Follow PEP 8 with four-space indentation, descriptive snake_case names, and consistent type hints
 - **Module-specific code**: Place in `src/functions/<module>/core/` - never in `src/shared/`
-- **Shared utilities**: Only truly generic code (logging, db, env) goes in `src/shared/`
+- **Shared utilities**: Truly generic code (logging, db, env, extractors/processors used by multiple services, async-job primitives) goes in `src/shared/`
 - Use relative imports within a module: `from ..data.fetch import fetch_data`
 - Use absolute imports for shared utilities: `from src.shared.utils.logging import setup_logging`
 - Keep loader classes and transformers small; place shared logic in module's `core/utils/` or `core/data/transformers/`

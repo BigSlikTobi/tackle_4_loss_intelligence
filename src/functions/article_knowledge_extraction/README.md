@@ -93,9 +93,14 @@ python scripts/poll_job_cli.py --url http://localhost:8080 --job-id <id> --wait
 
 ## Schema
 
-Apply `schema.sql` via the repo's standard Supabase migration path. It creates:
-- `article_knowledge_extraction_jobs` table
-- `consume_article_knowledge_job(p_job_id uuid)` Postgres function (atomic delete-and-return for terminal rows)
+Jobs are stored in the **shared** `extraction_jobs` table — one row per job
+across every extraction service in the platform. Rows from this service are
+tagged `service = 'article_knowledge_extraction'`. The atomic delete-on-read
+RPC is the generic `consume_extraction_job(p_job_id uuid)`.
+
+Apply the migration at
+`supabase/migrations/20260422120000_extraction_jobs_shared_table.sql`
+via the repo's standard Supabase migration path.
 
 ## Deployment
 

@@ -38,8 +38,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--supabase-key", help="Supabase key (falls back to SUPABASE_KEY env)")
     parser.add_argument(
         "--jobs-table",
-        default="article_knowledge_extraction_jobs",
+        default="extraction_jobs",
         help="Override the jobs table name",
+    )
+    parser.add_argument(
+        "--service",
+        default="article_knowledge_extraction",
+        help="Service discriminator. Each service only sees and sweeps its own rows.",
     )
     parser.add_argument(
         "--requeue-stale",
@@ -90,7 +95,8 @@ def main() -> int:
         return 2
 
     store = JobStore(
-        SupabaseConfig(url=supabase_url, key=supabase_key, jobs_table=args.jobs_table)
+        SupabaseConfig(url=supabase_url, key=supabase_key, jobs_table=args.jobs_table),
+        service=args.service,
     )
 
     if args.dry_run:

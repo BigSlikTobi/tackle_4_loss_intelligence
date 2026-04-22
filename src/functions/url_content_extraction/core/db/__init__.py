@@ -7,13 +7,7 @@ see `core/facts/storage.py` for the older function-level API kept for
 backwards compatibility with `extract_facts_cli`.
 """
 
-from .ephemeral import EphemeralContentReader, EphemeralContentWriter
 from .reader import FactsReader
 from .writer import FactsWriter
 
-__all__ = [
-    "EphemeralContentReader",
-    "EphemeralContentWriter",
-    "FactsReader",
-    "FactsWriter",
-]
+__all__ = ["FactsReader", "FactsWriter"]
