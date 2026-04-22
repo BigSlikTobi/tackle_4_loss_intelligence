@@ -104,7 +104,7 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                 options=options,
             )
         except Exception as exc:  # noqa: BLE001 - propagate extraction failure
-            logger.warning("Extraction failed for %s: %s", url, exc)
+            logger.warning("Extraction failed for %s", url, exc_info=True)
             failure = {"url": url, "error": str(exc)}
             if amp_used:
                 failure["amp_url"] = target_url
@@ -193,7 +193,19 @@ def _as_mapping(value: Any) -> Dict[str, Any]:
 
 
 def _build_options(metadata: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any]:
-    options = {**base.get("options", {}), **metadata.get("options", {}), **base}
+    # Precedence (lowest → highest): base top-level < base.options < metadata
+    # top-level < metadata.options. Previously `base` was merged last, so
+    # top-level base keys silently overrode both `options` blocks, inverting
+    # the expected precedence.
+    def _scrub(d: Dict[str, Any]) -> Dict[str, Any]:
+        # Drop the nested 'options' key so it doesn't collide with its flattened form.
+        return {k: v for k, v in d.items() if k != "options"}
+
+    options: Dict[str, Any] = {}
+    options.update(_scrub(base))
+    options.update(base.get("options") or {})
+    options.update(_scrub(metadata))
+    options.update(metadata.get("options") or {})
     options.setdefault(
         "force_playwright",
         _coalesce_bool(metadata.get("force_playwright"), base.get("force_playwright")),

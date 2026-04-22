@@ -51,31 +51,11 @@ from src.shared.batch import (
     retry_on_network_error,
 )
 from src.functions.url_content_extraction.core.extractors import extractor_factory
-from urllib.parse import urlparse
+from src.functions.url_content_extraction.core.extractors.extractor_factory import (
+    is_heavy_url,
+)
 
 logger = logging.getLogger(__name__)
-
-# Hosts that require Playwright (must be processed sequentially)
-_HEAVY_HOSTS = {
-    "www.espn.com",
-    "www.nfl.com",
-    "sports.yahoo.com",
-    "www.cbssports.com",
-    "www.nbcsportsphiladelphia.com",
-    "www.nbcsportschicago.com",
-    "www.nbcsportsbayarea.com",
-    "www.nbcsportsboston.com",
-    "www.nbcsportswashington.com",
-}
-
-
-def is_heavy_url(url: str) -> bool:
-    """Check if URL requires Playwright (heavy) extraction."""
-    try:
-        hostname = urlparse(url).hostname or ""
-        return hostname in _HEAVY_HOSTS
-    except Exception:
-        return False
 
 
 def fetch_pending_urls(

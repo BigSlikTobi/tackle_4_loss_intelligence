@@ -325,24 +325,49 @@ class FactsBatchRequestGenerator:
         max_age_hours: Optional[int],
         newest_first: bool,
     ) -> List[Dict[str, Any]]:
-        """Fetch one side of the pending queue."""
-        query = (
-            self.client.table("news_urls")
-            .select("id,url,created_at")
-            .is_("facts_extracted_at", "null")
-            .order("created_at", desc=newest_first)
-            .limit(limit)
-        )
+        """Fetch one side of the pending queue.
 
-        if not include_unextracted:
-            query = query.not_.is_("content_extracted_at", "null")
-
+        Pages through Supabase in `page_size` chunks to respect the 1000-row
+        default cap; stops once `limit` rows are collected or a partial page
+        signals the end of the result set.
+        """
+        cutoff_iso: Optional[str] = None
         if max_age_hours is not None:
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-            query = query.gte("created_at", cutoff.isoformat())
+            cutoff_iso = (
+                datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+            ).isoformat()
 
-        response = query.execute()
-        return getattr(response, "data", []) or []
+        def _new_query():
+            query = (
+                self.client.table("news_urls")
+                .select("id,url,created_at")
+                .is_("facts_extracted_at", "null")
+                .order("created_at", desc=newest_first)
+            )
+            if not include_unextracted:
+                query = query.not_.is_("content_extracted_at", "null")
+            if cutoff_iso is not None:
+                query = query.gte("created_at", cutoff_iso)
+            return query
+
+        collected: List[Dict[str, Any]] = []
+        offset = 0
+        while len(collected) < limit:
+            remaining = limit - len(collected)
+            fetch_size = min(self.page_size, remaining)
+            response = (
+                _new_query()
+                .range(offset, offset + fetch_size - 1)
+                .execute()
+            )
+            rows = getattr(response, "data", []) or []
+            if not rows:
+                break
+            collected.extend(rows)
+            if len(rows) < fetch_size:
+                break
+            offset += fetch_size
+        return collected
 
     def _interleave_pending_articles(
         self,
@@ -492,7 +517,6 @@ class FactsBatchRequestGenerator:
             
         except Exception as e:
             logger.warning(f"Failed to fetch content from {url}: {e}")
-            return ""
             return ""
 
     def _build_request(

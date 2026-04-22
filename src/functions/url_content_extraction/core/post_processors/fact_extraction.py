@@ -8,61 +8,20 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import sys
-import time
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import requests
 
-# Add project root to Python path
-sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
-
-from src.shared.db import get_supabase_client
+# Import the single source of truth for the prompt and filter so the realtime
+# path cannot drift from the batch path.
+from ..facts.prompts import FACT_PROMPT_VERSION, get_formatted_prompt
+from ..facts.filter import filter_story_facts
 
 logger = logging.getLogger(__name__)
 
-# Constants from content_pipeline_cli.py
-FACT_PROMPT_VERSION = "facts-v1"
 DEFAULT_FACT_MODEL = "gemma-3n-e4b-it"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
-
-FACT_PROMPT = """ASK: Extract discrete facts from the article. Closed world. No inferences.
-Current Date: {current_date}
-
-RULES
-- Use only the information explicitly stated in the text.
-- Do not infer motivations, causes, consequences, or relationships.
-- Do not add external knowledge.
-- Maintain the original order of the article.
-- Keep each statement short, specific, and self-contained.
-- Exactly ONE factual claim per statement. Avoid using "and" to combine different events.
-- Prefer repeating full player names, team names, and entities instead of pronouns when it improves clarity.
-- Preserve all numbers, dates, scores, contract amounts, and durations exactly as written.
-- Ignore navigation menus, cookie banners, share buttons, and other website boilerplate. Only use the main article content.
-- Include all player names, team names, dates, trades, quotes, contract references, injuries, and statements about future plans that are explicitly stated.
-- If something is not in the article, do NOT mention it.
-
-CRITICAL QUALITY RULES:
-1. TIMELINESS: Ensure all temporal statements are anchored to the Current Date ({current_date}).
-2. NO META-INFO: EXCLUDE facts about the author, source, publication time, or media outlet.
-3. NO GENERALITIES: EXCLUDE general statements, opinions, platitudes, or vague commentary.
-4. SPECIFIC SUBJECTS: ALWAYS specify the subject. Replace "The organization", "The team", or pronouns with the specific team or player name.
-5. LEANNESS: Optimize for leanness. Extract only significant, concrete facts. Avoid verbose filler.
-
-OUTPUT FORMAT (JSON only):
-{{
-  "facts": [
-    "fact 1",
-    "fact 2",
-    "fact 3"
-  ]
-}}
-
-Output ONLY valid JSON. No extra text, no comments, no explanations.
-"""
 
 
 def extract_and_store_facts(
@@ -115,8 +74,9 @@ def extract_and_store_facts(
                 "error": "No facts extracted from article"
             }
         
-        # Filter non-story facts
-        filtered_facts = _filter_story_facts(facts)
+        # Filter non-story facts using the shared filter (same rules as the
+        # batch path) so realtime and batch never diverge.
+        filtered_facts, _rejected = filter_story_facts(facts)
         
         if not filtered_facts:
             return {
@@ -158,12 +118,16 @@ def extract_and_store_facts(
             embedding_config.get("model", DEFAULT_EMBEDDING_MODEL)
         )
         
-        # Mark timestamps
+        # Mark facts timestamp; leave content_extracted_at untouched (another
+        # stage owns it). Backfill only if still null so we don't overwrite a
+        # truer extraction timestamp.
         now_iso = datetime.now(timezone.utc).isoformat()
-        client.table("news_urls").update({
-            "content_extracted_at": now_iso,
-            "facts_extracted_at": now_iso
-        }).eq("id", news_url_id).execute()
+        client.table("news_urls").update(
+            {"facts_extracted_at": now_iso}
+        ).eq("id", news_url_id).execute()
+        client.table("news_urls").update(
+            {"content_extracted_at": now_iso}
+        ).eq("id", news_url_id).is_("content_extracted_at", "null").execute()
         
         return {
             "facts_count": len(fact_ids),
@@ -199,8 +163,7 @@ def _extract_facts_llm(
     Returns:
         List of extracted fact strings
     """
-    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    formatted_prompt = FACT_PROMPT.format(current_date=current_date)
+    formatted_prompt = get_formatted_prompt()
     
     # Build Gemini API URL
     url = f"{llm_api_url}/{model}:generateContent?key={llm_api_key}"
@@ -262,49 +225,6 @@ def _extract_facts_llm(
     except Exception as e:
         logger.error(f"LLM fact extraction failed: {e}")
         return []
-
-
-def _filter_story_facts(facts: List[str]) -> List[str]:
-    """Filter out non-story facts (author bios, navigation, etc.).
-    
-    Args:
-        facts: List of fact strings
-        
-    Returns:
-        Filtered list of story facts
-    """
-    import re
-    
-    filtered = []
-    
-    non_story_patterns = [
-        r'\b(is a|is an)\b.{0,30}\b(reporter|writer|journalist|correspondent|analyst|contributor|editor|columnist)\b',
-        r'\b(covers|covering)\b.{0,50}\b(at espn|for espn|at nfl\.com)',
-        r'\b(joining|joined)\b.{0,20}\b(espn|nfl\.com|cbs|fox|nbc)',
-        r'\bcontributes to\b.{0,50}\b(espn|nfl live|get up|sportscenter)',
-        r'\bis (the )?author of\b',
-        r'\bmember of the\b.{0,50}\b(board of selectors|hall of fame)',
-        r'\b(follow|contact).{0,20}\b(twitter|facebook|instagram)',
-        r'@\w+',
-        r'\b(advertisement|sponsored|promoted)\b',
-    ]
-    
-    for fact in facts:
-        if not fact or len(fact) < 15:
-            continue
-        
-        fact_lower = fact.lower()
-        is_valid = True
-        
-        for pattern in non_story_patterns:
-            if re.search(pattern, fact_lower, re.IGNORECASE):
-                is_valid = False
-                break
-        
-        if is_valid:
-            filtered.append(fact)
-    
-    return filtered
 
 
 def _store_facts(

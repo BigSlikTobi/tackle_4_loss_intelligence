@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import openai
+from openai import OpenAI
 
 from .request_generator import FactsBatchRequestGenerator, GeneratedBatch
 from .result_processor import FactsBatchResultProcessor
@@ -89,7 +89,9 @@ class FactsBatchPipeline:
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY is required for batch creation")
 
-        openai.api_key = self.api_key
+        # Use a request-scoped OpenAI client instead of mutating the module
+        # global `openai.api_key` (unsafe in multi-tenant warm containers).
+        self._openai = OpenAI(api_key=self.api_key)
         self.model = model
 
         self.generator = generator or FactsBatchRequestGenerator(
@@ -131,27 +133,29 @@ class FactsBatchPipeline:
             max_age_hours=max_age_hours,
         )
 
-        # Upload to OpenAI with timeout protection
+        # Upload to OpenAI with timeout protection. Open the handle in a
+        # `with` block so it's closed even if the upload times out.
         logger.info("Uploading batch file to OpenAI...")
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                lambda: openai.files.create(file=batch_payload.file_path.open("rb"), purpose="batch")
-            )
-            try:
-                uploaded = future.result(timeout=OPENAI_FILE_UPLOAD_TIMEOUT)
-            except FuturesTimeoutError:
-                raise TimeoutError(
-                    f"OpenAI file upload timed out after {OPENAI_FILE_UPLOAD_TIMEOUT}s. "
-                    "File may be too large or network connection is slow."
+        with batch_payload.file_path.open("rb") as fh:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    lambda: self._openai.files.create(file=fh, purpose="batch")
                 )
-            except Exception as e:
-                raise RuntimeError(f"Failed to upload file to OpenAI: {e}")
+                try:
+                    uploaded = future.result(timeout=OPENAI_FILE_UPLOAD_TIMEOUT)
+                except FuturesTimeoutError:
+                    raise TimeoutError(
+                        f"OpenAI file upload timed out after {OPENAI_FILE_UPLOAD_TIMEOUT}s. "
+                        "File may be too large or network connection is slow."
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"Failed to upload file to OpenAI: {e}")
 
         # Create batch job with timeout protection
         logger.info("Creating batch job...")
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
-                lambda: openai.batches.create(
+                lambda: self._openai.batches.create(
                     input_file_id=uploaded.id,
                     endpoint="/v1/chat/completions",
                     completion_window="24h",
@@ -224,7 +228,7 @@ class FactsBatchPipeline:
         Returns:
             Status dict with batch information
         """
-        batch = openai.batches.retrieve(batch_id)
+        batch = self._openai.batches.retrieve(batch_id)
         status_info = {
             "batch_id": batch.id,
             "status": batch.status,
@@ -263,7 +267,7 @@ class FactsBatchPipeline:
         Returns:
             Summary dict with processing statistics
         """
-        batch = openai.batches.retrieve(batch_id)
+        batch = self._openai.batches.retrieve(batch_id)
         if batch.status != "completed":
             raise ValueError(f"Batch {batch_id} is not completed (status: {batch.status})")
 
@@ -278,7 +282,7 @@ class FactsBatchPipeline:
 
         # Download output file
         logger.info("Downloading output file %s", batch.output_file_id)
-        output_content = openai.files.content(batch.output_file_id)
+        output_content = self._openai.files.content(batch.output_file_id)
         output_text = output_content.text
         with output_path.open("w") as handle:
             handle.write(output_text)
@@ -287,7 +291,7 @@ class FactsBatchPipeline:
         error_path = None
         if getattr(batch, "error_file_id", None):
             logger.info("Downloading error file %s", batch.error_file_id)
-            error_content = openai.files.content(batch.error_file_id)
+            error_content = self._openai.files.content(batch.error_file_id)
             error_text = error_content.text
             error_path = self.output_dir / f"facts_batch_{batch_id}_errors_{timestamp}.jsonl"
             with error_path.open("w") as handle:
@@ -339,7 +343,7 @@ class FactsBatchPipeline:
         Returns:
             List of batch info dicts
         """
-        batches = openai.batches.list(limit=limit)
+        batches = self._openai.batches.list(limit=limit)
         
         result = []
         for batch in batches.data:
@@ -371,7 +375,7 @@ class FactsBatchPipeline:
         Returns:
             Updated status dict
         """
-        batch = openai.batches.cancel(batch_id)
+        batch = self._openai.batches.cancel(batch_id)
         return {
             "batch_id": batch.id,
             "status": batch.status,

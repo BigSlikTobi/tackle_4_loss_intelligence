@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-import openai
+from openai import OpenAI
 
 from src.shared.db.connection import get_supabase_client
 from ..facts.parser import parse_fact_response, extract_json_from_text
@@ -70,6 +70,12 @@ class FactsBatchResultProcessor:
         self.embedding_api_key = embedding_api_key
         self.embedding_model = embedding_model
         self.chunk_size = chunk_size
+        # Instantiate a request-scoped OpenAI client instead of mutating the
+        # `openai.api_key` module global (unsafe in warm Cloud Function
+        # containers serving multiple tenants).
+        self._openai: Optional[OpenAI] = (
+            OpenAI(api_key=embedding_api_key) if embedding_api_key else None
+        )
 
     def process(
         self,
@@ -285,18 +291,34 @@ class FactsBatchResultProcessor:
         """
         existing: Set[str] = set()
 
+        # Page through all matching rows per chunk. The prior `.limit(len(chunk))`
+        # silently truncated if some articles had many existing facts, letting
+        # already-extracted articles re-enter the insert path.
+        page_size = 1000
         for i in range(0, len(article_ids), self.chunk_size):
             chunk = article_ids[i:i + self.chunk_size]
-            response = (
-                self.client.table("news_facts")
-                .select("news_url_id")
-                .in_("news_url_id", chunk)
-                .eq("prompt_version", FACT_PROMPT_VERSION)
-                .limit(len(chunk))
-                .execute()
-            )
-            rows = getattr(response, "data", []) or []
-            existing.update(row.get("news_url_id") for row in rows if row.get("news_url_id"))
+            offset = 0
+            while True:
+                response = (
+                    self.client.table("news_facts")
+                    .select("news_url_id")
+                    .in_("news_url_id", chunk)
+                    .eq("prompt_version", FACT_PROMPT_VERSION)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+                rows = getattr(response, "data", []) or []
+                if not rows:
+                    break
+                existing.update(
+                    row.get("news_url_id") for row in rows if row.get("news_url_id")
+                )
+                # Once every article in the chunk is known-existing we can stop.
+                if set(chunk).issubset(existing):
+                    break
+                if len(rows) < page_size:
+                    break
+                offset += page_size
 
         return existing
 
@@ -393,11 +415,24 @@ class FactsBatchResultProcessor:
                 response = self.client.table("news_facts").insert(chunk).execute()
                 data = getattr(response, "data", []) or []
 
-                for row in data:
-                    if isinstance(row, dict) and row.get("id"):
-                        article_id = record_to_article[record_idx]
-                        result_ids[article_id].append(row["id"])
-                    record_idx += 1
+                # PostgREST insert returns one row per inserted record in input
+                # order. If the count diverges we cannot safely attribute IDs to
+                # articles — skip mapping this chunk rather than corrupt the
+                # downstream result map.
+                if len(data) != len(chunk):
+                    logger.error(
+                        "Insert returned %d rows for chunk of %d; skipping ID "
+                        "attribution for this chunk to avoid desync",
+                        len(data),
+                        len(chunk),
+                    )
+                else:
+                    for offset, row in enumerate(data):
+                        if isinstance(row, dict) and row.get("id"):
+                            article_id = record_to_article[record_idx + offset]
+                            result_ids[article_id].append(row["id"])
+
+                record_idx += len(chunk)
 
                 logger.debug(
                     "Inserted facts batch %d/%d",
@@ -440,14 +475,18 @@ class FactsBatchResultProcessor:
         total_created = 0
         ids_list = list(texts_by_id.keys())
         
-        openai.api_key = self.embedding_api_key
+        if self._openai is None:
+            logger.error(
+                "Embedding creation requested but no embedding_api_key was provided"
+            )
+            return 0
 
         for i in range(0, len(ids_list), self.chunk_size):
             chunk_ids = ids_list[i:i + self.chunk_size]
             chunk_texts = [texts_by_id[fid] for fid in chunk_ids]
 
             try:
-                embed_response = openai.embeddings.create(
+                embed_response = self._openai.embeddings.create(
                     model=self.embedding_model,
                     input=chunk_texts,
                 )
