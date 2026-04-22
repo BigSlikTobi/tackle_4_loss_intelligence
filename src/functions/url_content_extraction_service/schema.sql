@@ -1,0 +1,6 @@
+-- The jobs table is shared across extraction services and lives in the
+-- repo-level Supabase migrations directory. See:
+--   supabase/migrations/20260422120000_extraction_jobs_shared_table.sql
+--
+-- This service writes/reads rows tagged service='url_content_extraction'.
+-- The atomic delete-on-read RPC is the generic `consume_extraction_job(uuid)`.

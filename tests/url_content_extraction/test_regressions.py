@@ -115,7 +115,7 @@ def test_filter_story_facts_rejects_author_bio_and_keeps_story():
 
 
 def test_is_heavy_url_matches_known_playwright_host():
-    from src.functions.url_content_extraction.core.extractors.extractor_factory import (
+    from src.shared.extractors.extractor_factory import (
         is_heavy_url,
     )
 
@@ -126,7 +126,7 @@ def test_is_heavy_url_matches_known_playwright_host():
 def test_content_batch_processor_uses_shared_is_heavy_url():
     """scripts.content_batch_processor must not define its own list."""
     from src.functions.url_content_extraction.scripts import content_batch_processor
-    from src.functions.url_content_extraction.core.extractors.extractor_factory import (
+    from src.shared.extractors.extractor_factory import (
         is_heavy_url,
     )
 
@@ -144,7 +144,7 @@ class _StubExtractor:
         self._error = error
 
     def extract(self, url, *, timeout=None, options=None):  # noqa: ARG002
-        from src.functions.url_content_extraction.core.contracts.extracted_content import (
+        from src.shared.contracts.extracted_content import (
             ExtractedContent,
         )
 
@@ -295,7 +295,7 @@ def test_extract_facts_cli_uses_facts_writer():
 
 def test_playwright_extractor_exposes_extract_many():
     """`extract_many` must exist on PlaywrightExtractor and accept a URL list."""
-    from src.functions.url_content_extraction.core.extractors.playwright_extractor import (
+    from src.shared.extractors.playwright_extractor import (
         PlaywrightExtractor,
     )
 
@@ -307,7 +307,7 @@ def test_playwright_extractor_exposes_extract_many():
 
 def test_playwright_extract_many_reuses_browser(monkeypatch):
     """`extract_many` must launch the browser exactly once for N URLs."""
-    from src.functions.url_content_extraction.core.extractors import playwright_extractor as pe
+    from src.shared.extractors import playwright_extractor as pe
 
     launches: list[str] = []
     contexts: list[str] = []
@@ -345,7 +345,7 @@ def test_playwright_extract_many_reuses_browser(monkeypatch):
     def _fake_playwright(): return FakePlaywright()
 
     async def _fake_extract_one(self, context, options):
-        from src.functions.url_content_extraction.core.contracts.extracted_content import (
+        from src.shared.contracts.extracted_content import (
             ExtractedContent,
         )
         return ExtractedContent(url=str(options.url), paragraphs=["ok"])
@@ -366,7 +366,7 @@ def test_playwright_extract_many_reuses_browser(monkeypatch):
 
 def test_light_extractor_uses_shared_httpx_client():
     """All LightExtractor calls must resolve to the same `httpx.Client`."""
-    from src.functions.url_content_extraction.core.extractors import light_extractor
+    from src.shared.extractors import light_extractor
 
     # Reset and then force two accesses; both should return the same instance.
     light_extractor.close_shared_client()

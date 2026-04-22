@@ -1,105 +1,116 @@
 # Changelog — 2026-04-22
 
 ## Summary
-Built the new `article_knowledge_extraction` module — a self-contained, on-demand HTTP service for extracting topics and entities from individual articles, following the stateless async job pattern (submit → poll → worker). Also refactored `EntityResolver` and `ResolvedEntity` into `src/shared/nlp/` to avoid future cross-module duplication, and extended `url_content_extraction` with an ephemeral content handoff layer (phase 6a).
+Three connected efforts landed today: surgically rolled back the Phase 6a ephemeral content-handoff layer that had merged in PR #125; promoted `url_content_extraction`'s extractors, processors, and utility helpers to `src/shared/` alongside a new generic async-job primitives package; and stood up a brand-new `url_content_extraction_service` module that delivers on-demand URL extraction via the shared submit/poll/worker pattern. Deployment verified end-to-end.
 
 ## Changes
 
-### New module: `src/functions/article_knowledge_extraction/`
-- Stateless async job pattern: three HTTP entry points (`/submit`, `/poll`, `/worker`) exposed via a single Cloud Function
-- Ephemeral job store backed by Supabase (`article_knowledge_jobs` table) with atomic delete-on-read and 24-hour TTL
-- `ArticleExtractionPipeline` orchestrates topic extraction → entity extraction → entity resolution in a single pass
-- `ResolverAdapter` bridges the new module to the shared `EntityResolver`, accepting a request-scoped Supabase client
-- Four CLI scripts: `submit_job_cli.py`, `poll_job_cli.py`, `extract_article_knowledge_cli.py`, `cleanup_expired_jobs_cli.py`
-- Deployed to GCP; end-to-end tested with a real article — confirmed working
-- Late fix: `EntityResolver` updated to accept injected Supabase client instead of reading env creds at construction time; adapter, pipeline, and worker threaded through accordingly; redeployed
+### Phase 6a Rollback (`url_content_extraction`)
+- Deleted `core/db/ephemeral.py`, `scripts/ephemeral_sweep_cli.py`, `schema.sql`, `tests/url_content_extraction/test_ephemeral.py`
+- Restored `core/db/__init__.py`, `core/facts_batch/extracted_content.py`, `core/facts_batch/content_batch_processor.py`, `core/facts_batch/request_generator.py`, `core/facts_batch/result_processor.py`, `functions/main.py`, `functions/local_server.py`, `README.md`, `.env.example` to pre-6a state
+- Restored three workflow YAMLs (`content-facts-entities-realtime.yml`, `content-pipeline-create.yml`, `content-pipeline-poll.yml`) to pre-6a state — ephemeral sweep step removed
+- Surgically preserved an unrelated rsync edit in `url_content_extraction/functions/deploy.sh`
 
-### Shared refactor: `src/shared/nlp/` + `src/shared/contracts/knowledge.py`
-- Moved `EntityResolver` (full ~850-line implementation) from `knowledge_extraction/core/resolution/` to `src/shared/nlp/entity_resolver.py`
-- Moved `NFL_TEAM_ALIASES` to `src/shared/nlp/team_aliases.py`
-- Added `ResolvedEntity` dataclass to `src/shared/contracts/knowledge.py`
-- Left a re-export shim at the original location (`knowledge_extraction/core/resolution/entity_resolver.py`) preserving all existing import paths
-- `src/shared/contracts/__init__.py` created alongside `knowledge.py`
+### Shared Extractors + Processors (`src/shared/`)
+- Moved `core/extractors/` from `url_content_extraction` → `src/shared/extractors/`
+  - `ExtractorFactory`, `PlaywrightExtractor`, `LightExtractor`
+- Moved `core/processors/` from `url_content_extraction` → `src/shared/processors/`
+  - `ContentCleaner`, `MetadataExtractor`, `TextDeduplicator`
+- Moved `core/utils/amp_detector.py` and `core/utils/consent_handler.py` → `src/shared/utils/`
+- Moved `core/contracts/extracted_content.py` → `src/shared/contracts/extracted_content.py`
+- Added compat re-export shims at all original `url_content_extraction` paths so existing imports continue to work
+- Updated `content_summarization/scripts/backlog_processor.py` and all affected tests to use new shared paths
 
-### New GitHub Actions workflow: `.github/workflows/article-knowledge-cleanup.yml`
-- Runs every 5 minutes to delete expired or consumed job rows from `article_knowledge_jobs`
-- Calls `cleanup_expired_jobs_cli.py` with Supabase secrets from GitHub secrets
+### Shared Jobs Primitives (`src/shared/jobs/`)
+- Created `src/shared/jobs/contracts.py`: `JobStatus` enum, `JobError` dataclass, `SupabaseConfig` dataclass
+- Created `src/shared/jobs/store.py`: `JobStore` class — atomic `create`, `mark_running`, `mark_succeeded`, `mark_failed`, `consume` (delete-on-read via RPC), `delete_expired`
+- Extracted from `article_knowledge_extraction/core/db/job_store.py`, which now delegates to the shared `JobStore` with `service='article_knowledge_extraction'` injected at construction
 
-### `url_content_extraction` — ephemeral handoff layer (phase 6a, feature-flagged off)
-- New `core/db/ephemeral.py` — `EphemeralContentStore` for reading/writing `news_url_content_ephemeral` rows
-- New `scripts/ephemeral_sweep_cli.py` — deletes consumed/expired rows
-- New `schema.sql` — DDL for `news_url_content_ephemeral` table (48h TTL, `consumed_at` guard)
-- `functions/main.py` extended: stage 2 (fetch) optionally writes to ephemeral table; stage 3 (facts) optionally reads from there instead of re-fetching
-- `core/facts_batch/request_generator.py` and `result_processor.py` updated to honour ephemeral reads
-- `content_batch_processor.py` updated accordingly
-- `core/db/__init__.py` re-exports `EphemeralContentStore`
-- All three pipeline GitHub Actions workflows (`content-pipeline-create.yml`, `content-pipeline-poll.yml`, `content-facts-entities-realtime.yml`) gain `EPHEMERAL_CONTENT_ENABLED: 'false'` env var — ready to flip in phase 6b/6c
-- `content-pipeline-poll.yml` adds a sweep step that always runs after polling
-- `README.md` updated to document the ephemeral handoff design
-- `.env.example` documents `WORKER_TOKEN` and `EPHEMERAL_CONTENT_ENABLED`
+### Shared `extraction_jobs` Table + Migration
+- Added `supabase/migrations/20260422120000_extraction_jobs_shared_table.sql`:
+  - Renames `article_knowledge_extraction_jobs` → `extraction_jobs`
+  - Adds `service TEXT NOT NULL` discriminator column
+  - Renames RPC to `consume_extraction_job(uuid)`
+  - Updates RLS policies and indexes to cover the new column
+- Updated `article_knowledge_extraction` job_store to filter all queries by `service='article_knowledge_extraction'`
+- Updated `article_knowledge_extraction/schema.sql` with a pointer comment to the shared migration
+- Updated `article_knowledge_extraction/scripts/cleanup_expired_jobs_cli.py` to accept `--service` flag
+- Updated `article_knowledge_extraction/README.md`, tests, and `.github/workflows/article-knowledge-cleanup.yml` accordingly
 
-### Tests
-- 21 new tests in `tests/article_knowledge_extraction/` — all passing
-  - `test_article_extraction_pipeline.py` — pipeline integration with fake extractors
-  - `test_factory.py` — request validation for submit/poll/worker entry points
-  - `test_job_store.py` — full job lifecycle + expiry cleanup
-  - `test_prompts.py` — prompt content and category coverage assertions
-- 2 new shim regression tests in `tests/knowledge_extraction/test_entity_resolver_shim.py` — confirm original import paths still work
-- New `tests/url_content_extraction/test_ephemeral.py` — covers `EphemeralContentStore`
+### New Module: `url_content_extraction_service`
+- `core/config.py` — `ServiceConfig`, `SubmitRequest`, `PollRequest`, `WorkerRequest` dataclasses with full validation
+- `core/factory.py` — parses HTTP payloads into config structs; reuses `src/shared/jobs/` and `src/shared/extractors/`
+- `core/contracts/result.py` — `ExtractionResult` dataclass
+- `core/worker/job_runner.py` — `JobRunner`: loads job, runs `ExtractorFactory`, writes `ExtractionResult` to `extraction_jobs`
+- `functions/main.py` — Flask HTTP handler with `/submit`, `/poll`, `/worker` routes
+- `functions/local_server.py` — local dev server
+- `functions/deploy.sh` — Cloud Function deployment (mktemp pattern, no secrets in env)
+- `functions/run_local.sh`
+- `scripts/submit_job_cli.py`, `scripts/poll_job_cli.py`, `scripts/cleanup_expired_jobs_cli.py`
+- `requirements.txt`, `.env.example`, `schema.sql` (pointer to shared migration), `README.md`
+- `.github/workflows/url-content-extraction-cleanup.yml` — daily cron to sweep expired jobs
+- 18 new tests across `tests/url_content_extraction_service/`: `test_factory.py` (9), `test_worker.py` (7), `test_auth.py` (2)
 
 ## Files Modified
 
-### New files (untracked → added)
-- `src/functions/article_knowledge_extraction/` — entire new module (see above)
-- `src/shared/nlp/entity_resolver.py` — canonical EntityResolver (moved from knowledge_extraction)
-- `src/shared/nlp/team_aliases.py` — NFL team aliases dict
-- `src/shared/contracts/knowledge.py` — `ResolvedEntity` dataclass
-- `src/shared/contracts/__init__.py` — package init
-- `tests/article_knowledge_extraction/` — 4 new test files
-- `tests/knowledge_extraction/test_entity_resolver_shim.py` — shim regression tests
-- `tests/url_content_extraction/test_ephemeral.py` — ephemeral store tests
-- `.github/workflows/article-knowledge-cleanup.yml` — new cleanup cron workflow
-- `src/functions/url_content_extraction/core/db/ephemeral.py` — ephemeral store
-- `src/functions/url_content_extraction/schema.sql` — DDL for ephemeral table
-- `src/functions/url_content_extraction/scripts/ephemeral_sweep_cli.py` — sweep CLI
+### Deleted
+- `src/functions/url_content_extraction/core/db/ephemeral.py`
+- `src/functions/url_content_extraction/scripts/ephemeral_sweep_cli.py`
+- `src/functions/url_content_extraction/schema.sql`
+- `tests/url_content_extraction/test_ephemeral.py`
 
-### Modified files
-- `src/functions/knowledge_extraction/core/resolution/entity_resolver.py` — replaced with re-export shim
-- `src/functions/url_content_extraction/functions/main.py` — ephemeral handoff support (feature-flagged)
-- `src/functions/url_content_extraction/core/contracts/extracted_content.py` — ephemeral fields
-- `src/functions/url_content_extraction/core/db/__init__.py` — re-exports EphemeralContentStore
-- `src/functions/url_content_extraction/core/facts_batch/request_generator.py` — ephemeral read path
-- `src/functions/url_content_extraction/core/facts_batch/result_processor.py` — ephemeral consume path
-- `src/functions/url_content_extraction/scripts/content_batch_processor.py` — ephemeral integration
-- `src/functions/url_content_extraction/functions/local_server.py` — minor update
-- `src/functions/url_content_extraction/README.md` — ephemeral handoff documentation
-- `.env.example` — documents WORKER_TOKEN and EPHEMERAL_CONTENT_ENABLED
-- `.github/workflows/content-pipeline-create.yml` — adds EPHEMERAL_CONTENT_ENABLED env var
-- `.github/workflows/content-pipeline-poll.yml` — adds EPHEMERAL_CONTENT_ENABLED + sweep step
-- `.github/workflows/content-facts-entities-realtime.yml` — adds EPHEMERAL_CONTENT_ENABLED env var
+### Renamed / Moved (with compat shims left at original paths)
+- `url_content_extraction/core/extractors/` → `src/shared/extractors/`
+- `url_content_extraction/core/processors/` → `src/shared/processors/`
+- `url_content_extraction/core/utils/amp_detector.py` → `src/shared/utils/amp_detector.py`
+- `url_content_extraction/core/utils/consent_handler.py` → `src/shared/utils/consent_handler.py`
+- `url_content_extraction/core/contracts/extracted_content.py` → `src/shared/contracts/extracted_content.py`
 
-### Pre-existing modifications (not this session — unrelated deploy.sh standardization)
-- `src/functions/article_summarization/functions/deploy.sh`
-- `src/functions/article_translation/functions/deploy.sh`
-- `src/functions/article_validation/functions/deploy.sh`
-- `src/functions/daily_team_update/functions/deploy.sh`
-- `src/functions/fuzzy_search/scripts/deploy.sh`
-- `src/functions/game_analysis_package/functions/deploy.sh`
-- `src/functions/news_extraction/functions/deploy.sh`
-- `src/functions/team_article_generation/functions/deploy.sh`
+### Modified
+- `.env.example` — added `url_content_extraction_service` vars
+- `.github/workflows/content-facts-entities-realtime.yml` — reverted ephemeral sweep step
+- `.github/workflows/content-pipeline-create.yml` — reverted ephemeral sweep step
+- `.github/workflows/content-pipeline-poll.yml` — reverted ephemeral sweep step
+- `.github/workflows/article-knowledge-cleanup.yml` — updated for shared table name
+- `src/functions/article_knowledge_extraction/core/config.py` — re-exports from `src/shared/jobs/`
+- `src/functions/article_knowledge_extraction/core/db/job_store.py` — now wraps shared `JobStore` with service filter
+- `src/functions/article_knowledge_extraction/schema.sql` — pointer comment to shared migration
+- `src/functions/article_knowledge_extraction/scripts/cleanup_expired_jobs_cli.py` — `--service` flag
+- `src/functions/article_knowledge_extraction/README.md`
+- `src/functions/content_summarization/scripts/backlog_processor.py` — import path update
+- `src/functions/url_content_extraction/core/db/__init__.py` — ephemeral imports removed
+- `src/functions/url_content_extraction/core/facts_batch/request_generator.py`
+- `src/functions/url_content_extraction/core/facts_batch/result_processor.py`
+- `src/functions/url_content_extraction/core/utils/__init__.py` — shim update
+- `src/functions/url_content_extraction/functions/main.py`
+- `src/functions/url_content_extraction/functions/local_server.py`
+- `src/functions/url_content_extraction/scripts/content_batch_processor.py`
+- `tests/article_knowledge_extraction/test_job_store.py`
+- `tests/url_content_extraction/test_playwright_extractor.py`
+- `tests/url_content_extraction/test_regressions.py`
+- `CLAUDE.md` — updated shared utilities inventory, module list, async-job pattern note
+- `AGENTS.md` — updated shared dir structure, module list, coding style notes
+
+### New
+- `src/shared/jobs/__init__.py`, `contracts.py`, `store.py`
+- `src/shared/extractors/__init__.py`, `extractor_factory.py`, `light_extractor.py`, `playwright_extractor.py`
+- `src/shared/processors/__init__.py`, `content_cleaner.py`, `metadata_extractor.py`, `text_deduplicator.py`
+- `src/shared/contracts/extracted_content.py`
+- `src/shared/utils/amp_detector.py`, `consent_handler.py`
+- `src/functions/url_content_extraction_service/` (full module — core, functions, scripts, tests, docs)
+- `supabase/migrations/20260422120000_extraction_jobs_shared_table.sql`
+- `.github/workflows/url-content-extraction-cleanup.yml`
+- `tests/url_content_extraction_service/test_factory.py`, `test_worker.py`, `test_auth.py`
 
 ## Code Quality Notes
-- Tests run: `venv/bin/python -m pytest tests/article_knowledge_extraction/ tests/knowledge_extraction/ tests/url_content_extraction/ -v`
-- Result: **60 passed, 6 failed** — the 6 failures are in `tests/knowledge_extraction/test_extraction_pipeline.py` and are **pre-existing** (confirmed by running on the pre-change committed state)
-- New module tests: 21/21 passed
-- Shim regression tests: 2/2 passed
-- No linting toolchain configured at project root (no ruff/flake8/mypy)
-- No debug print statements or stray TODO/FIXME comments observed in new files
-- `__pycache__/` directories present in module tree — excluded from commit via `.gitignore`
+- **Tests (today's scope)**: 61 passed, 0 failed across `tests/url_content_extraction_service/`, `tests/url_content_extraction/`, `tests/article_knowledge_extraction/`
+- **Full suite** (excluding pre-existing `gemini_tts_batch` import error — `pydub` not installed in root venv): 143 passed, 6 failed
+- The 6 failures are all in `tests/knowledge_extraction/test_extraction_pipeline.py` — `FakeKnowledgeWriter` does not expose a `.client` attribute that `KnowledgeCompletionTracker` now requires; this was introduced by a prior PR and is pre-existing, not caused by today's work
+- `gemini_tts_batch` tests fail at collection time due to `ModuleNotFoundError: No module named 'pydub'` — also pre-existing; no linting toolchain configured at project root
 
 ## Open Items / Carry-over
-- `EPHEMERAL_CONTENT_ENABLED` is `false` in all three workflows. Phase 6b: flip to `true` in `content-facts-entities-realtime.yml` (lowest volume) once `news_url_content_ephemeral` schema migration has been applied to Supabase
-- Phase 6c: flip `EPHEMERAL_CONTENT_ENABLED` in the main pipeline workflows once phase 6b is validated
-- The 8 pre-existing deploy.sh modifications across other modules (article_summarization, article_translation, article_validation, daily_team_update, fuzzy_search, game_analysis_package, news_extraction, team_article_generation) are uncommitted — review and commit separately if intentional
-- `tests/knowledge_extraction/test_extraction_pipeline.py` has 6 pre-existing failures (`FakeKnowledgeWriter` missing `.client` attribute) — investigate in a future session
-- PRs #119–#123 stacked series from prior day; merge in order or retarget to main
+- **Pre-existing test failures**: 6 `knowledge_extraction` pipeline tests need a `FakeKnowledgeWriter` update to include a `.client` attribute (or the pipeline should not access `writer.client` directly)
+- **`pydub` dep**: `gemini_tts_batch` tests cannot be collected without installing `pydub` into the root venv — add to `requirements-dev.txt` if that module should be covered by the shared suite
+- **Supabase migration**: `supabase/migrations/20260422120000_extraction_jobs_shared_table.sql` must be applied before deploying `url_content_extraction_service` to a new environment
+- **Pre-existing deploy.sh whitespace edits**: `article_summarization`, `article_translation`, `article_validation`, `daily_team_update`, `fuzzy_search`, `game_analysis_package`, `news_extraction`, `team_article_generation` all have unstaged whitespace changes in their `deploy.sh` files — intentionally left unstaged; clean up or commit separately
+- **Push and PR**: Branch `feat/url-content-extraction-service` created locally; user to push and open PR when ready

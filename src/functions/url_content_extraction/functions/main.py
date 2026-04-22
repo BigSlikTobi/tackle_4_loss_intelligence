@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
-import hmac
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
-from src.shared.db.connection import get_supabase_client
 from src.shared.utils.env import load_env
 from src.shared.utils.logging import setup_logging
-from src.functions.url_content_extraction.core.contracts.extracted_content import (
+from src.shared.contracts.extracted_content import (
     ExtractedContent,
 )
-from src.functions.url_content_extraction.core.db import EphemeralContentWriter
-from src.functions.url_content_extraction.core.extractors.extractor_factory import (
+from src.shared.extractors.extractor_factory import (
     get_extractor,
 )
-from src.functions.url_content_extraction.core.utils import amp_detector
+from src.shared.utils import amp_detector
 
 load_env()
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -37,66 +34,15 @@ except ImportError:
 DEFAULT_TIMEOUT_SECONDS = 45
 DEFAULT_MAX_PARAGRAPHS = 120
 DEFAULT_MIN_PARAGRAPH_CHARS = 240
-WORKER_TOKEN_HEADER = "X-Worker-Token"
 
 
-def authenticate(headers: Optional[Mapping[str, str]]) -> Optional[Dict[str, Any]]:
-    """Validate the shared-secret header.
-
-    Returns ``None`` when the request is authorized (or auth is disabled
-    because ``WORKER_TOKEN`` is unset, e.g. local dev). Returns an error
-    payload dict (with ``status_code``) when auth fails.
-
-    Constant-time comparison via :func:`hmac.compare_digest` defends against
-    timing oracles. Header lookup is case-insensitive.
-    """
-    expected = os.getenv("WORKER_TOKEN")
-    if not expected:
-        return None  # Auth disabled (local dev / explicit opt-out at deploy).
-
-    provided = ""
-    if headers:
-        # Flask's EnvironHeaders is case-insensitive; plain dicts are not.
-        try:
-            provided = headers.get(WORKER_TOKEN_HEADER) or ""
-        except Exception:
-            provided = ""
-        if not provided and isinstance(headers, dict):
-            for k, v in headers.items():
-                if isinstance(k, str) and k.lower() == WORKER_TOKEN_HEADER.lower():
-                    provided = v or ""
-                    break
-
-    if not provided or not hmac.compare_digest(str(provided), str(expected)):
-        return {
-            "status": "error",
-            "message": "Unauthorized: missing or invalid worker token",
-            "status_code": 401,
-        }
-    return None
-
-
-def handle_request(
-    request: Dict[str, Any],
-    *,
-    headers: Optional[Mapping[str, str]] = None,
-) -> Dict[str, Any]:
+def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
     """Extract structured content for each requested URL.
-
+    
     Supports optional fact extraction via enable_fact_extraction flag.
     For real-time processing of 1-10 articles with fact extraction.
     For bulk backlog processing (1000+ articles), use backlog_processor.py instead.
-
-    When ``persist_ephemeral`` is true in the request payload the extracted
-    body is upserted into ``news_url_content_ephemeral`` so downstream
-    consumers can read it instead of re-fetching the URL. Requires either a
-    ``supabase`` block in the request or ``SUPABASE_URL``/``SUPABASE_KEY``
-    in the environment.
     """
-
-    auth_error = authenticate(headers)
-    if auth_error is not None:
-        return auth_error
 
     urls = request.get("urls") or []
     if not isinstance(urls, list) or not urls:
@@ -104,24 +50,6 @@ def handle_request(
             "status": "error",
             "message": "Request must include a non-empty 'urls' list",
         }
-
-    persist_ephemeral = bool(request.get("persist_ephemeral"))
-    ephemeral_ttl_hours = request.get("ephemeral_ttl_hours")
-    if ephemeral_ttl_hours is not None:
-        try:
-            ephemeral_ttl_hours = int(ephemeral_ttl_hours)
-        except (TypeError, ValueError):
-            ephemeral_ttl_hours = None
-    skip_response_body = bool(request.get("skip_response_body"))
-
-    ephemeral_writer: Optional[EphemeralContentWriter] = None
-    if persist_ephemeral:
-        ephemeral_writer = _build_ephemeral_writer(request)
-        if ephemeral_writer is None:
-            logger.warning(
-                "persist_ephemeral requested but Supabase credentials are missing; "
-                "skipping ephemeral writes"
-            )
 
     # Check if fact extraction is enabled
     enable_fact_extraction = request.get("enable_fact_extraction", False)
@@ -200,33 +128,6 @@ def handle_request(
             if key not in payload and value is not None:
                 payload[key] = value
 
-        # Optional ephemeral handoff: write the body so downstream consumers
-        # can read instead of re-fetching. Skips invalid/empty extractions.
-        if (
-            ephemeral_writer is not None
-            and "error" not in payload
-            and payload.get("content")
-        ):
-            news_url_id = metadata.get("news_url_id") or metadata.get("id")
-            if news_url_id:
-                try:
-                    ephemeral_writer.upsert_one(
-                        extracted.to_ephemeral_row(news_url_id),
-                        ttl_hours=ephemeral_ttl_hours,
-                    )
-                    payload["ephemeral_persisted"] = True
-                except Exception as exc:
-                    logger.warning(
-                        "Ephemeral upsert failed for %s: %s", news_url_id, exc
-                    )
-                    payload["ephemeral_persisted"] = False
-            else:
-                logger.debug(
-                    "persist_ephemeral set but request did not supply news_url_id "
-                    "for %s; skipping",
-                    url,
-                )
-
         # Optional fact extraction (for real-time processing)
         if enable_fact_extraction and fact_config and "error" not in payload:
             news_url_id = metadata.get("news_url_id") or metadata.get("id")
@@ -266,13 +167,6 @@ def handle_request(
                 if not payload.get("content"):
                     logger.debug("Skipping fact extraction: no content extracted")
 
-        if skip_response_body and "error" not in payload:
-            # Caller signaled they'll read content from the ephemeral table
-            # instead — strip the heavy fields to slim the response.
-            payload.pop("content", None)
-            payload.pop("paragraphs", None)
-            payload["body_omitted"] = True
-
         articles.append(payload)
 
     succeeded = sum(1 for article in articles if "error" not in article)
@@ -281,33 +175,6 @@ def handle_request(
         "counts": {"total": len(articles), "succeeded": succeeded},
         "articles": articles,
     }
-
-
-def _build_ephemeral_writer(
-    request: Dict[str, Any],
-) -> Optional[EphemeralContentWriter]:
-    """Construct a Supabase-backed ephemeral writer using request creds first,
-    then env vars. Returns ``None`` when no credentials are available.
-
-    Per-request creds (image_selection pattern) let external callers drive
-    the function without sharing the deploy-time service-role key.
-    """
-    sb = request.get("supabase") if isinstance(request.get("supabase"), dict) else {}
-    url = sb.get("url") or os.getenv("SUPABASE_URL")
-    key = sb.get("key") or os.getenv("SUPABASE_KEY")
-    if not url or not key:
-        return None
-    try:
-        if sb.get("url") or sb.get("key"):
-            from supabase import create_client
-
-            client = create_client(url, key)
-        else:
-            client = get_supabase_client()
-    except Exception as exc:
-        logger.warning("Failed to build Supabase client for ephemeral writes: %s", exc)
-        return None
-    return EphemeralContentWriter(client)
 
 
 def _normalise_url_entry(entry: Any) -> Tuple[str, Dict[str, Any]]:
