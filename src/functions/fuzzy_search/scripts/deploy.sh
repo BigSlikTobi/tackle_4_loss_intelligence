@@ -40,11 +40,18 @@ echo "functions-framework>=3.0.0" >> "$DIST_DIR/requirements.txt"
 # We need to recreate the directory structure src/functions/fuzzy_search and src/shared
 mkdir -p "$DIST_DIR/src/functions"
 
+RSYNC_EXCLUDES=(
+  --exclude 'venv/' --exclude '.venv/'
+  --exclude '__pycache__/' --exclude '*.pyc'
+  --exclude '.env' --exclude '.env.local'
+  --exclude '.pytest_cache/' --exclude '.mypy_cache/'
+)
+
 # Copy shared modules
-cp -r src/shared "$DIST_DIR/src/"
+rsync -a "${RSYNC_EXCLUDES[@]}" src/shared "$DIST_DIR/src/"
 
 # Copy fuzzy_search module
-cp -r "$SOURCE_MODULE" "$DIST_DIR/src/functions/"
+rsync -a "${RSYNC_EXCLUDES[@]}" "$SOURCE_MODULE" "$DIST_DIR/src/functions/"
 
 # Ensure __init__.py files exist for valid packaging
 [ -f src/__init__.py ] && cp src/__init__.py "$DIST_DIR/src/"

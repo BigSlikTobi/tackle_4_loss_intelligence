@@ -153,7 +153,12 @@ trap cleanup EXIT
 
 # Copy source code to temporary directory
 info "Copying source code to temporary directory"
-cp -r src "$TEMP_DEPLOY_DIR/"
+rsync -a \
+  --exclude 'venv/' --exclude '.venv/' \
+  --exclude '__pycache__/' --exclude '*.pyc' \
+  --exclude '.env' --exclude '.env.local' \
+  --exclude '.pytest_cache/' --exclude '.mypy_cache/' \
+  src "$TEMP_DEPLOY_DIR/"
 
 # Copy Playwright browsers to deployment directory
 info "Copying Playwright browsers to deployment directory"

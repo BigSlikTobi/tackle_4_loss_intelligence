@@ -67,7 +67,12 @@ cleanup() {
 trap cleanup EXIT
 
 info "Copying source code to temporary directory"
-cp -r src "$TEMP_DEPLOY_DIR/"
+rsync -a \
+  --exclude 'venv/' --exclude '.venv/' \
+  --exclude '__pycache__/' --exclude '*.pyc' \
+  --exclude '.env' --exclude '.env.local' \
+  --exclude '.pytest_cache/' --exclude '.mypy_cache/' \
+  src "$TEMP_DEPLOY_DIR/"
 
 info "Generating deployment entry point wrapper"
 cat > "$TEMP_DEPLOY_DIR/main.py" <<'EOF'

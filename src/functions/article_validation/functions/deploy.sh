@@ -82,7 +82,12 @@ trap cleanup EXIT
 
 # Copy entire src/ directory to temp location
 info "Copying source files to temporary directory..."
-cp -r src "$TEMP_DEPLOY_DIR/"
+rsync -a \
+  --exclude 'venv/' --exclude '.venv/' \
+  --exclude '__pycache__/' --exclude '*.pyc' \
+  --exclude '.env' --exclude '.env.local' \
+  --exclude '.pytest_cache/' --exclude '.mypy_cache/' \
+  src "$TEMP_DEPLOY_DIR/"
 
 info "Creating deployment entry point..."
 cat > "$TEMP_DEPLOY_DIR/main.py" <<'EOF'
