@@ -15,6 +15,7 @@ terminal.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -149,7 +150,7 @@ def worker_handler(request: flask.Request) -> flask.Response:
 
     if WORKER_TOKEN:
         token = request.headers.get("X-Worker-Token", "")
-        if token != WORKER_TOKEN:
+        if not hmac.compare_digest(token, WORKER_TOKEN):
             logger.warning("Worker handler rejected unauthenticated request")
             return _error_response("Forbidden", status=403)
 

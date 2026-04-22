@@ -41,8 +41,15 @@ def run_job(job_id: str, supabase_config: SupabaseConfig) -> Dict[str, Any]:
         return {"job_id": job_id, "status": status, "idempotent_skip": True}
 
     claimed = store.mark_running(job_id)
-    if claimed is None and status != JobStatus.RUNNING.value:
-        logger.info("run_job: could not claim job %s (race with another worker)", job_id)
+    if claimed is None:
+        # Another worker already claimed the job (queued -> running is atomic).
+        # Bail out rather than run concurrently — the other worker is in flight,
+        # or the requeue cron fired after this worker had already started.
+        logger.info(
+            "run_job: could not claim job %s (already claimed, current status=%s)",
+            job_id,
+            status,
+        )
         return {"job_id": job_id, "status": "not_claimed"}
 
     input_payload = row.get("input") or {}

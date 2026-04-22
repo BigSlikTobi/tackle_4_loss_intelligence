@@ -249,6 +249,9 @@ class EntityResolver:
 
         best_match = self._fuzzy_match_team(clean_mention)
         if best_match and best_match.confidence >= self.confidence_threshold:
+            # _fuzzy_match_team uses the normalized/lowercased mention as its
+            # mention_text; restore the caller's original for downstream payloads.
+            best_match.mention_text = mention_text
             return best_match
 
         logger.debug(f"No team match for: {mention_text}")
