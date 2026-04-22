@@ -33,6 +33,10 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.11'
+  # Phase 6a: ephemeral content handoff off; flip in 6c (reads) once writers
+  # are populating the table. The sweep job below is safe to run regardless
+  # of this flag — it only deletes consumed/expired rows.
+  EPHEMERAL_CONTENT_ENABLED: 'false'
 
 jobs:
   poll-and-process:
@@ -500,6 +504,15 @@ jobs:
           if __name__ == "__main__":
               main()
           EOF
+
+      - name: Sweep ephemeral content rows
+        # Always run to clear consumed/expired rows even if poll failed.
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python src/functions/url_content_extraction/scripts/ephemeral_sweep_cli.py
 
       - name: Report status
         if: always()

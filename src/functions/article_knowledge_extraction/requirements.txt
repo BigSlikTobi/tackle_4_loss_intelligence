@@ -1,0 +1,15 @@
+# Article Knowledge Extraction Dependencies
+
+# Core LLM + HTTP
+openai>=1.12.0
+flask>=3.0.0
+requests>=2.31.0
+
+# Storage
+supabase>=2.3.0
+
+# Entity resolution (shared via src/shared/nlp/)
+rapidfuzz>=3.6.0
+
+# Environment
+python-dotenv>=1.0.0

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from itertools import zip_longest
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.shared.db.connection import get_supabase_client
+from ..db import EphemeralContentReader
 from ..facts.prompts import FACT_PROMPT, get_formatted_prompt
 from ..extractors.extractor_factory import get_extractor
 
@@ -48,14 +51,19 @@ class FactsBatchRequestGenerator:
         output_dir: Optional[Path] = None,
         page_size: int = 100,
         max_workers: int = 10,
+        use_ephemeral_content: Optional[bool] = None,
     ) -> None:
         """Initialize request generator.
-        
+
         Args:
             model: LLM model for fact extraction
             output_dir: Directory for batch files
             page_size: Page size for database queries
             max_workers: Number of parallel workers for content fetching
+            use_ephemeral_content: If True, try news_url_content_ephemeral
+                before re-fetching from the source. If False, always live-fetch
+                (legacy behavior). Defaults to the EPHEMERAL_CONTENT_ENABLED
+                env var (off when unset).
         """
         self.client = get_supabase_client()
         self.model = model
@@ -63,6 +71,18 @@ class FactsBatchRequestGenerator:
         self.output_dir.mkdir(exist_ok=True)
         self.page_size = page_size
         self.max_workers = max_workers
+        if use_ephemeral_content is None:
+            env_flag = os.getenv("EPHEMERAL_CONTENT_ENABLED", "").strip().lower()
+            use_ephemeral_content = env_flag in {"1", "true", "yes", "y"}
+        self.use_ephemeral_content = bool(use_ephemeral_content)
+        self._ephemeral_reader: Optional[EphemeralContentReader] = (
+            EphemeralContentReader(self.client) if self.use_ephemeral_content else None
+        )
+        # Per-generate-call counters; reset in generate().
+        self._counter_lock = Lock()
+        self._ephemeral_hits = 0
+        self._ephemeral_misses = 0
+        self._live_fetches = 0
 
         # Check if this is a reasoning model (gpt-5-nano, o1, o3)
         self.is_reasoning_model = (
@@ -112,6 +132,12 @@ class FactsBatchRequestGenerator:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename = f"facts_batch_{timestamp}.jsonl"
         file_path = self.output_dir / filename
+
+        # Reset per-call counters so metadata reflects only this generate().
+        with self._counter_lock:
+            self._ephemeral_hits = 0
+            self._ephemeral_misses = 0
+            self._live_fetches = 0
 
         # Fetch pending articles
         if high_fact_count_threshold is not None:
@@ -178,11 +204,32 @@ class FactsBatchRequestGenerator:
         )
 
         def fetch_article_content(article: Dict[str, Any]) -> Tuple[str, str, bool]:
-            """Fetch content for a single article. Returns (id, content, success)."""
+            """Fetch content for a single article. Returns (id, content, success).
+
+            Read order: ephemeral table (when enabled) -> live extractor.
+            Counter increments are thread-safe so the metadata block reflects
+            the true hit/miss/fallback distribution for the run.
+            """
             news_url_id = article["id"]
             url = article["url"]
+            if self._ephemeral_reader is not None:
+                try:
+                    cached = self._ephemeral_reader.fetch_content(news_url_id)
+                except Exception as exc:  # pragma: no cover - defensive
+                    cached = None
+                    logger.warning(
+                        "Ephemeral lookup raised for %s: %s", news_url_id, exc
+                    )
+                if cached:
+                    with self._counter_lock:
+                        self._ephemeral_hits += 1
+                    return (news_url_id, cached, True)
+                with self._counter_lock:
+                    self._ephemeral_misses += 1
             try:
                 content = self._fetch_content_from_url(url)
+                with self._counter_lock:
+                    self._live_fetches += 1
                 return (news_url_id, content, bool(content and content.strip()))
             except Exception as e:
                 logger.warning(f"Failed to fetch {url[:60]}: {e}")
@@ -257,6 +304,10 @@ class FactsBatchRequestGenerator:
             "include_unextracted": include_unextracted,
             "max_workers": self.max_workers,
             "max_age_hours": max_age_hours,
+            "ephemeral_enabled": self.use_ephemeral_content,
+            "ephemeral_hits": self._ephemeral_hits,
+            "ephemeral_misses": self._ephemeral_misses,
+            "live_fetches": self._live_fetches,
         }
 
         metadata_path = self.output_dir / f"facts_batch_{timestamp}_metadata.json"

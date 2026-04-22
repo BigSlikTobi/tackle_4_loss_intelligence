@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, HttpUrl, ValidationError, field_validator
 
@@ -77,6 +77,39 @@ class ExtractedContent:
         if max_paragraphs < 1:
             return
         self.paragraphs = self.paragraphs[:max_paragraphs]
+
+    def joined_text(self) -> str:
+        """Return paragraphs joined by blank lines (the canonical content body)."""
+
+        cleaned = [p.strip() for p in self.paragraphs if p and p.strip()]
+        return "\n\n".join(cleaned)
+
+    def to_ephemeral_row(self, news_url_id: str) -> Dict[str, Any]:
+        """Serialize for insert into ``news_url_content_ephemeral``.
+
+        ``expires_at`` is left to the table default; callers that need a
+        custom TTL should set it on the returned dict before insert.
+        """
+
+        cleaned_paragraphs = [p.strip() for p in self.paragraphs if p and p.strip()]
+        meta: Optional[Dict[str, Any]] = None
+        if self.metadata is not None:
+            meta = {
+                "fetched_at": self.metadata.fetched_at.isoformat()
+                if self.metadata.fetched_at
+                else None,
+                "extractor": self.metadata.extractor,
+                "duration_seconds": self.metadata.duration_seconds,
+                "page_language": self.metadata.page_language,
+                "raw_url": self.metadata.raw_url,
+            }
+        return {
+            "news_url_id": news_url_id,
+            "content": "\n\n".join(cleaned_paragraphs),
+            "title": self.title,
+            "paragraphs": cleaned_paragraphs or None,
+            "metadata": meta,
+        }
 
 
 def parse_options(raw_options: dict | ExtractionOptions) -> ExtractionOptions:
