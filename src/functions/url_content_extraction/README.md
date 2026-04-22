@@ -16,6 +16,25 @@ A production-ready, standalone content extraction service that retrieves structu
 - **Metadata Extraction**: Captures structured metadata (author, publish date, tags)
 - **Watchdog Timeout**: Protects against long-running extractions
 - **Structured Output**: Strongly typed data contracts for reliable integration
+- **Ephemeral Handoff** *(opt-in)*: Stage-2 extractions can be persisted into `news_url_content_ephemeral` so the facts stage reads instead of re-fetching. Bounded TTL + sweep CLI keep the legal-no-persistence posture intact (see *Ephemeral Content Handoff* below).
+- **HTTP Auth** *(opt-in)*: When `WORKER_TOKEN` is set on the Cloud Function, every request must carry `X-Worker-Token: <token>`; constant-time comparison defends against timing attacks. Unset = open (local dev).
+
+## Ephemeral Content Handoff
+
+The module supports an optional `news_url_content_ephemeral` table that acts as a short-lived bus between extraction and downstream consumption (today: `core/facts_batch`).
+
+- **Schema**: `schema.sql` (apply via your standard Supabase migration path).
+- **Enable**: set `EPHEMERAL_CONTENT_ENABLED=true` in the calling environment, or pass `--persist-ephemeral` to `content_batch_processor.py`, or `persist_ephemeral: true` in the Cloud Function request body.
+- **Lifecycle**: extractor UPSERTs a row keyed by `news_url_id` with default 48h `expires_at`; consumer marks `consumed_at` when its work is durable; `scripts/ephemeral_sweep_cli.py` deletes consumed/expired rows (run from the poll workflow).
+- **Read fallback**: `request_generator` always falls back to a live URL fetch on miss/expiry, so the flag is non-destructive to flip.
+- **Counters**: each generated facts batch metadata file includes `ephemeral_hits / ephemeral_misses / live_fetches` to monitor hit rate.
+
+### WORKER_TOKEN rotation
+
+1. Generate a new long random token (`openssl rand -hex 32`).
+2. Update the GitHub Actions secret `WORKER_TOKEN` (settings → secrets).
+3. Re-deploy the function with `WORKER_TOKEN=<new>` exported in your shell.
+4. Workflows pick up the new value on their next run; the old token stops working immediately on redeploy.
 
 ## Installation
 

@@ -11,6 +11,9 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.11'
+  # Phase 6a: ephemeral content handoff off by default. Flip to 'true' in 6b
+  # to enable on the realtime chain first (lowest volume).
+  EPHEMERAL_CONTENT_ENABLED: 'false'
 
 jobs:
   process-chain:
