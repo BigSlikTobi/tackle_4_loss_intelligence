@@ -19,6 +19,33 @@ _DEFAULT_PAGE_SIZE = 1000
 _DEFAULT_CHUNK_SIZE = 100
 
 
+def _parse_vector_string(value: str) -> Optional[List[float]]:
+    """Parse a pgvector/Supabase embedding string into a list of floats.
+
+    Supports both JSON-array form (``"[0.1, 0.2]"``) and the raw pgvector
+    text form. Returns ``None`` on parse failure so callers can skip the row.
+    """
+    import json
+
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, list):
+            return [float(v) for v in parsed]
+    except Exception:
+        pass
+    if stripped.startswith("[") and stripped.endswith("]"):
+        stripped = stripped[1:-1].strip()
+    if not stripped:
+        return None
+    try:
+        return [float(part.strip()) for part in stripped.split(",") if part.strip()]
+    except ValueError:
+        return None
+
+
 class FactsReader:
     """Read-only accessor around the facts schema for a given Supabase client."""
 
@@ -124,20 +151,27 @@ class FactsReader:
         article_ids: Sequence[str],
         *,
         chunk_size: int = _DEFAULT_CHUNK_SIZE,
+        page_size: int = _DEFAULT_PAGE_SIZE,
     ) -> List[str]:
         """Flat list of fact IDs across the supplied articles (any prompt version)."""
         out: List[str] = []
         ids = list(article_ids)
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i : i + chunk_size]
-            response = (
-                self.client.table("news_facts")
-                .select("id")
-                .in_("news_url_id", chunk)
-                .execute()
-            )
-            rows = getattr(response, "data", []) or []
-            out.extend(row.get("id") for row in rows if row.get("id"))
+            offset = 0
+            while True:
+                response = (
+                    self.client.table("news_facts")
+                    .select("id")
+                    .in_("news_url_id", chunk)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+                rows = getattr(response, "data", []) or []
+                out.extend(row.get("id") for row in rows if row.get("id"))
+                if len(rows) < page_size:
+                    break
+                offset += page_size
         return out
 
     # ------------------------------------------------------------------
@@ -176,8 +210,6 @@ class FactsReader:
         chunk_size: int = _DEFAULT_PAGE_SIZE,
     ) -> List[List[float]]:
         """Return embedding vectors for the supplied fact IDs (parse-safe)."""
-        import json
-
         vectors: List[List[float]] = []
         ids = list(fact_ids)
         for i in range(0, len(ids), chunk_size):
@@ -192,9 +224,8 @@ class FactsReader:
             for row in rows:
                 vector = row.get("embedding_vector")
                 if isinstance(vector, str):
-                    try:
-                        vector = json.loads(vector.strip("[]"))
-                    except Exception:
+                    vector = _parse_vector_string(vector)
+                    if vector is None:
                         continue
                 if isinstance(vector, list) and vector:
                     vectors.append(vector)

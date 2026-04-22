@@ -295,18 +295,25 @@ class FactsWriter:
         if not ids:
             return 0
 
-        # 1. collect all fact IDs
+        # 1. collect all fact IDs (paginated to respect the 1000-row cap)
+        page_size = 1000
         all_fact_ids: List[str] = []
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i : i + chunk_size]
-            response = (
-                self.client.table("news_facts")
-                .select("id")
-                .in_("news_url_id", chunk)
-                .execute()
-            )
-            rows = getattr(response, "data", []) or []
-            all_fact_ids.extend(row.get("id") for row in rows if row.get("id"))
+            offset = 0
+            while True:
+                response = (
+                    self.client.table("news_facts")
+                    .select("id")
+                    .in_("news_url_id", chunk)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+                rows = getattr(response, "data", []) or []
+                all_fact_ids.extend(row.get("id") for row in rows if row.get("id"))
+                if len(rows) < page_size:
+                    break
+                offset += page_size
 
         # 2. delete fact-scoped rows
         for i in range(0, len(all_fact_ids), chunk_size):
