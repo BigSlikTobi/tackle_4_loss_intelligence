@@ -22,6 +22,11 @@ from src.shared.utils.env import load_env
 
 
 def main() -> int:
+    # Load the central .env BEFORE argparse reads os.getenv for defaults —
+    # otherwise SUPABASE_URL / SUPABASE_KEY from the repo-root .env are
+    # never picked up and callers must always pass --supabase-* flags.
+    load_env()
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", required=True, help="Poll endpoint URL")
     parser.add_argument("--job-id", required=True)
@@ -32,7 +37,6 @@ def main() -> int:
     parser.add_argument("--max-seconds", type=float, default=300.0)
     args = parser.parse_args()
 
-    load_env()
     if not args.supabase_url or not args.supabase_key:
         print("supabase url + key are required", file=sys.stderr)
         return 2

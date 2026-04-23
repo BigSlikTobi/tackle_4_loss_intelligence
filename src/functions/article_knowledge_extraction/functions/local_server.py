@@ -12,7 +12,13 @@ project_root = Path(__file__).resolve().parents[4]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.functions.article_knowledge_extraction.functions.main import (
+# IMPORTANT: ``main.py`` snapshots ``WORKER_URL`` at import time. Set it
+# BEFORE importing the handlers so submit can fire-and-forget locally
+# without relying on the cleanup cron to requeue.
+_PORT = int(os.environ.get("PORT", 8080))
+os.environ.setdefault("WORKER_URL", f"http://localhost:{_PORT}/worker")
+
+from src.functions.article_knowledge_extraction.functions.main import (  # noqa: E402
     health_check_handler,
     poll_handler,
     submit_handler,
@@ -43,10 +49,6 @@ def _health():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    # By default, WORKER_URL in this local server points back at /worker on
-    # the same port so submit can fire-and-forget locally without cron.
-    os.environ.setdefault("WORKER_URL", f"http://localhost:{port}/worker")
-    print(f"Starting article_knowledge_extraction local server on http://localhost:{port}")
+    print(f"Starting article_knowledge_extraction local server on http://localhost:{_PORT}")
     print("Endpoints: POST /submit, POST /poll, POST /worker, GET /health")
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=_PORT, debug=True)
