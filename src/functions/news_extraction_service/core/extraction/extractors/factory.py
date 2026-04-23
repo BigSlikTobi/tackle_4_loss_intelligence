@@ -11,6 +11,7 @@ import logging
 
 from ..utils import HttpClient
 from .base import BaseExtractor
+from .json_api import JsonApiExtractor
 from .rss import RssExtractor
 from .sitemap import SitemapExtractor
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Mapping of source types to extractor classes
 EXTRACTOR_MAP: dict[str, Type[BaseExtractor]] = {
+    "json_api": JsonApiExtractor,
     "rss": RssExtractor,
     "sitemap": SitemapExtractor,
     # Future: 'html': HtmlExtractor
@@ -30,7 +32,7 @@ def get_extractor(source_type: str, http_client: HttpClient) -> BaseExtractor:
     Get the appropriate extractor for a source type.
 
     Args:
-        source_type: Type of source ('rss', 'sitemap', 'html')
+        source_type: Type of source ('json_api', 'rss', 'sitemap', 'html')
         http_client: Configured HTTP client to use
 
     Returns:

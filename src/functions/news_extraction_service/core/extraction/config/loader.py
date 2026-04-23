@@ -20,7 +20,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Configuration validation constants
-VALID_SOURCE_TYPES = {"rss", "sitemap", "html"}
+VALID_SOURCE_TYPES = {"rss", "sitemap", "html", "json_api"}
 MIN_MAX_ARTICLES = 1
 MAX_MAX_ARTICLES = 1000
 MIN_DAYS_BACK = 1
@@ -34,7 +34,7 @@ class SourceConfig:
     """Configuration for a single news source."""
 
     name: str
-    type: str  # 'rss', 'sitemap', 'html'
+    type: str  # 'rss', 'sitemap', 'html', 'json_api'
     publisher: str
     enabled: bool = True
     nfl_only: bool = True

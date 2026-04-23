@@ -18,13 +18,14 @@ defaults:
   max_requests_per_minute_per_source: 60
 
 sources:
-  # --- RSS ---
+  # --- JSON / RSS ---
   - name: ESPN
-    type: rss
-    # NFL-specific path (/espn/rss/nfl/news) is gated for GCP egress IPs —
-    # serves an empty <channel>. The general news feed gets through; the
-    # nfl_only filter + URL pattern matching keep results NFL-scoped.
-    url: https://www.espn.com/espn/rss/news
+    type: json_api
+    # ESPN's RSS feed returns an empty <channel> from GCP egress IPs. Use the
+    # app-facing JSON endpoint instead; the extractor still applies the same
+    # NFL URL filter so mixed payloads (video, betting, other sports) are
+    # trimmed to NFL article URLs before returning items to callers.
+    url: https://site.api.espn.com/apis/site/v2/sports/football/nfl/news
     publisher: ESPN
     nfl_only: true
     enabled: true
