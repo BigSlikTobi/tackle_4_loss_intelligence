@@ -136,7 +136,12 @@ def main() -> int:
             },
         }
         try:
-            requests.post(worker_url, json=payload, headers=headers, timeout=(3, 3))
+            response = requests.post(
+                worker_url, json=payload, headers=headers, timeout=(3, 3)
+            )
+            # 403/500 without raise_for_status would silently count as
+            # "requeued" — misleading ops signal + stale jobs never recover.
+            response.raise_for_status()
             sent += 1
         except requests.RequestException as exc:
             logger.warning("Failed to requeue job %s: %s", job_id, exc)
