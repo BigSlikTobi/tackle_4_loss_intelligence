@@ -321,3 +321,35 @@ Replicating these steps keeps every new Cloud Function independently deployable 
 - Content summarization: `src/functions/content_summarization/`
 - Story embeddings: `src/functions/story_embeddings/`
 - Story grouping: `src/functions/story_grouping/`
+
+# Codex Review Rules
+
+## Project Context
+- This is a production system. Stability > speed.
+- Backend: Python + Supabase
+- Focus: real-time systems, low latency
+
+## Architecture Rules
+- Avoid tight coupling between modules
+- Prefer async processing over blocking calls
+
+## Code Standards
+- Functions must be small and readable
+- No duplicated logic
+- Clear naming > clever code
+
+## Critical Checks (treat as P0)
+- Security vulnerabilities
+- Data corruption risks
+- Race conditions / concurrency issues
+- Breaking API contracts
+
+## Important Checks (P1)
+- Performance issues
+- Missing error handling
+- Poor readability
+
+## Ignore
+- Minor formatting issues
+- Cosmetic refactors
+

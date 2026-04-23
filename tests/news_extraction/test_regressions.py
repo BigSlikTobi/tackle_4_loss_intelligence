@@ -242,6 +242,88 @@ def test_nfl_only_false_does_not_filter():
     assert nfl_only[0].is_nfl_content is True
 
 
+def test_looks_nfl_url_pattern():
+    """Per-segment matching only — slug text must not produce false positives."""
+    from src.functions.news_extraction.core.extractors.base import _looks_nfl
+
+    # Path segment matches.
+    assert _looks_nfl("https://www.espn.com/nfl/story/_/id/1/abc")
+    assert _looks_nfl("https://www.example.com/sports/nfl/")
+    assert _looks_nfl("https://www.example.com/path/to/nfl")  # trailing-no-slash
+
+    # Slug-only mentions must not match.
+    assert not _looks_nfl(
+        "https://www.espn.com/soccer/story/_/id/1/premier-league-nfl-style-draft"
+    )
+    assert not _looks_nfl(
+        "https://www.espn.com/golf/story/_/id/1/biggest-nfl-fan-pga-tour"
+    )
+    assert not _looks_nfl("https://www.espn.com/nba/story/_/id/1/abc")
+    assert not _looks_nfl("")
+    assert not _looks_nfl(None)
+
+
+def test_looks_nfl_host_dedicated_domains():
+    """NFL.com URLs lack a /nfl/ path segment because the whole site IS NFL.
+    Host-level recognition prevents the path filter from dropping them."""
+    from src.functions.news_extraction.core.extractors.base import _looks_nfl
+
+    # nfl.com and any subdomain must match.
+    assert _looks_nfl("https://www.nfl.com/news/daniel-jeremiah-final-mock")
+    assert _looks_nfl("https://www.nfl.com/draft/some-story")
+    assert _looks_nfl("https://nfl.com/")
+    assert _looks_nfl("https://operations.nfl.com/foo/bar")
+
+    # Lookalike-host attack: nfl.com.evil.com is NOT a subdomain of nfl.com.
+    assert not _looks_nfl("https://www.nfl.com.evil.com/news/abc")
+    assert not _looks_nfl("https://nflcom.evil.com/news/abc")
+
+
+def test_extractor_drops_non_nfl_items_from_nfl_only_source():
+    """When source.nfl_only=True, _create_news_item returns None for non-NFL URLs."""
+    from src.functions.news_extraction.core.extractors.base import BaseExtractor
+
+    @dataclass
+    class _Cfg:
+        name: str = "ESPN"
+        type: str = "rss"
+        publisher: str = "ESPN"
+        nfl_only: bool = True
+
+    # BaseExtractor is abstract; instantiate via a trivial concrete subclass.
+    class _C(BaseExtractor):
+        def extract(self, *args, **kwargs):  # pragma: no cover - unused
+            return []
+
+    extractor = _C(http_client=None)
+    nfl_item = extractor._create_news_item(
+        url="https://www.espn.com/nfl/story/abc",
+        source=_Cfg(),
+        title="Some NFL story",
+    )
+    soccer_item = extractor._create_news_item(
+        url="https://www.espn.com/soccer/story/abc",
+        source=_Cfg(),
+        title="Premier League NFL-style draft",
+    )
+    assert nfl_item is not None
+    assert nfl_item.is_nfl_content is True
+    assert soccer_item is None  # filtered at extractor level
+
+    # When the source isn't NFL-only, items pass through regardless of URL.
+    @dataclass
+    class _CfgGeneral(_Cfg):
+        nfl_only: bool = False
+
+    soccer_general = extractor._create_news_item(
+        url="https://www.espn.com/soccer/story/abc",
+        source=_CfgGeneral(),
+        title="Premier League update",
+    )
+    assert soccer_general is not None
+    assert soccer_general.is_nfl_content is False
+
+
 def test_rate_limiter_is_thread_safe():
     """Concurrent acquire() calls must never raise or exceed the cap."""
     import threading

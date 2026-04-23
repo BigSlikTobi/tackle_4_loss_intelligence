@@ -1,0 +1,36 @@
+name: Codex Inline Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Codex inline review
+        uses: gersmann/codex-review-action@v1
+        with:
+          openai_api_key: ${{ secrets.CODEX_REVIEW_KEY }}
+          prompt: |
+            You are a senior staff engineer reviewing a pull request.
+
+            Only comment on real issues.
+            Focus on bugs, security, performance.
+
+            For each issue:
+            - Be precise
+            - Keep comments short
+            - Point to exact lines
+
+            No praise. No fluff.
