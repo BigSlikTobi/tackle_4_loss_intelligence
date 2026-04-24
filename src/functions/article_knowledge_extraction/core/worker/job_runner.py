@@ -7,6 +7,7 @@ writes a terminal state. Idempotent: if the job is already terminal, no-op.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict
 
 from ..config import (
@@ -103,15 +104,22 @@ def _rehydrate(payload: Dict[str, Any]):
     )
     options.validate()
 
+    # Read the OpenAI key from the worker's own runtime env — never from the
+    # stored job row, so the secret doesn't live in the database.
+    api_key = os.getenv("OPENAI_API_KEY", "")
     llm = LLMConfig(
         provider=llm_payload.get("provider", "openai"),
         model=llm_payload.get("model", "gpt-5.4-mini"),
-        api_key=llm_payload.get("api_key", ""),
+        api_key=api_key,
         parameters=llm_payload.get("parameters") or {},
         timeout_seconds=int(llm_payload.get("timeout_seconds", 60)),
         max_retries=int(llm_payload.get("max_retries", 2)),
     )
-    if not llm.api_key or not llm.model:
-        raise ValueError("llm.api_key and llm.model are required in the stored job input")
+    if not llm.api_key:
+        raise ValueError(
+            "OPENAI_API_KEY must be set in the worker's runtime env"
+        )
+    if not llm.model:
+        raise ValueError("llm.model is required in the stored job input")
 
     return article, options, llm

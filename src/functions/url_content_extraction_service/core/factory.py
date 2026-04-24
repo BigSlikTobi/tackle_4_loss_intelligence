@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 from src.shared.jobs.contracts import SupabaseConfig
@@ -15,13 +16,18 @@ from .config import (
 
 
 def _parse_supabase(payload: Optional[Dict[str, Any]]) -> Optional[SupabaseConfig]:
+    """Hydrate SupabaseConfig from payload url/jobs_table + env-provided key.
+
+    Callers never send the service-role key in the request body; the function
+    reads it from its own runtime env (``SUPABASE_SERVICE_ROLE_KEY``).
+    """
     if payload is None:
         return None
     if not isinstance(payload, dict):
         raise ValueError("supabase must be an object when provided")
     return SupabaseConfig(
         url=payload.get("url", ""),
-        key=payload.get("key", ""),
+        key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
         jobs_table=payload.get("jobs_table", "extraction_jobs"),
     )
 
