@@ -184,7 +184,16 @@ def main() -> None:
     if args.season is None:
         args.season = get_current_season()
     if args.snapshot_week is None:
-        args.snapshot_week, _ = get_current_week_and_season_type()
+        detected_week, _ = get_current_week_and_season_type()
+        if detected_week is None:
+            print(
+                "Outside the NFL calendar window (Super Bowl → preseason). "
+                "Pass --season/--snapshot-week explicitly to backfill, or "
+                "wait for the next preseason. Skipping load.",
+                file=sys.stderr,
+            )
+            return True
+        args.snapshot_week = detected_week
 
     if args.clear:
         logging.getLogger(__name__).info(

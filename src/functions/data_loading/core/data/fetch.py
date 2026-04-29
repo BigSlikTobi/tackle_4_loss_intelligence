@@ -618,13 +618,28 @@ def fetch_injury_data(
     records: List[Dict[str, Any]] = []
     api_error: Optional[str] = None
 
-    try:
-        records = _fetch_injuries_via_espn(context)
-        if records:
-            logger.debug("Fetched %d injury records via ESPN", len(records))
-    except Exception as exc:  # pragma: no cover - network safeguards
-        api_error = str(exc)
-        logger.debug("ESPN injury fetch failed: %s", exc)
+    # ESPN's injuries endpoint returns "current as of fetch" data with no
+    # season/week filter. Using it for any other scope (historical backfill
+    # or offseason auto-detect) would silently stamp today's records with
+    # the requested week's label and corrupt the version history. Only
+    # consult ESPN when the requested scope IS the current live scope.
+    use_espn = _is_current_live_scope(season, week, season_type_normalised)
+    if use_espn:
+        try:
+            records = _fetch_injuries_via_espn(context)
+            if records:
+                logger.debug("Fetched %d injury records via ESPN", len(records))
+        except Exception as exc:  # pragma: no cover - network safeguards
+            api_error = str(exc)
+            logger.debug("ESPN injury fetch failed: %s", exc)
+    else:
+        logger.info(
+            "Requested scope (season=%s week=%s type=%s) is not the current "
+            "live NFL week; skipping ESPN and using parameterized HTML source.",
+            season,
+            week,
+            season_type_normalised.upper(),
+        )
 
     if not records:
         segment = _build_week_segment(season_type_normalised, week)
@@ -675,6 +690,32 @@ def fetch_injury_data(
 
 def _build_week_segment(season_type: str, week: int) -> str:
     return f"{season_type}{week}"
+
+
+def _is_current_live_scope(season: int, week: int, season_type: str) -> bool:
+    """True iff (season, week, season_type) == the current live NFL scope.
+
+    Used to gate the ESPN injuries source, which has no historical filter.
+    Returns False during the offseason (when there is no current week at all)
+    and for any backfill request whose scope doesn't match today's live week.
+    """
+    # Local import to avoid pulling the helper into top-level imports of fetch.py.
+    from ..utils.season import (
+        get_current_season,
+        get_current_week_and_season_type,
+        is_in_season,
+    )
+
+    if not is_in_season():
+        return False
+    cur_week, cur_type = get_current_week_and_season_type()
+    if cur_week is None or cur_type is None:
+        return False
+    return (
+        int(season) == int(get_current_season())
+        and int(week) == int(cur_week)
+        and season_type.lower() == cur_type.lower()
+    )
 
 
 def _fetch_injuries_via_espn(context: Dict[str, Any]) -> List[Dict[str, Any]]:

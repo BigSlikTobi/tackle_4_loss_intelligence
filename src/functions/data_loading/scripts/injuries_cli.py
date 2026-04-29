@@ -53,13 +53,22 @@ def main() -> None:
     args = parser.parse_args()
     setup_cli_logging(args)
 
-    detected_week, detected_type = get_current_week_and_season_type()
     if args.season is None:
         args.season = get_current_season()
-    if args.week is None:
-        args.week = detected_week
-    if args.season_type is None:
-        args.season_type = detected_type
+    if args.week is None or args.season_type is None:
+        detected_week, detected_type = get_current_week_and_season_type()
+        if detected_week is None or detected_type is None:
+            print(
+                "Outside the NFL calendar window (Super Bowl → preseason). "
+                "Pass --season/--week/--season-type explicitly to backfill, "
+                "or wait for the next preseason. Skipping load.",
+                file=sys.stderr,
+            )
+            return True
+        if args.week is None:
+            args.week = detected_week
+        if args.season_type is None:
+            args.season_type = detected_type
 
     loader = InjuriesDataLoader()
     fetch_params = {

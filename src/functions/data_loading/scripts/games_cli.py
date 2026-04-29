@@ -201,6 +201,13 @@ def main() -> None:
         value = args.show.strip()
         if value == "__current__":
             current_week, _ = get_current_week_and_season_type()
+            if current_week is None:
+                print(
+                    "Outside the NFL calendar window. Pass an explicit week "
+                    "(e.g. --show 5) or a team abbr (e.g. --show NYJ).",
+                    file=sys.stderr,
+                )
+                return True
             return _show_week(current_week, args.season)
         if value.isdigit():
             return _show_week(int(value), args.season)
