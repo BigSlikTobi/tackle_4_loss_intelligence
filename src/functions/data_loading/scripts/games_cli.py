@@ -36,6 +36,46 @@ from src.functions.data_loading.core.utils.season import (  # noqa: E402
 from src.functions.data_loading.core.data.loaders.game import GamesDataLoader  # noqa: E402
 
 
+def _resolve_display_season(client, requested: Optional[int]) -> Optional[int]:
+    """Pick the season to display when the user didn't pass --season.
+
+    Calendar default (``get_current_season()``) can sit ahead of the data —
+    e.g. in April–May before the next-year schedule is published. Try the
+    calendar default first; if the games table has zero rows for it, fall
+    back to ``max(season)`` actually present.
+    """
+    if requested is not None:
+        return requested
+
+    calendar_default = get_current_season()
+    probe = (
+        client.table("games")
+        .select("game_id")
+        .eq("season", calendar_default)
+        .limit(1)
+        .execute()
+    )
+    if getattr(probe, "data", None):
+        return calendar_default
+
+    fallback = (
+        client.table("games")
+        .select("season")
+        .order("season", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(fallback, "data", None) or []
+    if rows and rows[0].get("season") is not None:
+        latest = int(rows[0]["season"])
+        print(
+            f"(season {calendar_default} has no games yet; falling back to {latest})",
+            file=sys.stderr,
+        )
+        return latest
+    return calendar_default
+
+
 def _format_game_line(row: Dict[str, Any]) -> str:
     """One-line representation of a game: 'Sun 4:25 PM  NYJ @ NE  21-17 (F)' or scheduled form."""
     weekday = (row.get("weekday") or "").strip()[:3]
@@ -63,7 +103,7 @@ def _show_week(week: int, season: Optional[int]) -> bool:
     from src.shared.db.connection import get_supabase_client
 
     client = get_supabase_client()
-    season = season if season is not None else get_current_season()
+    season = _resolve_display_season(client, season)
     response = (
         client.table("games")
         .select(
@@ -92,7 +132,7 @@ def _show_team(team: str, season: Optional[int]) -> bool:
     from src.shared.db.connection import get_supabase_client
 
     client = get_supabase_client()
-    season = season if season is not None else get_current_season()
+    season = _resolve_display_season(client, season)
     team_upper = team.upper()
     response = (
         client.table("games")
@@ -223,7 +263,10 @@ def main() -> None:
 
     if not args.dry_run and getattr(result, "success", True):
         try:
-            target_season = args.season if args.season is not None else get_current_season()
+            from src.shared.db.connection import get_supabase_client
+            target_season = _resolve_display_season(
+                get_supabase_client(), args.season
+            )
             _print_load_rollup(target_season)
         except Exception as exc:  # pragma: no cover - summary is best-effort
             print(f"(skipped post-load summary: {exc})")

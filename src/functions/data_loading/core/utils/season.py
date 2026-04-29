@@ -48,13 +48,20 @@ def is_in_season() -> bool:
 def get_current_season() -> int:
     """Return the NFL season year for the current date.
 
-    NFL seasons span two calendar years (Sept → Feb). We treat August onward
-    as the new season to cover preseason; January / February belong to the
-    prior year's season (playoffs / Super Bowl).
+    Aligned with the NFL league year, which begins March 16 each year.
+    From March onward, the "current season" is the upcoming one whose
+    regular season starts that September. January and February still
+    belong to the prior season (playoffs / Super Bowl).
+
+    Note: the latest season actually present in nflverse data may lag
+    this value by a few weeks — the next season's schedule is typically
+    published in May. CLIs that display data may need to fall back to
+    ``max(season)`` from the table when the calendar default has no rows
+    yet.
     """
 
     now = datetime.now(timezone.utc)
-    if now.month >= 8:
+    if now.month >= 3:
         return now.year
     return now.year - 1
 
