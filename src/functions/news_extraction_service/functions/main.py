@@ -48,6 +48,29 @@ logger = logging.getLogger(__name__)
 
 WORKER_URL = os.getenv("WORKER_URL", "")
 WORKER_TOKEN = os.getenv("WORKER_TOKEN", "")
+# Shared bearer token that authenticates submit/poll callers. Fails closed:
+# if the env var is unset we reject every call rather than silently accepting
+# anonymous traffic, since anonymous traffic would run on our Supabase+LLM
+# credentials.
+CALLER_TOKEN = os.getenv("EXTRACTION_FUNCTION_AUTH_TOKEN", "")
+
+
+def _check_caller_auth(request: flask.Request) -> flask.Response | None:
+    if not CALLER_TOKEN:
+        logger.error(
+            "EXTRACTION_FUNCTION_AUTH_TOKEN is not configured; rejecting caller"
+        )
+        return _error_response(
+            "Service misconfigured: caller auth token not set", status=503
+        )
+    header = request.headers.get("Authorization", "")
+    prefix = "Bearer "
+    if not header.startswith(prefix) or not hmac.compare_digest(
+        header[len(prefix):], CALLER_TOKEN
+    ):
+        logger.warning("submit/poll handler rejected unauthenticated request")
+        return _error_response("Unauthorized", status=401)
+    return None
 
 
 # --------------------------------------------------------------------- handlers
@@ -58,6 +81,10 @@ def submit_handler(request: flask.Request) -> flask.Response:
         return _cors_response({}, status=204)
     if request.method != "POST":
         return _error_response("Method not allowed. Use POST.", status=405)
+
+    auth_error = _check_caller_auth(request)
+    if auth_error is not None:
+        return auth_error
 
     try:
         payload = request.get_json(silent=True) or {}
@@ -100,6 +127,10 @@ def poll_handler(request: flask.Request) -> flask.Response:
         return _cors_response({}, status=204)
     if request.method != "POST":
         return _error_response("Method not allowed. Use POST.", status=405)
+
+    auth_error = _check_caller_auth(request)
+    if auth_error is not None:
+        return auth_error
 
     try:
         payload = request.get_json(silent=True) or {}
@@ -166,7 +197,8 @@ def _fire_worker(job_id: str, supabase_config) -> None:
         "job_id": job_id,
         "supabase": {
             "url": supabase_config.url,
-            "key": supabase_config.key,
+            # key intentionally omitted: the worker reads
+            # SUPABASE_SERVICE_ROLE_KEY from its own runtime env.
             "jobs_table": supabase_config.jobs_table,
         },
     }
@@ -185,7 +217,9 @@ def _cors_response(body, status: int = 200) -> flask.Response:
     response.headers["Content-Type"] = "application/json"
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "POST,OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type,X-Worker-Token"
+    response.headers["Access-Control-Allow-Headers"] = (
+        "Content-Type,X-Worker-Token,Authorization"
+    )
     return response
 
 

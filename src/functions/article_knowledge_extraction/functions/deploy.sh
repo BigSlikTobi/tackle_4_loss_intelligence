@@ -54,6 +54,21 @@ if [ -z "$WORKER_TOKEN" ]; then
   echo "     WORKER_TOKEN=$WORKER_TOKEN"
 fi
 
+# Require runtime secrets that the functions now read from env instead of the
+# request body (see issue #12 — service secrets no longer travel in payloads).
+if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+  error "SUPABASE_SERVICE_ROLE_KEY not set. Export it before running this script."
+  exit 1
+fi
+if [ -z "$OPENAI_API_KEY" ]; then
+  error "OPENAI_API_KEY not set. Export it before running this script."
+  exit 1
+fi
+if [ -z "$EXTRACTION_FUNCTION_AUTH_TOKEN" ]; then
+  error "EXTRACTION_FUNCTION_AUTH_TOKEN not set. Export it before running this script."
+  exit 1
+fi
+
 # Move to project root (functions -> article_knowledge_extraction -> functions -> src -> root)
 cd ../../../..
 
@@ -137,7 +152,7 @@ fn_url() {
 
 # 1. Worker first, so we can read its URL.
 deploy_fn "$WORKER_FN" "$WORKER_ENTRY" \
-  --set-env-vars="LOG_LEVEL=${LOG_LEVEL_ENV},WORKER_TOKEN=${WORKER_TOKEN}" \
+  --set-env-vars="LOG_LEVEL=${LOG_LEVEL_ENV},WORKER_TOKEN=${WORKER_TOKEN},SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY},OPENAI_API_KEY=${OPENAI_API_KEY}" \
   --clear-secrets
 
 WORKER_URL=$(fn_url "$WORKER_FN")
@@ -149,12 +164,12 @@ info "Worker URL: $WORKER_URL"
 
 # 2. Poll (no worker dependency).
 deploy_fn "$POLL_FN" "$POLL_ENTRY" \
-  --set-env-vars="LOG_LEVEL=${LOG_LEVEL_ENV}" \
+  --set-env-vars="LOG_LEVEL=${LOG_LEVEL_ENV},SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY},EXTRACTION_FUNCTION_AUTH_TOKEN=${EXTRACTION_FUNCTION_AUTH_TOKEN}" \
   --clear-secrets
 
 # 3. Submit, with WORKER_URL + WORKER_TOKEN wired in.
 deploy_fn "$SUBMIT_FN" "$SUBMIT_ENTRY" \
-  --set-env-vars="LOG_LEVEL=${LOG_LEVEL_ENV},WORKER_URL=${WORKER_URL},WORKER_TOKEN=${WORKER_TOKEN}" \
+  --set-env-vars="LOG_LEVEL=${LOG_LEVEL_ENV},WORKER_URL=${WORKER_URL},WORKER_TOKEN=${WORKER_TOKEN},SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY},OPENAI_API_KEY=${OPENAI_API_KEY},EXTRACTION_FUNCTION_AUTH_TOKEN=${EXTRACTION_FUNCTION_AUTH_TOKEN}" \
   --clear-secrets
 
 echo ""

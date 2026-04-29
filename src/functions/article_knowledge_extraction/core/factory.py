@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 from .config import (
@@ -16,6 +17,11 @@ from .config import (
 
 
 def _parse_llm(payload: Optional[Dict[str, Any]]) -> Optional[LLMConfig]:
+    """Hydrate LLMConfig from payload (non-secret fields) + env-provided api_key.
+
+    Callers never send the OpenAI API key in the request body; the function
+    reads it from its own runtime env (``OPENAI_API_KEY``).
+    """
     if payload is None:
         return None
     if not isinstance(payload, dict):
@@ -23,7 +29,7 @@ def _parse_llm(payload: Optional[Dict[str, Any]]) -> Optional[LLMConfig]:
     return LLMConfig(
         provider=payload.get("provider", "openai"),
         model=payload.get("model", "gpt-5.4-mini"),
-        api_key=payload.get("api_key", ""),
+        api_key=os.getenv("OPENAI_API_KEY", ""),
         parameters=payload.get("parameters") or {},
         timeout_seconds=int(payload.get("timeout_seconds", 60)),
         max_retries=int(payload.get("max_retries", 2)),
@@ -31,13 +37,18 @@ def _parse_llm(payload: Optional[Dict[str, Any]]) -> Optional[LLMConfig]:
 
 
 def _parse_supabase(payload: Optional[Dict[str, Any]]) -> Optional[SupabaseConfig]:
+    """Hydrate SupabaseConfig from payload url/jobs_table + env-provided key.
+
+    Callers never send the service-role key in the request body; the function
+    reads it from its own runtime env (``SUPABASE_SERVICE_ROLE_KEY``).
+    """
     if payload is None:
         return None
     if not isinstance(payload, dict):
         raise ValueError("supabase must be an object when provided")
     return SupabaseConfig(
         url=payload.get("url", ""),
-        key=payload.get("key", ""),
+        key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
         jobs_table=payload.get("jobs_table", "article_knowledge_extraction_jobs"),
     )
 
