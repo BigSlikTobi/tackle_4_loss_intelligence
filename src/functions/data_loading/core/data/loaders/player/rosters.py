@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import re
-import logging
-from datetime import datetime, timezone
+from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
-from postgrest.exceptions import APIError
 
 from .....core.data.fetch import fetch_weekly_roster_data
 from .....core.data.transformers.player import RosterDataTransformer
@@ -50,12 +47,28 @@ def _fetch_rosters(season: Optional[int] = None, week: Optional[int] = None, **_
         df = df[pd.to_numeric(df["season"], errors="coerce") == resolved_season]
 
     if resolved_week is None:
-        df, latest_week = _select_latest_values(df, "week")
-        resolved_week = latest_week
-        if latest_week is not None:
-            logger.debug("Using latest roster week %s for season %s", latest_week, resolved_season)
-
-    if resolved_week is not None and "week" in df.columns:
+        # Auto-detect: use the *overall* max week as the snapshot label, but
+        # for each team keep their latest available source week. nflverse's
+        # weekly roster file often has only a couple of teams at the absolute
+        # max week (e.g. a Thursday game or a postseason matchup); a strict
+        # equality filter would drop the other 30 teams.
+        if "week" in df.columns and "team" in df.columns:
+            numeric_week = pd.to_numeric(df["week"], errors="coerce")
+            df = df.assign(_w=numeric_week).dropna(subset=["_w"])
+            if not df.empty:
+                team_max = df.groupby("team")["_w"].transform("max")
+                df = df[df["_w"] == team_max].drop(columns=["_w"])
+                resolved_week = int(pd.to_numeric(df["week"], errors="coerce").max())
+                logger.info(
+                    "Auto-selected per-team latest weekly roster (label: week %s, %d teams)",
+                    resolved_week,
+                    df["team"].nunique(),
+                )
+        else:
+            df, latest_week = _select_latest_values(df, "week")
+            resolved_week = latest_week
+    elif resolved_week is not None and "week" in df.columns:
+        # User-specified week: strict equality filter.
         df = df[pd.to_numeric(df["week"], errors="coerce") == resolved_week]
 
     if resolved_season is None:
@@ -88,7 +101,7 @@ class RosterSupabaseWriter(SupabaseWriter):
     allowed_columns = {
         "team",
         "player",
-        "dept_chart_position",
+        "depth_chart_position",
         "season",
         "week",
         "version",
@@ -115,17 +128,13 @@ class RosterSupabaseWriter(SupabaseWriter):
 
     def write(self, records: List[Dict[str, Any]], *, clear: bool = False) -> PipelineResult:
         processed_total = len(records)
-        
-        # Note: clear is not supported for rosters table with versioning
-        # Rosters are automatically versioned per (season, week)
-        if clear:
-            self.logger.warning(
-                "Clear flag ignored for rosters table. "
-                "Records are automatically versioned per (season, week)."
-            )
-        
+        # `clear` is intentionally ignored: rosters are versioned per
+        # (season, week), so prior versions are flagged is_current=false rather
+        # than deleted. The CLI no longer forwards clear here.
+        del clear
+
         try:
-            prepared, skipped = self._prepare_records(records)
+            prepared, skipped, summary_rows = self._prepare_records(records)
             messages: List[str] = []
 
             if not prepared:
@@ -155,19 +164,26 @@ class RosterSupabaseWriter(SupabaseWriter):
                 messages.append(
                     f"Skipped {len(skipped)} roster records due to missing player IDs or season/week"
                 )
-            if messages:
-                return PipelineResult(True, processed_total, written=written, messages=messages)
-            return PipelineResult(True, processed_total, written=written)
+            messages.extend(self._format_team_summary(summary_rows, version_map))
+            return PipelineResult(True, processed_total, written=written, messages=messages)
         except Exception as exc:  # pragma: no cover - defensive safety net
             self.logger.exception("Failed to persist roster data")
             return PipelineResult(False, processed_total, error=str(exc))
 
     def _prepare_records(
         self, records: List[Dict[str, Any]]
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Tuple[str, str]]]:
+        """Validate references and return (prepared, skipped, summary_rows).
+
+        ``summary_rows`` is a list of (team, depth_chart_position) tuples for
+        records that survived validation; the writer uses them for the
+        per-team / per-position rollup printed after a successful run.
+        """
+
         prepared: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
-        
+        summary_rows: List[Tuple[str, str]] = []
+
         player_ids = {rec.get("player") for rec in records if rec.get("player")}
         player_ids = {pid for pid in player_ids if isinstance(pid, str)}
         known_players = self._fetch_known_player_ids(player_ids)
@@ -176,14 +192,14 @@ class RosterSupabaseWriter(SupabaseWriter):
             season = record.get("season")
             week = record.get("week")
             player_id = record.get("player")
-            
+
             if not season or not week:
                 self.logger.warning(
                     "Missing season/week for record: %s", record
                 )
                 skipped.append(record)
                 continue
-            
+
             if not player_id or player_id not in known_players:
                 player_label = record.get("player_name") or player_id or "<unknown>"
                 team_label = record.get("team") or "<no team>"
@@ -193,17 +209,69 @@ class RosterSupabaseWriter(SupabaseWriter):
                 skipped.append(record)
                 continue
 
+            team = record.get("team")
+            position = record.get("depth_chart_position") or ""
+            summary_rows.append((str(team or "?"), str(position).upper()))
+
             prepared.append(
                 {
                     "season": season,
                     "week": week,
-                    "team": record.get("team"),
+                    "team": team,
                     "player": player_id,
-                    "dept_chart_position": record.get("dept_chart_position"),
+                    "depth_chart_position": record.get("depth_chart_position"),
                 }
             )
 
-        return prepared, skipped
+        return prepared, skipped, summary_rows
+
+    @staticmethod
+    def _format_team_summary(
+        summary_rows: List[Tuple[str, str]],
+        version_map: Dict[Tuple[Any, Any], int],
+    ) -> List[str]:
+        """Build a human-readable per-team rollup of player counts by position group."""
+
+        if not summary_rows:
+            return []
+
+        position_groups = [
+            ("QB",  {"QB"}),
+            ("RB",  {"RB", "FB", "HB"}),
+            ("WR",  {"WR"}),
+            ("TE",  {"TE"}),
+            ("OL",  {"OL", "C", "G", "T", "LT", "LG", "RG", "RT", "OT", "OG"}),
+            ("DL",  {"DL", "DT", "DE", "NT", "EDGE"}),
+            ("LB",  {"LB", "ILB", "OLB", "MLB"}),
+            ("DB",  {"DB", "CB", "S", "FS", "SS", "NB"}),
+            ("ST",  {"K", "P", "LS", "KR", "PR"}),
+        ]
+
+        per_team: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for team, position in summary_rows:
+            group = "OTH"
+            for label, members in position_groups:
+                if position in members:
+                    group = label
+                    break
+            per_team[team][group] += 1
+            per_team[team]["_total"] += 1
+
+        version_tag = ""
+        if len(version_map) == 1:
+            version_tag = f" (snapshot v{next(iter(version_map.values()))})"
+
+        lines: List[str] = [
+            f"Loaded {len(per_team)} team(s), {len(summary_rows)} players{version_tag}:"
+        ]
+        group_labels = [label for label, _ in position_groups]
+        for team in sorted(per_team):
+            counts = per_team[team]
+            cells = [f"{label}={counts[label]}" for label in group_labels if counts.get(label)]
+            if counts.get("OTH"):
+                cells.append(f"OTH={counts['OTH']}")
+            lines.append(f"  {team:<4} {counts['_total']:>2} players  " + "  ".join(cells))
+        return lines
 
     def _apply_versioning(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any], int]:
         """Assign a monotonically increasing version per (season, week)."""
@@ -221,7 +289,13 @@ class RosterSupabaseWriter(SupabaseWriter):
         return version_map
 
     def _ensure_versioning_columns(self) -> None:
-        """Validate that the rosters table exposes the versioning columns."""
+        """Validate that the rosters table exposes the versioning columns.
+
+        Cached on the instance — one probe per CLI run is enough.
+        """
+
+        if getattr(self, "_versioning_columns_verified", False):
+            return
 
         hint = (
             "The rosters table must include an integer `version` column and a "
@@ -242,17 +316,16 @@ class RosterSupabaseWriter(SupabaseWriter):
             raise
 
         error = getattr(response, "error", None)
-        if not error:
-            return
+        if error:
+            message = str(error)
+            if "version" in message or "is_current" in message:
+                raise RuntimeError(hint)
+            self.logger.warning(
+                "Unexpected error while validating roster versioning columns: %s",
+                message,
+            )
 
-        message = str(error)
-        if "version" in message or "is_current" in message:
-            raise RuntimeError(hint)
-
-        self.logger.warning(
-            "Unexpected error while validating roster versioning columns: %s",
-            message,
-        )
+        self._versioning_columns_verified = True
 
     def _fetch_next_versions(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any], int]:
         scopes = {

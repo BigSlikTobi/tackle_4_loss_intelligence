@@ -558,14 +558,14 @@ class RosterDataTransformer(BaseDataTransformer):
         if team:
             team = team.upper()
 
-        dept_chart_position = _clean_str(
+        depth_chart_position = _clean_str(
             record.get("depth_chart_position")
             or record.get("depth_chart_order")
             or record.get("position")
         )
 
-        if dept_chart_position:
-            dept_chart_position = dept_chart_position.upper()
+        if depth_chart_position:
+            depth_chart_position = depth_chart_position.upper()
 
         player_name = _clean_str(
             record.get("display_name")
@@ -580,7 +580,7 @@ class RosterDataTransformer(BaseDataTransformer):
         return {
             "team": team,
             "player": player,
-            "dept_chart_position": dept_chart_position,
+            "depth_chart_position": depth_chart_position,
             "season": season,
             "week": week,
             "player_name": player_name,

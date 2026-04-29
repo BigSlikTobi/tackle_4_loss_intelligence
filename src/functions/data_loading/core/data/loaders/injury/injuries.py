@@ -74,7 +74,6 @@ class InjurySupabaseWriter(SupabaseWriter):
             clear_guard=clear_guard,
             supabase_client=supabase_client,
         )
-        self._player_index: Optional[Dict[str, List[Dict[str, Optional[str]]]]] = None
 
     def write(self, records: List[Dict[str, Any]], *, clear: bool = False) -> PipelineResult:
         processed_total = len(records)
@@ -130,7 +129,7 @@ class InjurySupabaseWriter(SupabaseWriter):
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         prepared: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
-        index = self._load_player_index()
+        index = self._load_player_index(records)
 
         for record in records:
             # Extract season, week, season_type for versioning
@@ -313,25 +312,33 @@ class InjurySupabaseWriter(SupabaseWriter):
                     season_type,
                 )
 
-    def _load_player_index(self) -> Dict[str, List[Dict[str, Optional[str]]]]:
-        if self._player_index is not None:
-            return self._player_index
+    def _load_player_index(
+        self, records: List[Dict[str, Any]]
+    ) -> Dict[str, List[Dict[str, Optional[str]]]]:
+        """Load only the player rows needed to resolve the supplied records.
+
+        Queries the `players` table filtered by the set of last-name tokens
+        extracted from the incoming injury records, instead of scanning the
+        whole table. For a typical single-week run this turns ~30k rows of
+        paginated reads into a single query of <200 rows.
+        """
 
         index: Dict[str, List[Dict[str, Optional[str]]]] = {}
-        page_size = 1000
-        offset = 0
+        last_names = self._extract_last_name_candidates(records)
+        if not last_names:
+            return index
 
-        while True:
+        # Chunk to stay well under PostgREST URL length limits.
+        chunk_size = 100
+        for i in range(0, len(last_names), chunk_size):
+            chunk = last_names[i : i + chunk_size]
             response = (
                 self.client.table("players")
                 .select("player_id, display_name, first_name, last_name, latest_team")
-                .range(offset, offset + page_size - 1)
+                .in_("last_name", chunk)
                 .execute()
             )
             data = getattr(response, "data", None) or []
-            if not data:
-                break
-
             for row in data:
                 entry = {
                     "player_id": _clean_str(row.get("player_id")),
@@ -345,13 +352,33 @@ class InjurySupabaseWriter(SupabaseWriter):
                 for key in self._iter_player_keys(entry):
                     index.setdefault(key, []).append(entry)
 
-            if len(data) < page_size:
-                break
-            offset += page_size
-
-        self._player_index = index
-        self.logger.debug("Loaded %d injury player name keys", len(index))
+        self.logger.debug(
+            "Loaded %d injury player name keys from %d last-name tokens",
+            len(index),
+            len(last_names),
+        )
         return index
+
+    @staticmethod
+    def _extract_last_name_candidates(records: List[Dict[str, Any]]) -> List[str]:
+        suffixes = {"jr", "sr", "ii", "iii", "iv", "v"}
+        candidates: set[str] = set()
+        for record in records:
+            name = _clean_str(record.get("player_name"))
+            if not name:
+                continue
+            if "," in name:
+                last = name.split(",", 1)[0].strip().strip(".")
+                if last:
+                    candidates.add(last)
+                continue
+            tokens = [t.strip(".,") for t in name.split() if t.strip(".,")]
+            for token in reversed(tokens):
+                if token.lower() in suffixes:
+                    continue
+                candidates.add(token)
+                break
+        return sorted(candidates)
 
     def _iter_player_keys(self, entry: Dict[str, Optional[str]]) -> Iterable[str]:
         names: List[str] = []
