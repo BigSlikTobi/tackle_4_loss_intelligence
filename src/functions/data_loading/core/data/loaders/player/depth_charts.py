@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -42,55 +43,45 @@ def _filter_latest(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _fetch_depth_charts(team: Optional[str] = None, season: Optional[int] = None, week: Optional[int] = None, **_: Any):
+def _fetch_depth_charts(
+    team: Optional[str] = None,
+    season: Optional[int] = None,
+    week: Optional[int] = None,
+    **_: Any,
+):
     from nflreadpy import load_depth_charts  # type: ignore
 
-    target_season = season or datetime.now().year
+    target_season = int(season) if season is not None else datetime.now().year
     df = load_depth_charts(seasons=target_season)
     df = df.to_pandas() if hasattr(df, "to_pandas") else pd.DataFrame(df)
 
-    # Add season column if not present (nflreadpy depth charts don't include it)
+    # nflreadpy doesn't always include `season`; stamp it.
     if "season" not in df.columns:
-        df["season"] = str(target_season)
-        logger.debug(f"Added season={target_season} to all depth chart records")
-    elif season is not None:
-        # Filter to requested season if column exists
-        df = df[df["season"] == season]
-    
-    # Check what week data exists in source
-    has_week_col = "week" in df.columns
-    if has_week_col:
-        source_weeks = df["week"].dropna().unique()
-        logger.debug(f"Source data contains weeks: {sorted(source_weeks)}")
-    
-    # Apply team filtering and get latest snapshot
+        df["season"] = target_season
+    df["season"] = pd.to_numeric(df["season"], errors="coerce").astype("Int64")
+
     if team:
         df = df[df["team"].str.upper() == team.upper()]
         df = _filter_latest(df)
     else:
-        df = (
-            df.groupby("team", as_index=False, group_keys=False)
-            .apply(_filter_latest)
-            .reset_index(drop=True)
+        # Group-then-filter without groupby.apply (avoids pandas FutureWarning).
+        df = pd.concat(
+            [_filter_latest(group) for _, group in df.groupby("team", sort=False)],
+            ignore_index=True,
         )
-    
-    # Handle week assignment for versioning
-    # Depth chart data is typically season-level (week="0") but we allow
-    # versioning by week to track when snapshots were taken
-    if "week" not in df.columns or df["week"].isna().all():
-        df["week"] = "0"
-    
-    # Convert week to string for consistency
-    df["week"] = df["week"].astype(str)
-    
-    # If user specified a week, use it to label this snapshot
-    # This allows tracking "when did we capture this depth chart" vs "what week does the data represent"
-    if week is not None:
-        logger.info(f"Labeling depth chart snapshot as week={week} (source data week: {df['week'].iloc[0] if len(df) > 0 else 'N/A'})")
-        df["week"] = str(week)
-    else:
-        logger.debug(f"Using source week values: {df['week'].unique() if len(df) > 0 else []}")
-    
+
+    # Stamp the snapshot week. nflreadpy returns "current as of fetch"; the
+    # `week` arg is a label used by the writer's per-(season, week, team)
+    # versioning, not a filter on the source.
+    snapshot_week = int(week) if week is not None else 0
+    df["week"] = snapshot_week
+    logger.info(
+        "Tagging depth chart snapshot for season=%s week=%s (%d teams)",
+        target_season,
+        snapshot_week,
+        df["team"].nunique() if "team" in df.columns else 0,
+    )
+
     return df
 
 
@@ -142,17 +133,13 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
 
     def write(self, records: List[Dict[str, Any]], *, clear: bool = False) -> PipelineResult:
         processed_total = len(records)
-
-        # Note: clear is not supported for depth_charts table with versioning
-        # Depth charts are automatically versioned per (season, week, team)
-        if clear:
-            self.logger.warning(
-                "Clear flag ignored for depth_charts table. "
-                "Records are automatically versioned per (season, week, team)."
-            )
+        # `clear` is intentionally ignored: depth charts are versioned per
+        # (season, week, team), so prior versions are flagged is_current=false
+        # rather than deleted. The CLI no longer forwards clear here.
+        del clear
 
         try:
-            prepared, skipped = self._prepare_records(records)
+            prepared, skipped, summary_rows = self._prepare_records(records)
             messages: List[str] = []
 
             if not prepared:
@@ -184,18 +171,25 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
                 messages.append(
                     f"Skipped {len(skipped)} depth chart records due to missing references or season/week"
                 )
-            if messages:
-                return PipelineResult(True, processed_total, written=written, messages=messages)
-            return PipelineResult(True, processed_total, written=written)
+            messages.extend(self._format_team_summary(summary_rows, version_map))
+            return PipelineResult(True, processed_total, written=written, messages=messages)
         except Exception as exc:  # pragma: no cover
             self.logger.exception("Failed to write depth chart records")
             return PipelineResult(False, processed_total, error=str(exc))
 
     def _prepare_records(
         self, records: List[Dict[str, Any]]
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Tuple[str, str, str, str]]]:
+        """Validate references and return (prepared, skipped, summary_rows).
+
+        ``summary_rows`` is a list of (team, pos_abb, pos_rank, player_name)
+        tuples for records that survived validation; the writer uses it to
+        produce the per-team starter rollup printed after a successful run.
+        """
+
         prepared: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
+        summary_rows: List[Tuple[str, str, str, str]] = []
 
         player_ids = {rec.get("player_id") for rec in records if rec.get("player_id")}
         player_ids = {pid for pid in player_ids if isinstance(pid, str)}
@@ -210,21 +204,19 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
             team = rec.get("team")
             season = rec.get("season")
             week = rec.get("week")
-            
-            # For depth charts, week can be "0" for season-level data
-            if not season:
+
+            if season is None or season == "":
                 player_label = rec.get("player_name") or player_id or "<unknown>"
                 self.logger.warning(
                     "Skipping depth chart entry for %s - missing season", player_label
                 )
                 skipped.append(rec)
                 continue
-            
-            # If week is missing, default to "0" for season-level depth chart
-            if not week:
-                rec["week"] = "0"
-                week = "0"
-            
+
+            if week is None or week == "":
+                rec["week"] = 0
+                week = 0
+
             missing_reason: Optional[str] = None
             if not player_id or player_id not in known_players:
                 missing_reason = "player"
@@ -234,21 +226,15 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
             if missing_reason:
                 player_label = rec.get("player_name") or player_id or "<unknown>"
                 team_label = team or "<no team>"
-                if missing_reason == "player":
-                    self.logger.warning(
-                        "Skipping depth chart entry for %s on %s due to missing player record",
-                        player_label,
-                        team_label,
-                    )
-                else:
-                    self.logger.warning(
-                        "Skipping depth chart entry for %s on %s due to missing team record",
-                        player_label,
-                        team_label,
-                    )
+                self.logger.warning(
+                    "Skipping depth chart entry for %s on %s due to missing %s record",
+                    player_label,
+                    team_label,
+                    missing_reason,
+                )
                 if self.logger.isEnabledFor(logging.DEBUG):
                     self.logger.debug(
-                        "Skipped depth chart row (team=%s, player=%s, slot=%s, rank=%s, season=%s, week=%s)",
+                        "Skipped row (team=%s, player=%s, slot=%s, rank=%s, season=%s, week=%s)",
                         team_label,
                         player_label,
                         rec.get("pos_slot"),
@@ -259,9 +245,57 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
                 skipped.append(rec)
                 continue
 
+            summary_rows.append(
+                (
+                    str(team),
+                    str(rec.get("pos_abb") or ""),
+                    str(rec.get("pos_rank") or ""),
+                    str(rec.get("player_name") or player_id or "?"),
+                )
+            )
             prepared.append({k: v for k, v in rec.items() if k in self.allowed_columns})
 
-        return prepared, skipped
+        return prepared, skipped, summary_rows
+
+    @staticmethod
+    def _format_team_summary(
+        summary_rows: List[Tuple[str, str, str, str]],
+        version_map: Dict[Tuple[Any, Any, Any], int],
+    ) -> List[str]:
+        """Build a human-readable per-team rollup of starters and entry counts."""
+
+        if not summary_rows:
+            return []
+
+        # Group entries per team: total count + starter at key positions.
+        starter_positions = ("QB", "RB", "WR", "TE")
+        per_team: Dict[str, Dict[str, Any]] = defaultdict(
+            lambda: {"count": 0, "starters": {}}
+        )
+        for team, pos_abb, pos_rank, player_name in summary_rows:
+            stats = per_team[team]
+            stats["count"] += 1
+            if pos_rank == "1" and pos_abb in starter_positions:
+                stats["starters"].setdefault(pos_abb, player_name)
+
+        version_by_team = {
+            team: version for (_season, _week, team), version in version_map.items()
+        }
+
+        lines: List[str] = [
+            f"Loaded {len(per_team)} team(s), {len(summary_rows)} entries:"
+        ]
+        for team in sorted(per_team):
+            stats = per_team[team]
+            starters = stats["starters"]
+            cells = [
+                f"{pos}1 {starters[pos]}" for pos in starter_positions if pos in starters
+            ]
+            version = version_by_team.get(team)
+            version_tag = f" v{version}" if version is not None else ""
+            cells_str = "  ".join(cells) if cells else "(no rank-1 entries)"
+            lines.append(f"  {team:<4}{version_tag:<4} {cells_str}  ({stats['count']} entries)")
+        return lines
 
     def _apply_versioning(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any, Any], int]:
         """Assign a monotonically increasing version per (season, week, team)."""
@@ -279,7 +313,15 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
         return version_map
 
     def _ensure_versioning_columns(self) -> None:
-        """Validate that the depth_charts table exposes the versioning columns."""
+        """Validate that the depth_charts table exposes the versioning columns.
+
+        Cached on the instance so a single writer doesn't probe the schema on
+        every call (writer instances are short-lived; one probe per CLI run is
+        the goal).
+        """
+
+        if getattr(self, "_versioning_columns_verified", False):
+            return
 
         hint = (
             "The depth_charts table must include an integer `version` column and a "
@@ -300,91 +342,129 @@ class DepthChartsSupabaseWriter(SupabaseWriter):
             raise
 
         error = getattr(response, "error", None)
-        if not error:
-            return
+        if error:
+            message = str(error)
+            if "version" in message or "is_current" in message:
+                raise RuntimeError(hint)
+            self.logger.warning(
+                "Unexpected error while validating depth chart versioning columns: %s",
+                message,
+            )
 
-        message = str(error)
-        if "version" in message or "is_current" in message:
-            raise RuntimeError(hint)
+        self._versioning_columns_verified = True
 
-        self.logger.warning(
-            "Unexpected error while validating depth chart versioning columns: %s",
-            message,
-        )
+    def _fetch_next_versions(
+        self, records: List[Dict[str, Any]]
+    ) -> Dict[Tuple[Any, Any, Any], int]:
+        """Compute next version per (season, week, team) using a single round trip.
 
-    def _fetch_next_versions(self, records: List[Dict[str, Any]]) -> Dict[Tuple[Any, Any, Any], int]:
+        Depth-chart loads typically span ~32 teams within one (season, week);
+        the previous implementation issued one SELECT per team. This version
+        groups scopes by (season, week), runs a single ``in_("team", teams)``
+        query per group, and resolves the per-team max client-side.
+        """
+
         scopes = {
             (record["season"], record["week"], record["team"])
             for record in records
-            if record.get("season") and record.get("week") and record.get("team")
+            if record.get("season") is not None
+            and record.get("week") is not None
+            and record.get("team")
         }
-        version_map: Dict[Tuple[Any, Any, Any], int] = {}
+        if not scopes:
+            return {}
 
+        teams_by_sw: Dict[Tuple[Any, Any], Set[str]] = defaultdict(set)
         for season, week, team in scopes:
+            teams_by_sw[(season, week)].add(team)
+
+        version_map: Dict[Tuple[Any, Any, Any], int] = {}
+        for (season, week), teams in teams_by_sw.items():
+            max_per_team: Dict[str, int] = {team: 0 for team in teams}
             try:
                 response = (
                     self.client.table("depth_charts")
-                    .select("version")
+                    .select("team,version")
                     .eq("season", season)
                     .eq("week", week)
-                    .eq("team", team)
-                    .order("version", desc=True)
-                    .limit(1)
+                    .in_("team", sorted(teams))
                     .execute()
                 )
-                data = getattr(response, "data", None) or []
-                current_version = 0
-                if data:
-                    raw_value = data[0].get("version")
-                    try:
-                        current_version = int(raw_value or 0)
-                    except (TypeError, ValueError):
-                        self.logger.warning(
-                            "Unexpected version value '%s' for %s/%s/%s; defaulting to 0",
-                            raw_value,
-                            season,
-                            week,
-                            team,
-                        )
-                        current_version = 0
-                version_map[(season, week, team)] = current_version + 1
             except Exception as exc:  # pragma: no cover - guard Supabase errors
                 self.logger.exception(
-                    "Unable to resolve next version for depth charts %s/%s/%s", season, week, team
+                    "Unable to resolve next versions for depth charts %s/%s", season, week
                 )
                 raise RuntimeError("Failed to calculate depth chart version") from exc
+
+            for row in getattr(response, "data", None) or []:
+                team_val = row.get("team")
+                if team_val not in max_per_team:
+                    continue
+                try:
+                    candidate = int(row.get("version") or 0)
+                except (TypeError, ValueError):
+                    self.logger.warning(
+                        "Unexpected version '%s' for %s/%s/%s; treating as 0",
+                        row.get("version"),
+                        season,
+                        week,
+                        team_val,
+                    )
+                    candidate = 0
+                if candidate > max_per_team[team_val]:
+                    max_per_team[team_val] = candidate
+
+            for team, current in max_per_team.items():
+                version_map[(season, week, team)] = current + 1
 
         return version_map
 
     def _mark_previous_versions_inactive(
         self, version_map: Dict[Tuple[Any, Any, Any], int]
     ) -> None:
+        """Flag prior versions inactive in one UPDATE per (season, week) group.
+
+        All teams within the same (season, week) get bumped to the same version
+        in a single load (each team's first scope was 1; subsequent reloads
+        increment all by 1). When that holds, we can use ``.in_("team", ...)``
+        with the shared ``.lt("version", new_version)`` predicate to do it in
+        one round trip per group instead of one per team.
+        """
+
+        if not version_map:
+            return
+
+        groups: Dict[Tuple[Any, Any, int], Set[str]] = defaultdict(set)
         for (season, week, team), version in version_map.items():
+            groups[(season, week, version)].add(team)
+
+        for (season, week, version), teams in groups.items():
             try:
                 response = (
                     self.client.table("depth_charts")
                     .update({"is_current": False})
                     .eq("season", season)
                     .eq("week", week)
-                    .eq("team", team)
+                    .in_("team", sorted(teams))
                     .lt("version", version)
                     .execute()
                 )
                 error = getattr(response, "error", None)
                 if error:
                     self.logger.warning(
-                        "Failed to mark stale depth charts inactive for %s/%s/%s: %s",
+                        "Failed to mark stale depth charts inactive for %s/%s (v<%s, %d teams): %s",
                         season,
                         week,
-                        team,
+                        version,
+                        len(teams),
                         error,
                     )
             except Exception:  # pragma: no cover - defensive logging
                 self.logger.exception(
-                    "Error while marking stale depth charts inactive for %s/%s/%s",
+                    "Error while marking stale depth charts inactive for %s/%s (v<%s)",
                     season,
                     week,
-                    team,
+                    version,
                 )
 
 

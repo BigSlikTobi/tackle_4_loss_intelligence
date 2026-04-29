@@ -267,13 +267,15 @@ def fetch_player_data(
     filters: list[str] = []
     if season:
         filters.append(f"season {season}")
+    auto_min_last_season = False
     if active_only:
         filters.append("status=Active")
         if min_last_season is None:
             min_last_season = datetime.now().year - 1
-            filters.append(f"last_season>={min_last_season} (auto)")
-    if min_last_season is not None and not (active_only and filters[-1].endswith("(auto)")):
-        filters.append(f"last_season>={min_last_season}")
+            auto_min_last_season = True
+    if min_last_season is not None:
+        suffix = " (auto)" if auto_min_last_season else ""
+        filters.append(f"last_season>={min_last_season}{suffix}")
     label = f" with filters ({', '.join(filters)})" if filters else ""
 
     logger.info("Fetching player data%s...", label)
@@ -508,8 +510,14 @@ def fetch_pfr_data(season: int, week: Optional[int] = None) -> pd.DataFrame:
     return df
 
 
-_INJURY_API_URL = "https://www.nfl.com/api/injuries/v1/teams"
+_ESPN_INJURIES_URL = (
+    "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
+)
 _INJURY_PAGE_TEMPLATE = "https://www.nfl.com/injuries/league/{season}/{segment}"
+# ESPN uses a few abbreviations that diverge from the nfl.com / nflverse set.
+_ESPN_TEAM_ABBR_ALIASES = {
+    "WSH": "WAS",
+}
 _DEFAULT_HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -611,14 +619,12 @@ def fetch_injury_data(
     api_error: Optional[str] = None
 
     try:
-        records = _fetch_injuries_via_api(season, week, season_type_normalised, context)
+        records = _fetch_injuries_via_espn(context)
         if records:
-            logger.debug(
-                "Fetched %d injury records via NFL API", len(records)
-            )
+            logger.debug("Fetched %d injury records via ESPN", len(records))
     except Exception as exc:  # pragma: no cover - network safeguards
         api_error = str(exc)
-        logger.debug("NFL injury API fetch failed: %s", exc, exc_info=True)
+        logger.debug("ESPN injury fetch failed: %s", exc)
 
     if not records:
         segment = _build_week_segment(season_type_normalised, week)
@@ -671,20 +677,20 @@ def _build_week_segment(season_type: str, week: int) -> str:
     return f"{season_type}{week}"
 
 
-def _fetch_injuries_via_api(
-    season: int,
-    week: int,
-    season_type: str,
-    context: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    params = {
-        "season": str(season),
-        "seasonType": season_type.upper(),
-        "week": str(week),
-    }
+def _fetch_injuries_via_espn(context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Fetch the league-wide current injury list from ESPN.
+
+    ESPN's endpoint takes no season/week/season_type parameters; it returns
+    current injuries for every team. The caller stamps season/week/season_type
+    onto the resulting DataFrame, so records emitted here only need the
+    per-injury fields. `context` is unused for filtering but accepted to keep
+    the fetcher signature consistent with the HTML fallback.
+    """
+
+    del context  # no parameters to forward to ESPN
+
     response = requests.get(
-        _INJURY_API_URL,
-        params=params,
+        _ESPN_INJURIES_URL,
         headers=_DEFAULT_HTTP_HEADERS,
         timeout=30,
     )
@@ -692,8 +698,43 @@ def _fetch_injuries_via_api(
     try:
         payload = response.json()
     except json.JSONDecodeError as exc:
-        raise RuntimeError("NFL injury API returned invalid JSON") from exc
-    return _extract_injury_records_from_payload(payload, context)
+        raise RuntimeError("ESPN injury API returned invalid JSON") from exc
+
+    records: List[Dict[str, Any]] = []
+    for team_block in payload.get("injuries") or []:
+        team_abbr_raw = (team_block.get("abbreviation") or "").upper()
+        team_abbr = _ESPN_TEAM_ABBR_ALIASES.get(team_abbr_raw, team_abbr_raw) or None
+        team_name = team_block.get("displayName")
+
+        for injury in team_block.get("injuries") or []:
+            athlete = injury.get("athlete") or {}
+            player_name = athlete.get("displayName") or athlete.get("fullName")
+            if not player_name:
+                continue
+
+            details = injury.get("details") or {}
+            injury_type = (
+                (injury.get("type") or {}).get("description")
+                if isinstance(injury.get("type"), dict)
+                else None
+            ) or details.get("type") or details.get("detail")
+
+            athlete_id = athlete.get("id")
+            records.append(
+                {
+                    "team_abbr": team_abbr,
+                    "team_name": team_name,
+                    "player_name": player_name,
+                    "player_id": None,
+                    "source_player_id": str(athlete_id) if athlete_id else None,
+                    "injury": injury_type,
+                    "practice_status": None,  # ESPN endpoint exposes report status only
+                    "game_status": injury.get("status"),
+                    "last_update": injury.get("date"),
+                }
+            )
+
+    return records
 
 
 def _fetch_injuries_via_html(url: str, context: Dict[str, Any]) -> List[Dict[str, Any]]:

@@ -15,6 +15,10 @@ from src.functions.data_loading.core.utils.cli import (  # noqa: E402
     setup_cli_logging,
     setup_cli_parser,
 )
+from src.functions.data_loading.core.utils.season import (  # noqa: E402
+    get_current_season,
+    get_current_week_and_season_type,
+)
 from src.functions.data_loading.core.data.loaders.injury import (  # noqa: E402
     InjuriesDataLoader,
 )
@@ -31,23 +35,31 @@ def main() -> None:
     parser.add_argument(
         "--season",
         type=int,
-        required=True,
-        help="Season year to load (e.g. 2025)",
+        default=None,
+        help="Season year to load (e.g. 2025). Defaults to current NFL season.",
     )
     parser.add_argument(
         "--week",
         type=int,
-        required=True,
-        help="Specific week to scrape (1-18 for regular season)",
+        default=None,
+        help="Week to load (1-18 regular season). Defaults to current NFL week.",
     )
     parser.add_argument(
         "--season-type",
         choices=_SEASON_TYPE_CHOICES,
-        default="reg",
-        help="Season phase to scrape (pre, reg, post)",
+        default=None,
+        help="Season phase (pre, reg, post). Defaults to current phase.",
     )
     args = parser.parse_args()
     setup_cli_logging(args)
+
+    detected_week, detected_type = get_current_week_and_season_type()
+    if args.season is None:
+        args.season = get_current_season()
+    if args.week is None:
+        args.week = detected_week
+    if args.season_type is None:
+        args.season_type = detected_type
 
     loader = InjuriesDataLoader()
     fetch_params = {
