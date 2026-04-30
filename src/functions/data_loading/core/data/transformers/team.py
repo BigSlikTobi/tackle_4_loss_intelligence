@@ -23,7 +23,11 @@ class TeamDataTransformer(BaseDataTransformer):
             or record.get("name")
         )
         abbr = abbr.upper() if isinstance(abbr, str) else abbr
-        conference = (record.get("team_conference") or record.get("conference"))
+        conference = (
+            record.get("team_conference")
+            or record.get("team_conf")  # nflreadpy.load_teams() column name
+            or record.get("conference")
+        )
         division = (record.get("team_division") or record.get("division"))
         nick = nickname
         updated_at = record.get("updated_at") or record.get("last_modified_date")

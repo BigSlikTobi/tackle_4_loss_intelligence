@@ -1,0 +1,76 @@
+name: Recompute NFL Standings
+
+on:
+  # Run after the games loader finishes (workflow_run trigger). Filters to
+  # successful runs so we don't recompute on top of a failed games load.
+  workflow_run:
+    workflows: ["Load NFL Games Schedule"]
+    types: [completed]
+
+  # Safety-net cron during the regular season — Tuesday + Wednesday mornings
+  # ET (after Monday Night Football has settled).
+  # Tue 11:00 UTC ≈ 6/7 AM ET; Wed 11:00 UTC ≈ 6/7 AM ET.
+  schedule:
+    - cron: '0 11 * * 2'
+    - cron: '0 11 * * 3'
+
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "Season year (defaults to current)"
+        required: false
+        type: string
+      through_week:
+        description: "Snapshot through this week (defaults to latest completed)"
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  recompute-standings:
+    # On workflow_run, only run if the upstream games load actually succeeded.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/functions/data_loading/requirements.txt
+
+      - name: Recompute standings
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          INPUT_SEASON: ${{ github.event.inputs.season }}
+          INPUT_THROUGH_WEEK: ${{ github.event.inputs.through_week }}
+        run: |
+          ARGS="--log-level INFO"
+          if [ -n "$INPUT_SEASON" ]; then
+            ARGS="$ARGS --season $INPUT_SEASON"
+          fi
+          if [ -n "$INPUT_THROUGH_WEEK" ]; then
+            ARGS="$ARGS --through-week $INPUT_THROUGH_WEEK"
+          fi
+          python src/functions/data_loading/scripts/standings_cli.py $ARGS
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ $? -eq 0 ]; then
+            echo "✅ Standings recomputed successfully"
+          else
+            echo "❌ Standings recompute failed"
+            exit 1
+          fi
