@@ -176,6 +176,55 @@ and writes history-preserving rows keyed by
   `scripts/get_current_week.py`; `ModuleNotFoundError: src` indicates
   `PYTHONPATH` was not pointed at the repo root.
 
+### Standings Loader
+
+```bash
+python scripts/standings_cli.py [--season 2024] [--through-week 18] [--dry-run]
+python scripts/standings_cli.py --show --conference AFC      # read-back AFC seeds 1-7
+python scripts/standings_cli.py --show --division "AFC East" # read-back one division
+```
+
+Computes NFL standings on top of the persisted `games` + `teams` tables and
+upserts one row per team into the `standings` table, keyed on
+`(season, through_week, team_abbr)`. Historical snapshots are preserved.
+
+- **Database schema:** run `docs/standings_schema.sql` once via the Supabase
+  SQL editor. The script creates the table, the supporting indexes, and a
+  public-read RLS policy so the Flutter client can read with the anon key.
+- **Rankings produced per row:** `division_rank` (1–4 within the division),
+  `conference_rank` (1–N within the conference, full ordering — playoff and
+  non-playoff teams), `conference_seed` (1–7 — playoff seeds only, otherwise
+  null), and `league_rank` (1–N across all 32 teams, ordered by win% →
+  point diff → points scored → alphabetical).
+- **Tiebreakers:** full NFL division and wild-card cascades — head-to-head,
+  division record, common-games (≥4), conference record, strength of victory,
+  strength of schedule, conference + overall points ranks, and net point
+  totals. Each team's `tiebreaker_trail` JSONB column records which step
+  finalized its placement (`["WPCT","H2H"]`, `["WPCT","DIV"]`, etc.). The
+  `tied` boolean flags any team that fell through to the deterministic
+  alphabetical fallback (extremely rare).
+- **Known limitations:** net-touchdowns tiebreaker is skipped (not in the
+  `games` schema); `clinched` flags are reserved but always `null` in v1.
+- **CLI flags:** `--season`, `--through-week N`, `--dry-run`, `--json`,
+  plus `--show` / `--conference` / `--division` for read-back.
+- **Automation:** `.github/workflows/standings-recompute.yml` runs after the
+  games loader workflow succeeds (workflow_run trigger) and as a Tue/Wed
+  morning safety-net cron. Manual runs via `workflow_dispatch` accept
+  optional `season` and `through_week` inputs.
+- **Flutter consumption:** read directly from Supabase with the anon key:
+
+  ```dart
+  final rows = await supabase
+      .from('standings')
+      .select()
+      .eq('season', 2024)
+      .eq('through_week', 18)
+      .eq('conference', 'AFC')
+      .order('conference_seed', nullsFirst: false);
+  ```
+
+  No HTTP function call needed; standings are precomputed.
+
 ## Syncing Data from Live ➡️ Local
 
 You can sync data from a "Live" (Source) Supabase instance to your "Local"
