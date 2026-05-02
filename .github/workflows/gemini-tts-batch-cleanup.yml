@@ -1,0 +1,35 @@
+name: gemini-tts-batch cleanup
+
+on:
+  schedule:
+    # Every 5 minutes — deletes expired rows and re-POSTs stale queued/running
+    # jobs so a dropped self-invoke doesn't leave a job stuck forever.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install minimal deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'supabase>=2.3.0' 'requests>=2.31.0' 'python-dotenv>=1.0.0'
+
+      - name: Run cleanup
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          WORKER_URL: ${{ secrets.GEMINI_TTS_BATCH_WORKER_URL }}
+          WORKER_TOKEN: ${{ secrets.GEMINI_TTS_BATCH_WORKER_TOKEN }}
+        run: |
+          python -m src.functions.gemini_tts_batch_service.scripts.cleanup_expired_jobs_cli \
+            --service gemini_tts_batch \
+            --requeue-stale
