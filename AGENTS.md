@@ -239,7 +239,7 @@ cp .env.example .env  # Edit with module-specific config
   # Module-specific
   venv/bin/python -m pytest tests/news_extraction -v
   ```
-- Current coverage: `tests/news_extraction/` (7 tests — pipeline integration + regressions)
+- Current coverage: `tests/news_extraction/` (11 tests — pipeline integration + regressions)
 - For manual verification:
   - Run loaders with `--dry-run` and confirm record counts
   - Test module independence: `rm -rf src/functions/<module>` and verify others work

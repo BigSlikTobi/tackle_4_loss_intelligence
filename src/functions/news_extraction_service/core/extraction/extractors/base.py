@@ -99,7 +99,12 @@ class BaseExtractor(ABC):
         get item-level filtering for free.
         """
         title = kwargs.get("title")
-        is_nfl = _looks_nfl(url, title)
+        # Trust feed-context: when the source's own feed URL is NFL-specific
+        # (e.g. https://sports.yahoo.com/nfl/rss/), every item it returns is
+        # NFL by definition — even if the per-article URL no longer carries
+        # a /nfl/ path segment after a publisher URL-structure change.
+        feed_url = getattr(source, "url", None)
+        is_nfl = _looks_nfl(url, title) or (bool(feed_url) and _looks_nfl(feed_url))
         if source.nfl_only and not is_nfl:
             return None
         return NewsItem(

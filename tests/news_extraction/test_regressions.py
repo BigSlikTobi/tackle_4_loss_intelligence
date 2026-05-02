@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pytest
 
@@ -322,6 +322,53 @@ def test_extractor_drops_non_nfl_items_from_nfl_only_source():
     )
     assert soccer_general is not None
     assert soccer_general.is_nfl_content is False
+
+
+def test_extractor_trusts_nfl_specific_feed_url():
+    """Issue #136: Yahoo restructured article URLs from /nfl/article/... to
+    /articles/..., which made every item fail the per-URL /nfl/ regex even
+    though the feed itself (https://sports.yahoo.com/nfl/rss/) is NFL-only.
+    The fix: when source.url is itself NFL-specific, trust the feed context.
+    """
+    from src.functions.news_extraction.core.extractors.base import BaseExtractor
+
+    @dataclass
+    class _Cfg:
+        name: str = "Yahoo"
+        type: str = "rss"
+        publisher: str = "Yahoo"
+        nfl_only: bool = True
+        url: Optional[str] = "https://sports.yahoo.com/nfl/rss/"
+
+    class _C(BaseExtractor):
+        def extract(self, *args, **kwargs):  # pragma: no cover - unused
+            return []
+
+    extractor = _C(http_client=None)
+    item = extractor._create_news_item(
+        url="https://sports.yahoo.com/articles/rams-counting-emmanuel-forbes-161945206.html",
+        source=_Cfg(),
+        title="Rams counting on Emmanuel Forbes",
+    )
+    assert item is not None
+    assert item.is_nfl_content is True
+
+    # Non-NFL feed URL (e.g. ESPN's general /espn/rss/news) must NOT trust feed
+    # context — per-item URL filtering still applies.
+    @dataclass
+    class _CfgGeneralFeed:
+        name: str = "ESPN-general"
+        type: str = "rss"
+        publisher: str = "ESPN"
+        nfl_only: bool = True
+        url: Optional[str] = "https://www.espn.com/espn/rss/news"
+
+    soccer = extractor._create_news_item(
+        url="https://www.espn.com/soccer/story/abc",
+        source=_CfgGeneralFeed(),
+        title="Premier League update",
+    )
+    assert soccer is None
 
 
 def test_rate_limiter_is_thread_safe():
