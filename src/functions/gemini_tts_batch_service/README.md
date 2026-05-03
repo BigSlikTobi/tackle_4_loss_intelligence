@@ -2,8 +2,12 @@
 
 Async Gemini TTS batch service using the **submit / poll / worker** pattern
 from `article_knowledge_extraction` and `url_content_extraction_service`.
-This module wraps the legacy synchronous `gemini_tts_batch` Cloud Function
-in the shared async-job protocol.
+
+This module is **self-contained**: the TTS batch implementation lives in
+`core/tts/` and is owned by this module. It does not import from the
+legacy `gemini_tts_batch` package — that constraint is what keeps the
+function-isolation rule intact (each function module must be independently
+deployable and deletable).
 
 Three job types correspond one-to-one to the legacy actions:
 
@@ -138,9 +142,12 @@ runs every 5 minutes and:
 ## Migration phasing
 
 Phase A (this PR): the new service ships and deploys alongside the legacy
-`gemini_tts_batch` Cloud Function. The legacy module is **not** modified.
+`gemini_tts_batch` Cloud Function. The TTS implementation in `core/tts/`
+is a deliberate copy of the legacy module's `core/` so the new service is
+independently deployable; the legacy module is **not** modified or imported.
 
 Phase B: switch downstream callers (workflows, other modules) over to the
 async submit/poll surface one at a time.
 
-Phase C: once nothing references the legacy module, delete it.
+Phase C: once nothing references the legacy module, delete its directory
+in one shot — `core/tts/` here is the authoritative implementation.

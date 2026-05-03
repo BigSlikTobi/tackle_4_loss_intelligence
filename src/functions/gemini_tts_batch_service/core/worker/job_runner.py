@@ -127,18 +127,22 @@ def _validate_input(payload: Dict[str, Any]) -> str:
 
 
 def _default_dispatch(action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the legacy pydantic request and call into ``TTSBatchService``.
+    """Build the pydantic request and call into ``TTSBatchService``.
 
     Imports are lazy so tests that patch ``_default_dispatch`` (or pass their
     own ``dispatch_fn``) don't pull in google-genai / pydub.
+
+    The TTS implementation lives inside this module (``..tts``) — importing it
+    from the legacy ``gemini_tts_batch`` package would break function-based
+    isolation (each function module must be independently deployable).
     """
-    from src.functions.gemini_tts_batch.core.config import (
+    from ..tts.config import (
         CreateBatchRequest,
         ProcessBatchRequest,
         StatusBatchRequest,
         SupabaseStorageConfig,
     )
-    from src.functions.gemini_tts_batch.core.service import TTSBatchService
+    from ..tts.service import TTSBatchService
 
     service = TTSBatchService()
     try:
