@@ -109,7 +109,11 @@ class SubmitRequest:
                 raise ValueError("process payload is required for action=process")
             self.process_input.validate()
         if self.supabase is None or not self.supabase.url or not self.supabase.key:
-            raise ValueError("supabase.url and supabase.key are required")
+            raise ValueError(
+                "Supabase config is not available: set SUPABASE_URL and "
+                "SUPABASE_SERVICE_ROLE_KEY in the function environment "
+                "(callers must not send these in the request body)."
+            )
 
 
 @dataclass
@@ -123,7 +127,11 @@ class PollRequest:
         if not self.job_id:
             raise ValueError("job_id is required")
         if self.supabase is None or not self.supabase.url or not self.supabase.key:
-            raise ValueError("supabase.url and supabase.key are required")
+            raise ValueError(
+                "Supabase config is not available: set SUPABASE_URL and "
+                "SUPABASE_SERVICE_ROLE_KEY in the function environment "
+                "(callers must not send these in the request body)."
+            )
 
 
 @dataclass
@@ -137,4 +145,8 @@ class WorkerRequest:
         if not self.job_id:
             raise ValueError("job_id is required")
         if self.supabase is None or not self.supabase.url or not self.supabase.key:
-            raise ValueError("supabase.url and supabase.key are required")
+            raise ValueError(
+                "Supabase config is not available: set SUPABASE_URL and "
+                "SUPABASE_SERVICE_ROLE_KEY in the function environment "
+                "(callers must not send these in the request body)."
+            )

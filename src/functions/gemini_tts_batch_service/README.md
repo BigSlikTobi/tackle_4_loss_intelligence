@@ -46,8 +46,14 @@ Endpoints (deployed as separate Cloud Functions, share the same source zip):
 
 ## Request payloads
 
-`/submit` is action-discriminated. Every payload also requires
-`supabase.url` (the jobs DB) and Authorization bearer auth.
+`/submit` is action-discriminated. The Authorization bearer is required;
+the jobs DB URL **and** key are both read from the function's runtime env
+(`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`). Any `supabase` block in the
+payload is ignored for `url`/`key` — this is a deliberate confused-deputy
+defence so an authenticated caller cannot point the function's service-role
+token at an attacker-controlled host. The optional `supabase.jobs_table`
+override is still honoured (it's a low-risk discriminator inside the same
+project).
 
 ### action=create
 
@@ -58,8 +64,7 @@ Endpoints (deployed as separate Cloud Functions, share the same source zip):
   "voice_name": "Charon",
   "items": [
     {"id": "story-1", "text": "...", "title": "..."}
-  ],
-  "supabase": {"url": "https://JOBS-PROJECT.supabase.co"}
+  ]
 }
 ```
 
@@ -68,8 +73,7 @@ Endpoints (deployed as separate Cloud Functions, share the same source zip):
 ```json
 {
   "action": "status",
-  "batch_id": "batches/abc123",
-  "supabase": {"url": "https://JOBS-PROJECT.supabase.co"}
+  "batch_id": "batches/abc123"
 }
 ```
 
@@ -84,8 +88,7 @@ project's URL+key are read from the worker's env (`STORAGE_SUPABASE_URL` /
 {
   "action": "process",
   "batch_id": "batches/abc123",
-  "storage": {"bucket": "audio", "path_prefix": "gemini-tts-batch"},
-  "supabase": {"url": "https://JOBS-PROJECT.supabase.co"}
+  "storage": {"bucket": "audio", "path_prefix": "gemini-tts-batch"}
 }
 ```
 

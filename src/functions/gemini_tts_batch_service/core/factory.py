@@ -18,20 +18,29 @@ from .config import (
 )
 
 
-def _parse_supabase(payload: Optional[Dict[str, Any]]) -> Optional[SupabaseConfig]:
-    """Hydrate SupabaseConfig from payload url/jobs_table + env-provided key.
+def _build_supabase(payload: Optional[Dict[str, Any]]) -> Optional[SupabaseConfig]:
+    """Build SupabaseConfig from runtime env, ignoring caller-supplied URLs.
 
-    Callers never send the service-role key in the request body; the function
-    reads it from its own runtime env (``SUPABASE_SERVICE_ROLE_KEY``).
+    The Cloud Function is bound to one Supabase project via its deployment
+    env (``SUPABASE_URL`` + ``SUPABASE_SERVICE_ROLE_KEY``). Both values are
+    read here; nothing is taken from the request body. This closes a
+    confused-deputy vector where an authenticated caller could point the
+    function's service-role token at an attacker-controlled host by passing
+    ``supabase.url`` in the payload.
+
+    The optional ``jobs_table`` override is still honoured because it's a
+    low-risk discriminator inside the same project (and existing callers
+    rely on the default ``extraction_jobs``).
     """
-    if payload is None:
-        return None
-    if not isinstance(payload, dict):
+    if payload is not None and not isinstance(payload, dict):
         raise ValueError("supabase must be an object when provided")
+    jobs_table = "extraction_jobs"
+    if isinstance(payload, dict):
+        jobs_table = str(payload.get("jobs_table") or jobs_table)
     return SupabaseConfig(
-        url=payload.get("url", ""),
+        url=os.getenv("SUPABASE_URL", ""),
         key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
-        jobs_table=payload.get("jobs_table", "extraction_jobs"),
+        jobs_table=jobs_table,
     )
 
 
@@ -66,7 +75,7 @@ def submit_request_from_payload(payload: Dict[str, Any]) -> SubmitRequest:
 
     request = SubmitRequest(
         action=action,
-        supabase=_parse_supabase(payload.get("supabase")),
+        supabase=_build_supabase(payload.get("supabase")),
     )
 
     if action == "create":
@@ -94,7 +103,7 @@ def submit_request_from_payload(payload: Dict[str, Any]) -> SubmitRequest:
 def poll_request_from_payload(payload: Dict[str, Any]) -> PollRequest:
     request = PollRequest(
         job_id=str(payload.get("job_id") or ""),
-        supabase=_parse_supabase(payload.get("supabase")),
+        supabase=_build_supabase(payload.get("supabase")),
     )
     request.validate()
     return request
@@ -103,7 +112,7 @@ def poll_request_from_payload(payload: Dict[str, Any]) -> PollRequest:
 def worker_request_from_payload(payload: Dict[str, Any]) -> WorkerRequest:
     request = WorkerRequest(
         job_id=str(payload.get("job_id") or ""),
-        supabase=_parse_supabase(payload.get("supabase")),
+        supabase=_build_supabase(payload.get("supabase")),
     )
     request.validate()
     return request

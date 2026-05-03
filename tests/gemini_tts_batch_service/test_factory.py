@@ -14,12 +14,23 @@ from src.functions.gemini_tts_batch_service.core.factory import (
 
 
 @pytest.fixture(autouse=True)
-def _service_key(monkeypatch):
+def _supabase_env(monkeypatch):
+    """SupabaseConfig is built entirely from env (issue: confused-deputy fix).
+
+    Both URL and key are read from the function's runtime env; callers cannot
+    influence them via the request body.
+    """
+    monkeypatch.setenv("SUPABASE_URL", "https://env.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-key")
 
 
 def _supabase() -> dict:
-    return {"url": "https://x.supabase.co"}
+    """Caller-supplied supabase block — should be IGNORED for url/key.
+
+    Kept in payloads only to exercise the legacy field-tolerance path; the
+    factory must not honour any url/key here.
+    """
+    return {"url": "https://attacker.example.com"}
 
 
 def _create_payload(**overrides) -> dict:
@@ -119,32 +130,61 @@ def test_submit_process_rejects_missing_batch_id():
         submit_request_from_payload({"action": "process", "supabase": _supabase()})
 
 
-def test_submit_rejects_missing_supabase():
-    with pytest.raises(ValueError, match="supabase.url and supabase.key are required"):
-        submit_request_from_payload(
-            {
-                "action": "create",
-                "model_name": "m",
-                "items": [{"id": "a", "text": "t"}],
-            }
-        )
+def test_submit_accepts_request_without_supabase_block():
+    """No payload supabase block is fine — config comes from env."""
+    req = submit_request_from_payload(
+        {
+            "action": "create",
+            "model_name": "m",
+            "items": [{"id": "a", "text": "t"}],
+        }
+    )
+    assert req.supabase.url == "https://env.supabase.co"
+    assert req.supabase.key == "test-key"
 
 
-def test_submit_rejects_when_service_role_key_unset(monkeypatch):
-    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
-    with pytest.raises(ValueError, match="supabase.url and supabase.key are required"):
+def test_submit_pins_url_to_env_ignoring_caller_supplied_url():
+    """Confused-deputy fix: caller-supplied supabase.url MUST be ignored."""
+    req = submit_request_from_payload(_create_payload())
+    # _supabase() sends https://attacker.example.com — must not propagate.
+    assert req.supabase.url == "https://env.supabase.co"
+    assert req.supabase.key == "test-key"
+
+
+def test_submit_rejects_when_supabase_url_env_unset(monkeypatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
         submit_request_from_payload(_create_payload())
 
 
-def test_poll_requires_job_id_and_supabase():
+def test_submit_rejects_when_service_role_key_env_unset(monkeypatch):
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    with pytest.raises(ValueError, match="SUPABASE_SERVICE_ROLE_KEY"):
+        submit_request_from_payload(_create_payload())
+
+
+def test_poll_requires_job_id():
     with pytest.raises(ValueError, match="job_id is required"):
         poll_request_from_payload({"supabase": _supabase()})
-    with pytest.raises(ValueError, match="supabase"):
+
+
+def test_poll_uses_env_supabase_when_payload_block_missing():
+    req = poll_request_from_payload({"job_id": "abc"})
+    assert req.supabase.url == "https://env.supabase.co"
+
+
+def test_poll_rejects_when_supabase_env_unset(monkeypatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    with pytest.raises(ValueError, match="SUPABASE_URL"):
         poll_request_from_payload({"job_id": "abc"})
 
 
-def test_worker_requires_job_id_and_supabase():
-    with pytest.raises(ValueError):
+def test_worker_requires_job_id():
+    with pytest.raises(ValueError, match="job_id is required"):
         worker_request_from_payload({"job_id": ""})
+
+
+def test_worker_pins_url_to_env_ignoring_caller_supplied_url():
     req = worker_request_from_payload({"job_id": "abc", "supabase": _supabase()})
     assert req.job_id == "abc"
+    assert req.supabase.url == "https://env.supabase.co"

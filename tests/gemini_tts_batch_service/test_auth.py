@@ -41,7 +41,9 @@ def _payload() -> Dict[str, Any]:
 
 
 def _reload_main(monkeypatch):
-    # Worker request validation requires the supabase key — hydrated from env.
+    # Worker request validation requires the supabase URL + key — both
+    # hydrated from env (caller-supplied URLs are ignored, see factory.py).
+    monkeypatch.setenv("SUPABASE_URL", "https://env.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-key")
     from src.functions.gemini_tts_batch_service.functions import main as mod
 
