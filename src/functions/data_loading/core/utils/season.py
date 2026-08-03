@@ -1,7 +1,7 @@
 """Helpers for inferring the current NFL season, week, and season type.
 
 IMPORTANT: Update SEASON_START / PRESEASON_START at the start of each new
-NFL season. Defaults are encoded for the 2025 season.
+NFL season. Defaults are encoded for the 2026 season.
 """
 
 from __future__ import annotations
@@ -10,13 +10,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 
-# NFL 2025 Season Key Dates
-# Regular season starts the first Thursday in September.
-SEASON_START = datetime(2025, 9, 4, tzinfo=timezone.utc)
+# NFL 2026 Season Key Dates
+# Regular season starts September 9, 2026 (Wednesday kickoff game, Seahawks vs Patriots on NBC).
+SEASON_START = datetime(2026, 9, 9, tzinfo=timezone.utc)
 REGULAR_SEASON_WEEKS = 18
 
 # Preseason runs ~3 weeks before the regular season opener.
-PRESEASON_START = datetime(2025, 8, 7, tzinfo=timezone.utc)
+PRESEASON_START = datetime(2026, 8, 6, tzinfo=timezone.utc)
 PRESEASON_WEEKS = 3
 
 # The postseason has 4 weeks (Wild Card, Divisional, Conference, Super Bowl).
